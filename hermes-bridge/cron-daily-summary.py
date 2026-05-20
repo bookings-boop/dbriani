@@ -101,6 +101,15 @@ def main():
             L.append(f"  • {m[0]} — {m[1] if len(m) > 1 else '?'}")
         L.append("")
 
+    caps = psql("SELECT kind, count(*) FROM autonomous_sends WHERE sent_at >= "
+                "date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
+                "AT TIME ZONE 'Asia/Dubai' GROUP BY kind")
+    cap_n = {c[0]: c[1] for c in caps if len(c) >= 2}
+    L.append(f"🧮 Autonomous caps (today): {cap_n.get('auto','0')} auto-sent, "
+             f"{cap_n.get('checkpoint','0')} checkpoints, "
+             f"{cap_n.get('intervention','0')} operator interventions")
+    L.append("")
+
     L.append("— Hermes")
     msg = "\n".join(L)[:4000]
     print("daily summary sent" if tg_send(msg) else "daily summary send FAILED")

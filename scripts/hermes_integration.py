@@ -641,13 +641,92 @@ def _apply_8(wf):
     return True
 
 
+# --- Step §5.7 — autonomous-mode safety caps -------------------------------
+
+ID_GET_CAPS = _uid("node/get-caps")
+ID_SEND_CAPS = _uid("node/send-caps")
+ID_COND_CAPS = _uid("cond/route-text-caps")
+BRIDGE_CAPS_URL = "http://172.18.0.1:8788/caps"
+
+SEND_CAPS_BODY = r'''={
+  "chat_id": {{ $('Process Text Reply').item.json.admin_chat_id }},
+  "text": {{ JSON.stringify($json.text || "(no cap data)") }}
+}'''
+
+
+def _apply_caps(wf):
+    by = {n["name"]: n for n in wf["nodes"]}
+    if "Get Caps" in by:
+        return False
+    for req in ["Parse Response", "IF Autonomous", "Process Text Reply",
+                "Route Text Action"]:
+        if req not in by:
+            raise SystemExit(f"x caps: expected node '{req}' not found")
+
+    # 1. Parse Response surfaces auto_send (the cap-gated decision)
+    pr = by["Parse Response"]["parameters"]
+    a0 = "  conversation_mode: (r && r.conversation_mode) || 'approval',"
+    if a0 not in pr["jsCode"]:
+        raise SystemExit("x caps: Parse Response conversation_mode anchor missing")
+    pr["jsCode"] = pr["jsCode"].replace(
+        a0, a0 + "\n  auto_send: (r && r.auto_send === true),", 1)
+
+    # 2. IF Autonomous now gates on auto_send (caps applied) not the raw mode
+    cond = by["IF Autonomous"]["parameters"]["conditions"]["conditions"][0]
+    cond["leftValue"] = "={{ $json.auto_send }}"
+    cond["rightValue"] = ""
+    cond["operator"] = {"type": "boolean", "operation": "true", "singleValue": True}
+
+    # 3. Process Text Reply recognises /caps
+    ptr = by["Process Text Reply"]["parameters"]
+    a1 = "mode_label: 'ALL conversations', admin_chat_id: adminChatId } };\n}"
+    if a1 not in ptr["jsCode"]:
+        raise SystemExit("x caps: Process Text Reply /manual anchor missing")
+    ptr["jsCode"] = ptr["jsCode"].replace(
+        a1, a1 + "\n\n// caps: /caps inspects the autonomous-mode safety caps\n"
+        "if (text.toLowerCase().trim() === '/caps') {\n"
+        "  return { json: { action: 'caps', admin_chat_id: adminChatId } };\n}", 1)
+
+    # 4. Route Text Action gains a `caps` rule
+    by["Route Text Action"]["parameters"]["rules"]["values"].append({
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": "",
+                        "typeValidation": "loose"},
+            "conditions": [{
+                "id": ID_COND_CAPS,
+                "leftValue": "={{ $json.action }}",
+                "rightValue": "caps",
+                "operator": {"type": "string", "operation": "equals"},
+            }],
+            "combinator": "and",
+        },
+        "renameOutput": True, "outputKey": "caps",
+    })
+
+    # 5. nodes
+    wf["nodes"].append(_http_node(ID_GET_CAPS, "Get Caps", [1100, 460],
+                                  BRIDGE_CAPS_URL, "={}", credential=True))
+    wf["nodes"].append(_http_node(ID_SEND_CAPS, "Send Caps", [1320, 460],
+                                  TG_URL + "sendMessage", SEND_CAPS_BODY))
+
+    # 6. connections
+    c = wf["connections"]
+    rta = c.setdefault("Route Text Action", {"main": []})
+    while len(rta["main"]) < 4:
+        rta["main"].append([])
+    rta["main"].append([_conn("Get Caps")])   # output 4 = caps
+    c["Get Caps"] = {"main": [[_conn("Send Caps")]]}
+    return True
+
+
 def surgery(wf):
-    """Apply Steps 3d + 4 + 5.3 + 8 idempotently. Returns (wf, changed)."""
+    """Apply Steps 3d + 4 + 5.3 + 8 + caps idempotently. Returns (wf, changed)."""
     c3 = _apply_3d(wf)
     c4 = _apply_4(wf)
     c5 = _apply_5(wf)
     c8 = _apply_8(wf)
-    return wf, (c3 or c4 or c5 or c8)
+    cc = _apply_caps(wf)
+    return wf, (c3 or c4 or c5 or c8 or cc)
 
 
 def main():
@@ -666,6 +745,7 @@ def main():
     print("    4:   reply-to-pending-draft -> refine loop")
     print("    5.3: refinement -> suggested rule -> [Save as rule] -> /save-rule")
     print("    8:   IF Autonomous auto-send branch + set_mode operator commands")
+    print("    caps: auto-send gated on cap decision; /caps command")
     print("    next: run scripts/build_workflow.py")
 
 

@@ -18,6 +18,7 @@ Stdlib only. Runs as the systemd user service hermes-bridge.service.
 """
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -36,6 +37,21 @@ HERMES_TIMEOUT = int(os.environ.get("BRIDGE_HERMES_TIMEOUT", "120"))
 PG_CONTAINER = os.environ.get("BRIDGE_PG_CONTAINER", "n8n-postgres-1")
 PG_USER = os.environ.get("BRIDGE_PG_USER", "hermes_rw")
 PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
+
+
+def _envflag(key, default):
+    return os.environ.get(key, default).strip().lower() in ("true", "1", "yes")
+
+
+# Autonomous-mode safety caps (spec §5.7) — all default ON.
+CAP_DAILY_ACTIVE = _envflag("CAP_DAILY_ACTIVE", "true")
+CAP_DAILY_LIMIT = int(os.environ.get("CAP_DAILY_LIMIT", "20"))
+CAP_CONSEC_ACTIVE = _envflag("CAP_CONSECUTIVE_ACTIVE", "true")
+CAP_CONSEC_LIMIT = int(os.environ.get("CAP_CONSECUTIVE_LIMIT", "5"))
+CAP_SAMPLE_ACTIVE = _envflag("CAP_SAMPLE_ACTIVE", "true")
+CAP_SAMPLE_PCT = float(os.environ.get("CAP_SAMPLE_PCT", "5"))
+DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
+                  "AT TIME ZONE 'Asia/Dubai'")
 
 SESSION_RE = re.compile(r"session_id:\s*(\S+)")
 FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
@@ -186,7 +202,10 @@ def set_mode(customer_id, mode, activated_by):
     )
     try:
         _, err = _psql(sql)
-        return (None, err) if err else (mode, None)
+        if err:
+            return None, err
+        log_autosend(customer_id, "intervention")  # resets the consecutive streak
+        return mode, None
     except Exception as e:
         return None, repr(e)
 
@@ -205,6 +224,90 @@ def manual_killswitch():
         return (err is None), err
     except Exception as e:
         return False, repr(e)
+
+
+# --- autonomous-mode safety caps (§5.7) ------------------------------------
+
+def _count(sql):
+    out, err = _psql(sql)
+    if err:
+        return None
+    try:
+        return int((out or "0").strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def cap_daily_count():
+    """Auto-sends already made today (00:00 Asia/Dubai)."""
+    n = _count("SELECT count(*) FROM autonomous_sends WHERE kind='auto' "
+               f"AND sent_at >= {DUBAI_MIDNIGHT}")
+    return n if n is not None else CAP_DAILY_LIMIT  # fail-closed: assume full
+
+
+def cap_consecutive(customer_id):
+    """Consecutive auto-sends for a customer since the last checkpoint or
+    operator intervention."""
+    cid = (customer_id or "").replace("'", "''")
+    n = _count(
+        f"SELECT count(*) FROM autonomous_sends WHERE customer_id='{cid}' "
+        "AND kind='auto' AND id > COALESCE((SELECT max(id) FROM autonomous_sends "
+        f"WHERE customer_id='{cid}' AND kind IN ('checkpoint','intervention')), 0)")
+    return n if n is not None else CAP_CONSEC_LIMIT  # fail-closed
+
+
+def log_autosend(customer_id, kind):
+    """Record an autonomous-mode event: kind = auto | checkpoint | intervention."""
+    cid = (customer_id or "").replace("'", "''")
+    k = kind if kind in ("auto", "checkpoint", "intervention") else "auto"
+    _psql(f"INSERT INTO autonomous_sends (customer_id, kind) VALUES ('{cid}', '{k}')")
+
+
+def evaluate_caps(customer_id):
+    """Decide whether an autonomous draft may auto-send. Returns (ok, reason).
+    Fail-closed — any uncertainty routes the draft to approval."""
+    try:
+        if CAP_DAILY_ACTIVE:
+            used = cap_daily_count()
+            if used >= CAP_DAILY_LIMIT:
+                return False, f"daily cap reached ({used}/{CAP_DAILY_LIMIT})"
+        if CAP_CONSEC_ACTIVE:
+            consec = cap_consecutive(customer_id)
+            if consec >= CAP_CONSEC_LIMIT:
+                log_autosend(customer_id, "checkpoint")
+                return False, (f"checkpoint after {consec} consecutive "
+                               "auto-sends — this one needs your approval")
+        if CAP_SAMPLE_ACTIVE and random.random() < (CAP_SAMPLE_PCT / 100.0):
+            return False, f"QC sample ({CAP_SAMPLE_PCT:g}%) — routed for your review"
+        return True, "ok"
+    except Exception as e:
+        log("evaluate_caps error:", repr(e))
+        return False, "cap-check error — routed to approval (fail-closed)"
+
+
+def caps_status_text():
+    """Human-readable cap status for the /caps command + daily digest."""
+    used = cap_daily_count()
+    auton = _count("SELECT count(*) FROM (SELECT DISTINCT ON (customer_id) mode "
+                   "FROM conversation_modes ORDER BY customer_id, id DESC) s "
+                   "WHERE mode='autonomous'")
+    today = _count("SELECT count(*) FROM autonomous_sends WHERE kind='auto' "
+                   f"AND sent_at >= {DUBAI_MIDNIGHT}") or 0
+    chk = _count("SELECT count(*) FROM autonomous_sends WHERE kind='checkpoint' "
+                 f"AND sent_at >= {DUBAI_MIDNIGHT}") or 0
+    return "\n".join([
+        "🧮 Autonomous-mode safety caps",
+        "",
+        f"1. Daily cap: {'ON' if CAP_DAILY_ACTIVE else 'OFF'} — "
+        f"{used}/{CAP_DAILY_LIMIT} auto-sends used today (Dubai)",
+        f"2. Per-conversation: {'ON' if CAP_CONSEC_ACTIVE else 'OFF'} — "
+        f"checkpoint every {CAP_CONSEC_LIMIT} consecutive",
+        f"3. QC sampling: {'ON' if CAP_SAMPLE_ACTIVE else 'OFF'} — "
+        f"{CAP_SAMPLE_PCT:g}% of auto-sends routed to approval",
+        "",
+        f"Conversations in autonomous mode: {auton if auton is not None else '?'}",
+        f"Today: {today} auto-sent, {chk} checkpoints",
+    ])
 
 
 # --- drafting --------------------------------------------------------------
@@ -357,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/draft", "/save-rule", "/set-mode"):
+        if self.path not in ("/draft", "/save-rule", "/set-mode", "/caps"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -373,6 +476,8 @@ class Handler(BaseHTTPRequestHandler):
             self._save_rule(payload)
         elif self.path == "/set-mode":
             self._set_mode(payload)
+        elif self.path == "/caps":
+            self._send(200, {"ok": True, "text": caps_status_text()})
         else:
             self._draft(payload)
 
@@ -428,10 +533,19 @@ class Handler(BaseHTTPRequestHandler):
             if not trig_id:
                 log("trigger save failed:", terr)
         conv_mode = get_mode(payload.get("customer_id"))
+        # Step §5.7: autonomous mode is gated by the safety caps
+        auto_send, auto_send_reason = False, ""
+        if conv_mode == "autonomous":
+            auto_send, auto_send_reason = evaluate_caps(payload.get("customer_id"))
+            if auto_send:
+                log_autosend(payload.get("customer_id"), "auto")
+            else:
+                notes = "🛑 autonomous → approval: " + auto_send_reason + "\n" + notes
         log(f"draft OK customer={payload.get('customer_name')!r} "
             f"mode={payload.get('mode', 'initial')} conv_mode={conv_mode} "
-            f"msgs={len(messages)} rule_suggested={sugg is not None} "
-            f"trigger={trig_id} elapsed={elapsed}ms session={sid}")
+            f"auto_send={auto_send} msgs={len(messages)} "
+            f"rule_suggested={sugg is not None} trigger={trig_id} "
+            f"elapsed={elapsed}ms session={sid}")
         self._send(200, {
             "ok": True,
             "messages": messages,
@@ -441,6 +555,8 @@ class Handler(BaseHTTPRequestHandler):
             "trigger_id": trig_id,
             "health": health,
             "conversation_mode": conv_mode,
+            "auto_send": auto_send,
+            "auto_send_reason": auto_send_reason,
             "raw": blob,
             "session_id": sid,
             "elapsed_ms": elapsed,

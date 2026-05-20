@@ -114,3 +114,29 @@ the docker network, so this is also the least-exposed path.
 - Draft/conversation **count** omitted — it needs n8n's `execution_entity`,
   which `hermes_rw` is deliberately not granted. The lists cover the
   actionable items. Minor.
+
+### §5.7 — autonomous-mode safety caps (deployed)
+- Three caps, evaluated in the bridge: **daily** (≤20 auto-sends/day, resets
+  00:00 Dubai), **per-conversation consecutive** (checkpoint every 5),
+  **random QC sampling** (5% of auto-sends → approval). All default ON;
+  configurable via `CAP_*` in `~/hermes-bridge/.env`.
+- The bridge computes `auto_send` = (mode `autonomous` AND all caps pass).
+  `IF Autonomous` now gates on `auto_send`, not the raw mode — fail-closed.
+- New table `autonomous_sends` (event log: `auto` / `checkpoint` /
+  `intervention`). `/caps` command + bridge endpoint; caps line in the digest.
+- ⚠️ The cap auto-send gating could **not be behaviourally tested** — see the
+  blocker below.
+
+### 🚨 BLOCKER (2026-05-21, ~03:20 Dubai) — Anthropic API access failing
+- Hermes → Anthropic returns `401 invalid x-api-key`, then `400` *"Third-party
+  apps now draw from your extra usage, not your plan limits — add more at
+  claude.ai/settings/usage"*.
+- Cause: the `ANTHROPIC_API_KEY` in `~/.hermes/.env` is invalid (revoked?)
+  and/or the Anthropic account has no usage credit for API/third-party use.
+- **Effect: all drafting is down** — every customer message → bridge → Hermes
+  → 401/400 → R1 alert. This is **not a code bug** — it is external (the
+  Anthropic account/key).
+- **Fix (operator):** put a valid key in `~/.hermes/.env` `ANTHROPIC_API_KEY`
+  and/or add usage at claude.ai/settings/usage, then
+  `systemctl --user restart hermes-bridge`. Drafting self-heals once the key
+  works — no redeploy needed.
