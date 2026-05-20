@@ -109,6 +109,36 @@ def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
         return None, repr(e)
 
 
+def save_trigger(customer_id, customer_name, trigger_type, reminder_hours,
+                 context, source_message, confidence):
+    """INSERT a customer_triggers row (status defaults to 'pending'). Returns
+    (trigger_id, None) or (None, error)."""
+    try:
+        hrs = max(1, min(720, int(reminder_hours)))
+    except (TypeError, ValueError):
+        hrs = 24
+    try:
+        conf = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        conf = 0.5
+    sql = (
+        "INSERT INTO customer_triggers (customer_id, customer_name, "
+        "trigger_type, reminder_date, trigger_context, source_message, "
+        "confidence) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(customer_name), _lit(trigger_type)])
+        + f", now() + interval '{hrs} hours', "
+        + ", ".join([_lit(context), _lit(source_message)])
+        + f", {conf}) RETURNING id"
+    )
+    try:
+        out, err = _psql(sql)
+        if err:
+            return None, err
+        return (out.strip().splitlines() or [""])[0].strip(), None
+    except Exception as e:
+        return None, repr(e)
+
+
 # --- drafting --------------------------------------------------------------
 
 def load_system_prompt():
@@ -168,13 +198,27 @@ def build_query(p):
             "one}. If it is a one-off, omit suggested_rule entirely."
         )
 
+    if not is_refine:
+        parts.append(
+            "\n--- TRIGGER DETECTION ---\n"
+            "Judge whether the customer's newest message contains a TIME-BOUND "
+            "COMMITMENT or PROMISE — e.g. \"I'll pay tomorrow\", \"let me confirm "
+            "with my wife by Saturday\", \"call me Monday\", \"send the deposit "
+            "tonight\". If it does, add a \"detected_trigger\" field to your JSON: "
+            "{\"type\": \"<short label, e.g. payment_promised | callback_promised "
+            "| decision_pending>\", \"reminder_hours\": <integer hours from now "
+            "when Zayn should follow up>, \"context\": \"<one line>\", "
+            "\"confidence\": <0.0-1.0>}. If there is no time-bound commitment, "
+            "omit detected_trigger."
+        )
+
+    extra = "\"suggested_rule\"" if is_refine else "\"detected_trigger\""
     parts.append(
         "\n--- RESPOND NOW ---\n"
         "Produce your reply using the EXACT JSON output format defined in your "
-        "instructions above (the object with \"messages\" and \"notes_for_zayn\""
-        + (", optionally plus \"suggested_rule\"" if is_refine else "")
-        + "). Output only that single JSON object — no markdown fences, no "
-        "commentary before or after it."
+        "instructions above (the object with \"messages\" and \"notes_for_zayn\", "
+        "optionally plus " + extra + "). Output only that single JSON object — "
+        "no markdown fences, no commentary before or after it."
     )
     return "\n".join(parts)
 
@@ -279,14 +323,28 @@ class Handler(BaseHTTPRequestHandler):
         sugg = parsed.get("suggested_rule")
         if not (isinstance(sugg, dict) and (sugg.get("text") or "").strip()):
             sugg = None
+        # Step 6: customer-promise trigger detection
+        trig = parsed.get("detected_trigger")
+        trig_id = None
+        if isinstance(trig, dict) and (trig.get("type") or "").strip():
+            trig_id, terr = save_trigger(
+                payload.get("customer_id"), payload.get("customer_name"),
+                trig.get("type"), trig.get("reminder_hours", 24),
+                trig.get("context", ""), payload.get("incoming_message", ""),
+                trig.get("confidence", 0.5))
+            if not trig_id:
+                log("trigger save failed:", terr)
         log(f"draft OK customer={payload.get('customer_name')!r} "
             f"mode={payload.get('mode', 'initial')} msgs={len(messages)} "
-            f"rule_suggested={sugg is not None} elapsed={elapsed}ms session={sid}")
+            f"rule_suggested={sugg is not None} trigger={trig_id} "
+            f"elapsed={elapsed}ms session={sid}")
         self._send(200, {
             "ok": True,
             "messages": messages,
             "notes_for_zayn": notes,
             "suggested_rule": sugg,
+            "detected_trigger": trig if trig_id else None,
+            "trigger_id": trig_id,
             "raw": blob,
             "session_id": sid,
             "elapsed_ms": elapsed,

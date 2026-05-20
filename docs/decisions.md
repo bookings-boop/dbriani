@@ -49,4 +49,28 @@ the docker network, so this is also the least-exposed path.
 
 ## Overnight session — step-by-step decisions
 
-(appended as the autonomous build proceeds)
+### Step 5.3 — rule capture (deployed)
+- 46-node workflow deployed; bridge `/save-rule` live. Captured rules insert
+  `active=false` (D3). `rule_id` parsing fixed (psql `-tA` also emits the
+  command tag — take line 1).
+
+### Step 6 — trigger detection + reminder cron (deployed)
+- **Detection in the bridge:** on every non-refine `/draft`, Hermes is asked to
+  return a `detected_trigger`; the bridge inserts it into `customer_triggers`
+  (status `pending`). No workflow change needed. Reversible.
+- **Reminder cron:** `~/hermes-bridge/cron-reminders.py`, system crontab every
+  15 min, quiet-hours aware (22:00–08:00 Dubai skipped). Marks each trigger
+  `reminded` so it fires once.
+- **Reminders go to the "Dubriani Hermes" bot**, not a separate admin bot — the
+  operator now lives in that one chat; the old `8569` bot stays retired. The
+  spec's two-bot split was dropped as needless friction (one operator, one
+  chat). Reversible — point `ADMIN_TG_TOKEN` elsewhere to change it.
+- **DEFERRED — manual trigger resolution** (`/resolve`, "Mariam paid"): not
+  built. Reminders fire once (pending→reminded), so there is no repeat spam;
+  marking `resolved`/`dismissed` is a SQL update for now. Flagged for review —
+  low risk, worth adding later as a Telegram command.
+- **DEFERRED — R1 error-alert night-queuing:** R1 alerts are not quiet-hours
+  gated. Judged low-value vs. effort: an R1 alert is informational ("nothing
+  was force-sent"), night customer traffic is low, and bridge restarts during
+  the build are the main (≈2s) risk window. Reminders and the daily summary
+  ARE quiet-hours aware. Flagged for review.
