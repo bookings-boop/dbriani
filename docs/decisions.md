@@ -74,3 +74,12 @@ the docker network, so this is also the least-exposed path.
   was force-sent"), night customer traffic is low, and bridge restarts during
   the build are the main (≈2s) risk window. Reminders and the daily summary
   ARE quiet-hours aware. Flagged for review.
+
+### Step 7 — conversation health scoring (deployed)
+- Hermes scores every initial draft's conversation health (good / warm /
+  at_risk / cold + reason). The bridge prepends "⚕️ <score> — <reason>" to the
+  operator notes (shows on the draft card with **no workflow change**) and
+  UPSERTs a snapshot into a new `conversation_health` table for the daily
+  summary.
+- Kept lean: one latest-snapshot row per customer, no per-draft history, no
+  separate health UI. Additive + reversible.

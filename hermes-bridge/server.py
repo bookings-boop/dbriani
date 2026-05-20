@@ -139,6 +139,24 @@ def save_trigger(customer_id, customer_name, trigger_type, reminder_hours,
         return None, repr(e)
 
 
+def save_health(customer_id, customer_name, score, reason):
+    """UPSERT the latest conversation-health snapshot for a customer (Step 7)."""
+    sql = (
+        "INSERT INTO conversation_health "
+        "(customer_id, customer_name, score, reason, updated_at) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(customer_name), _lit(score),
+                     _lit(reason)])
+        + ", now()) ON CONFLICT (customer_id) DO UPDATE SET "
+        "customer_name = EXCLUDED.customer_name, score = EXCLUDED.score, "
+        "reason = EXCLUDED.reason, updated_at = now()"
+    )
+    try:
+        _, err = _psql(sql)
+        return (err is None), err
+    except Exception as e:
+        return False, repr(e)
+
+
 # --- drafting --------------------------------------------------------------
 
 def load_system_prompt():
@@ -212,13 +230,26 @@ def build_query(p):
             "omit detected_trigger."
         )
 
-    extra = "\"suggested_rule\"" if is_refine else "\"detected_trigger\""
+    if not is_refine:
+        parts.append(
+            "\n--- CONVERSATION HEALTH ---\n"
+            "Assess how this conversation is going and add a \"health\" field to "
+            "your JSON: {\"score\": one of \"good\" (engaged, progressing), "
+            "\"warm\" (active, not yet committed), \"at_risk\" (stalling, "
+            "hesitation, price pushback, or gone quiet), \"cold\" (likely lost); "
+            "\"reason\": \"<one short line>\"}. Always include health."
+        )
+
+    if is_refine:
+        extra = "optionally plus \"suggested_rule\""
+    else:
+        extra = "plus \"health\", optionally plus \"detected_trigger\""
     parts.append(
         "\n--- RESPOND NOW ---\n"
         "Produce your reply using the EXACT JSON output format defined in your "
         "instructions above (the object with \"messages\" and \"notes_for_zayn\", "
-        "optionally plus " + extra + "). Output only that single JSON object — "
-        "no markdown fences, no commentary before or after it."
+        + extra + "). Output only that single JSON object — no markdown fences, "
+        "no commentary before or after it."
     )
     return "\n".join(parts)
 
@@ -320,6 +351,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         notes = parsed.get("notes_for_zayn", "")
+        # Step 7: conversation health — prepend to operator notes + persist
+        health = parsed.get("health")
+        if isinstance(health, dict) and (health.get("score") or "").strip():
+            hs = str(health.get("score")).strip()
+            hr = str(health.get("reason") or "").strip()
+            notes = "⚕️ " + hs + (" — " + hr if hr else "") + "\n" + notes
+            save_health(payload.get("customer_id"), payload.get("customer_name"),
+                        hs, hr)
+        else:
+            health = None
         sugg = parsed.get("suggested_rule")
         if not (isinstance(sugg, dict) and (sugg.get("text") or "").strip()):
             sugg = None
@@ -345,6 +386,7 @@ class Handler(BaseHTTPRequestHandler):
             "suggested_rule": sugg,
             "detected_trigger": trig if trig_id else None,
             "trigger_id": trig_id,
+            "health": health,
             "raw": blob,
             "session_id": sid,
             "elapsed_ms": elapsed,
