@@ -46,13 +46,15 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 TELEGRAM_HOST = "api.telegram.org"
 WAHA_MARKER = "/api/sendText"
 SUPERMEMORY_HOST = "api.supermemory.ai"
+HERMES_BRIDGE_MARKER = ":8788/"  # matches /draft and /save-rule
 
 # Credential names referenced by the committed workflow. These must match the
 # names of the credentials created in N8N (see docs/credentials-map.md).
 CRED = {
-    "anthropic":   ("httpHeaderAuth", "Anthropic API"),
-    "waha":        ("httpHeaderAuth", "WAHA API"),
-    "supermemory": ("httpBearerAuth", "Bearer Auth account"),
+    "anthropic":     ("httpHeaderAuth", "Anthropic API"),
+    "waha":          ("httpHeaderAuth", "WAHA API"),
+    "supermemory":   ("httpBearerAuth", "Bearer Auth account"),
+    "hermes_bridge": ("httpHeaderAuth", "Hermes Bridge"),
 }
 
 # Strings that must NEVER appear in the committed workflow.
@@ -75,6 +77,8 @@ def classify(node):
         return "waha"
     if SUPERMEMORY_HOST in bare:
         return "supermemory"
+    if HERMES_BRIDGE_MARKER in bare:
+        return "hermes_bridge"
     return None
 
 
@@ -107,6 +111,10 @@ def externalize(node, kind):
         # Already credential-backed in the delivered workflow; normalise the
         # reference to name-only so it does not depend on a stored id.
         use_credential(node, "supermemory")
+    elif kind == "hermes_bridge":
+        # The Call Hermes Bridge node(s): authenticate via the "Hermes Bridge"
+        # httpHeaderAuth credential (header X-Bridge-Token).
+        use_credential(node, "hermes_bridge")
     elif kind == "telegram":
         # Swap whatever sits between '/bot' and the next '/' for the $env
         # expression; '=' marks the whole url field as an N8N expression.
@@ -153,10 +161,15 @@ def main():
     wf = json.loads(base.read_text())
 
     n_prompt = inject_prompt(wf, prompt_text)
-    if n_prompt != 2:
-        print(f"!  systemPrompt injected into {n_prompt} Set node(s) - expected 2.")
+    # After the Hermes-bridge rewiring (Step 3d) the workflow no longer embeds
+    # the system prompt - Hermes reads it on the box at
+    # ~/hermes-bridge/system-prompt.md. 0 is the post-3d normal; 2 is the
+    # legacy direct-Claude layout. Anything else means drift.
+    if n_prompt not in (0, 2):
+        print(f"!  systemPrompt injected into {n_prompt} Set node(s) - expected 0 or 2.")
 
-    touched = {"anthropic": 0, "waha": 0, "telegram": 0, "supermemory": 0}
+    touched = {"anthropic": 0, "waha": 0, "telegram": 0,
+               "supermemory": 0, "hermes_bridge": 0}
     for node in wf.get("nodes", []):
         kind = classify(node)
         if kind:
@@ -173,7 +186,8 @@ def main():
     print(f"OK  {COMMITTED_FILE.relative_to(ROOT)}  [commit-safe, no secrets]")
     print(f"    base: {base.name}   nodes: {len(wf.get('nodes', []))}")
     print(f"    credential refs -> anthropic={touched['anthropic']} "
-          f"waha={touched['waha']} supermemory={touched['supermemory']}")
+          f"waha={touched['waha']} supermemory={touched['supermemory']} "
+          f"hermes_bridge={touched['hermes_bridge']}")
     print(f"    telegram $env URLs -> {touched['telegram']}")
     print(f"    systemPrompt injected into {n_prompt} Set node(s)")
     print(f"    secret scan: clean")
