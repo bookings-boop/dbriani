@@ -57,10 +57,10 @@
             {
               "id": "ae871689-b17a-55b5-b69a-ed8467f4cfea",
               "leftValue": "={{ $json.body.payload.from }}",
-              "rightValue": "@c.us",
+              "rightValue": "@(c\\.us|lid)$",
               "operator": {
                 "type": "string",
-                "operation": "endsWith"
+                "operation": "regex"
               }
             }
           ],

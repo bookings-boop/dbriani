@@ -38,8 +38,10 @@ Per the approved plan, these are applied to the workflow before activation:
   they go to WhatsApp sequentially with a 1–2 s gap.
 - **R4** — a 2nd Edit is refused while another draft is `awaiting_edit`
   (`answerCallbackQuery` returns "Resolve draft A first."); no state change.
-- **R8** — `Filter Inbound` gains a 4th condition: `payload.from` ends with
-  `@c.us` (Phase 1 handles personal chats only).
+- **R8** — `Filter Inbound` gains a 4th condition: `payload.from` matches
+  regex `@(c\.us|lid)$` — admits individual chats (`@c.us` and WhatsApp
+  Linked-ID `@lid`), drops `@g.us` group chats. (Originally `@c.us`-only;
+  widened after T1 showed real senders arriving as `@lid`.)
 
 Deferred to post-MVP: **R5** (double-send idempotency guard) and **R9**
 (regen failure rendering / `max_tokens` bump).
