@@ -103,3 +103,14 @@ the docker network, so this is also the least-exposed path.
 - Autonomous mode is **deployed but not behaviourally tested** (testing needs a
   live autonomous conversation + a test number) — test steps in
   `docs/autonomous-mode.md`.
+
+### Step 9 — daily summary digest (deployed)
+- `cron-daily-summary.py`: assembles a digest (rules captured in 24h, pending
+  follow-up triggers, at-risk conversations, conversations not in approval
+  mode) from Postgres and sends it to the operator via Telegram. System
+  crontab `0 4 * * *` UTC = 08:00 Asia/Dubai.
+- **Script-assembled, not Hermes-narrated** — chosen for reliability and zero
+  LLM cost. A Hermes-written narrative digest could be a later enhancement.
+- Draft/conversation **count** omitted — it needs n8n's `execution_entity`,
+  which `hermes_rw` is deliberately not granted. The lists cover the
+  actionable items. Minor.
