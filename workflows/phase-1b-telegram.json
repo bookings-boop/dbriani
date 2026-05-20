@@ -177,7 +177,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// Parse Claude's response into draft messages + notes\nconst response = $input.item.json;\nlet raw = \"\";\ntry {\n  raw = response.content[0].text;\n} catch (e) {\n  return {\n    json: {\n      first_message: \"(empty Claude response — check API node)\",\n      notes: \"ERROR: could not extract text from Claude API response\",\n      parse_status: \"extract_failed\",\n      raw_response: JSON.stringify(response),\n      customer_phone: $('Build Prompt').item.json.customerPhone,\n      customer_name: $('Build Prompt').item.json.customerName,\n      user_message: $('Build Prompt').item.json.userMessage,\n      memory_context: $('Build Prompt').item.json.memoryContext\n    }\n  };\n}\n\nlet cleaned = raw.trim();\ncleaned = cleaned.replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\n\nlet parsed;\nlet parseStatus = \"ok\";\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {\n    throw new Error(\"messages array missing or empty\");\n  }\n} catch (e) {\n  parsed = {\n    messages: [raw],\n    notes_for_zayn: \"(JSON parse failed — Claude returned plain text. Error: \" + e.message + \")\"\n  };\n  parseStatus = \"fallback_plain_text\";\n}\n\nreturn {\n  json: {\n    first_message: parsed.messages[0],\n    notes: parsed.notes_for_zayn || \"(no notes)\",\n    parse_status: parseStatus,\n    raw_response: raw,\n    customer_phone: $('Build Prompt').item.json.customerPhone,\n    customer_name: $('Build Prompt').item.json.customerName,\n    user_message: $('Build Prompt').item.json.userMessage,\n    memory_context: $('Build Prompt').item.json.memoryContext\n  }\n};"
+        "jsCode": "// Parse Claude's response into draft messages + notes (R3: full messages[])\nconst response = $input.item.json;\nlet raw = \"\";\ntry {\n  raw = response.content[0].text;\n} catch (e) {\n  return { json: {\n    messages: [\"(empty Claude response — check API node)\"],\n    messages_count: 1,\n    notes: \"ERROR: could not extract text from Claude API response\",\n    parse_status: \"extract_failed\",\n    raw_response: JSON.stringify(response),\n    customer_phone: $('Build Prompt').item.json.customerPhone,\n    customer_name: $('Build Prompt').item.json.customerName,\n    user_message: $('Build Prompt').item.json.userMessage,\n    memory_context: $('Build Prompt').item.json.memoryContext\n  } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\nlet parseStatus = \"ok\";\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {\n    throw new Error(\"messages array missing or empty\");\n  }\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: \"(JSON parse failed — Claude returned plain text. Error: \" + e.message + \")\" };\n  parseStatus = \"fallback_plain_text\";\n}\nconst messages = parsed.messages.slice(0, 4).map(m => String(m));\nreturn { json: {\n  messages: messages,\n  messages_count: messages.length,\n  notes: parsed.notes_for_zayn || \"(no notes)\",\n  parse_status: parseStatus,\n  raw_response: raw,\n  customer_phone: $('Build Prompt').item.json.customerPhone,\n  customer_name: $('Build Prompt').item.json.customerName,\n  user_message: $('Build Prompt').item.json.userMessage,\n  memory_context: $('Build Prompt').item.json.memoryContext\n} };"
       },
       "id": "9a3a1242-c9c8-4e65-925b-6a43278f4b92",
       "name": "Parse Response",
@@ -192,7 +192,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// Queue pending draft and format Telegram message\nconst input = $input.item.json;\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  memory_context: input.memory_context,\n  draft_text: input.first_message,\n  notes: input.notes,\n  telegram_message_id: null,  // filled after send\n  telegram_chat_id: 5532831477,\n  status: 'pending'\n};\ndata.pendingQueue.push(pending);\n\nconst text = [\n  '📩 NEW from ' + pending.customer_phone,\n  'Name: ' + (pending.customer_name || '(unknown)'),\n  '',\n  'They said:',\n  '\"' + pending.customer_message + '\"',\n  '',\n  '---',\n  '💬 DRAFT:',\n  pending.draft_text,\n  '',\n  '📝 Notes: ' + pending.notes\n].join('\\n');\n\n// Telegram inline keyboard\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    telegram_payload: {\n      chat_id: 5532831477,\n      text: text,\n      reply_markup: reply_markup\n    },\n    draft_id: id\n  }\n};"
+        "jsCode": "// Queue pending draft + format Telegram message (R3: numbered multi-message preview)\nconst input = $input.item.json;\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = (Array.isArray(input.messages) && input.messages.length)\n  ? input.messages.map(m => String(m))\n  : ['(empty draft)'];\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  memory_context: input.memory_context,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending'\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst header = messages.length === 1 ? '💬 DRAFT:' : ('💬 DRAFT (' + messages.length + ' messages):');\n\nconst text = [\n  '📩 NEW from ' + pending.customer_phone,\n  'Name: ' + (pending.customer_name || '(unknown)'),\n  '',\n  'They said:',\n  '\"' + pending.customer_message + '\"',\n  '',\n  '---',\n  header,\n  preview,\n  '',\n  '📝 Notes: ' + pending.notes\n].join('\\n');\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup }, draft_id: id } };"
       },
       "id": "1f067079-3128-42f1-b995-4fdf49e571fc",
       "name": "Queue & Format",
@@ -507,13 +507,13 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify($('Parse Callback').item.json.draft.customer_phone) }},\n  \"text\": {{ JSON.stringify($('Parse Callback').item.json.draft.draft_text) }}\n}",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify($json.chatId) }},\n  \"text\": {{ JSON.stringify($json.text) }}\n}",
         "options": {},
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth"
       },
       "id": "040c610b-755f-4af1-b17d-201a411856fd",
-      "name": "Send to Customer (Send)",
+      "name": "Send One to Customer",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
@@ -559,7 +559,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "const draftId = $('Parse Callback').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) entry.status = 'sent';\nreturn { json: { ok: true, status: 'sent', draft_id: draftId } };"
+        "jsCode": "// R3: mark draft sent + record how many messages went out\nconst draftId = $('Parse Callback').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.status = 'sent';\n  entry.messages_sent_count = Array.isArray(entry.messages) ? entry.messages.length : 1;\n}\nreturn { json: { ok: true, status: 'sent', draft_id: draftId, messages_sent_count: entry ? entry.messages_sent_count : 0 } };"
       },
       "id": "b11d6de5-0171-419e-8644-a3d572091668",
       "name": "Mark Sent",
@@ -775,7 +775,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// Parse regen response and update the existing draft in the queue\nconst response = $input.item.json;\nlet raw = \"\";\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: \"Empty Claude response on regen\", raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error(\"messages missing\");\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: \"(parse fail: \" + e.message + \")\" };\n}\n\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.draft_text = parsed.messages[0];\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n}\n\nreturn {\n  json: {\n    draft_id: draftId,\n    new_draft_text: parsed.messages[0],\n    new_notes: parsed.notes_for_zayn || '(no notes)',\n    customer_phone: entry ? entry.customer_phone : 'unknown',\n    customer_name: entry ? entry.customer_name : '',\n    customer_message: entry ? entry.customer_message : ''\n  }\n};"
+        "jsCode": "// Parse regen response, update the existing draft (R3: array shape)\nconst response = $input.item.json;\nlet raw = \"\";\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: \"Empty Claude response on regen\", raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error(\"messages missing\");\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: \"(parse fail: \" + e.message + \")\" };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : ''\n} };"
       },
       "id": "d0211760-9710-42d8-95e8-adeac32029dc",
       "name": "Parse Regen",
@@ -801,7 +801,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"📩 [REGEN] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n💬 NEW DRAFT:\\n\" + $json.new_draft_text + \"\\n\\n📝 Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"✅ Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"✏️ Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"🔁 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"❌ Skip\", callback_data: \"skip:\" + $json.draft_id}]]}) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"📩 [REGEN] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n💬 NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n📝 Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"✅ Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"✏️ Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"🔁 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"❌ Skip\", callback_data: \"skip:\" + $json.draft_id}]]}) }}\n}",
         "options": {}
       },
       "id": "5262df54-100a-46cf-8940-b6a8d45f8b9a",
@@ -1081,6 +1081,50 @@
         1720,
         460
       ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// R3: fan a draft's messages[] into one item per message\nconst draft = $('Parse Callback').first().json.draft;\nconst msgs = (draft && Array.isArray(draft.messages) && draft.messages.length)\n  ? draft.messages\n  : [ (draft && draft.draft_text) || '(empty draft)' ];\nreturn msgs.map((m, i) => ({\n  json: { chatId: draft.customer_phone, text: String(m), seq: i + 1, total: msgs.length, draft_id: draft.id }\n}));"
+      },
+      "id": "3f750a5b-9ffa-5448-a458-0bb998668dcc",
+      "name": "Prepare Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "e0714d4f-9699-5953-bec2-f2cb37b3825a",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1500,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "c6ed8fd0-35e3-54c1-9c45-01928d05ba07",
+      "name": "Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1860,
+        -60
+      ],
+      "webhookId": "3660b508-35c9-5b76-a5c2-ec6668db328d"
     }
   ],
   "connections": {
@@ -1247,7 +1291,7 @@
       "main": [
         [
           {
-            "node": "Send to Customer (Send)",
+            "node": "Prepare Send",
             "type": "main",
             "index": 0
           }
@@ -1275,7 +1319,12 @@
         ]
       ]
     },
-    "Send to Customer (Send)": {
+    "Edit Telegram (Send)": {
+      "main": [
+        []
+      ]
+    },
+    "Mark Sent": {
       "main": [
         [
           {
@@ -1283,30 +1332,7 @@
             "type": "main",
             "index": 0
           }
-        ],
-        [
-          {
-            "node": "Build Alert",
-            "type": "main",
-            "index": 0
-          }
         ]
-      ]
-    },
-    "Edit Telegram (Send)": {
-      "main": [
-        [
-          {
-            "node": "Mark Sent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Mark Sent": {
-      "main": [
-        []
       ]
     },
     "Edit Telegram (Skip)": {
@@ -1491,6 +1517,69 @@
     "Notify Edit Blocked": {
       "main": [
         []
+      ]
+    },
+    "Prepare Send": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Mark Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send One to Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send One to Customer": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
