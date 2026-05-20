@@ -81,7 +81,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// Parse the Hermes bridge response into the downstream draft contract.\nconst r = $input.item.json;\nconst fc = $('Format Context').item.json;\nlet messages, notes, parseStatus, rawResponse;\nif (r && r.ok === true && Array.isArray(r.messages) && r.messages.length > 0) {\n  messages = r.messages.slice(0, 4).map(m => String(m));\n  notes = r.notes_for_zayn || '(no notes)';\n  parseStatus = 'ok';\n  rawResponse = r.raw || JSON.stringify(r);\n} else {\n  messages = ['(Hermes bridge returned no draft - check the hermes-bridge service)'];\n  notes = 'ERROR: bridge response not ok - ' + JSON.stringify(r).slice(0, 300);\n  parseStatus = 'bridge_failed';\n  rawResponse = JSON.stringify(r);\n}\nreturn { json: {\n  messages: messages,\n  messages_count: messages.length,\n  notes: notes,\n  parse_status: parseStatus,\n  raw_response: rawResponse,\n  hermes_session_id: (r && r.session_id) || '',\n  customer_phone: fc.customerChatId,\n  customer_name: fc.customerName,\n  user_message: fc.userMessage,\n  conversation_history: fc.conversationHistory,\n  history_count: fc.historyCount\n} };"
+        "jsCode": "// Parse the Hermes bridge response into the downstream draft contract.\nconst r = $input.item.json;\nconst fc = $('Format Context').item.json;\nlet messages, notes, parseStatus, rawResponse;\nif (r && r.ok === true && Array.isArray(r.messages) && r.messages.length > 0) {\n  messages = r.messages.slice(0, 4).map(m => String(m));\n  notes = r.notes_for_zayn || '(no notes)';\n  parseStatus = 'ok';\n  rawResponse = r.raw || JSON.stringify(r);\n} else {\n  messages = ['(Hermes bridge returned no draft - check the hermes-bridge service)'];\n  notes = 'ERROR: bridge response not ok - ' + JSON.stringify(r).slice(0, 300);\n  parseStatus = 'bridge_failed';\n  rawResponse = JSON.stringify(r);\n}\nreturn { json: {\n  messages: messages,\n  messages_count: messages.length,\n  notes: notes,\n  parse_status: parseStatus,\n  raw_response: rawResponse,\n  conversation_mode: (r && r.conversation_mode) || 'approval',\n  hermes_session_id: (r && r.session_id) || '',\n  customer_phone: fc.customerChatId,\n  customer_name: fc.customerName,\n  user_message: fc.userMessage,\n  conversation_history: fc.conversationHistory,\n  history_count: fc.historyCount\n} };"
       },
       "id": "9a3a1242-c9c8-4e65-925b-6a43278f4b92",
       "name": "Parse Response",
@@ -642,7 +642,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// #4: route an admin Telegram message -> send to a customer, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId, ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash', target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(), admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft message -> send to that draft's customer (any status)\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  const d = queue.find(x => x.telegram_message_id === r.message_id);\n  if (d && text) {\n    if (d.status === 'pending') {\n      return { json: { action: 'refine', draft_id: d.id, instruction: text, admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'send_to_customer', origin: 'reply', target_chatId: d.customer_phone, final_text: text, draft_id: d.id, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft awaiting an edit\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'sent';\n  return { json: { action: 'send_to_customer', origin: 'edit', target_chatId: awaiting.customer_phone, final_text: text, draft_id: awaiting.id, admin_chat_id: adminChatId } };\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId, ack_text: '⚠️ Nothing sent. To message a customer: reply to their draft message, or use  /send <chatId> <message>' } };"
+        "jsCode": "// #4: route an admin Telegram message -> send to a customer, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// Step 8: /manual kill switch — return every conversation to approval\nif (text.toLowerCase().trim() === '/manual') {\n  return { json: { action: 'set_mode', mode_customer_id: '__ALL__', mode_target: 'approval', mode_label: 'ALL conversations', admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId, ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash', target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(), admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft message -> send to that draft's customer (any status)\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  const d = queue.find(x => x.telegram_message_id === r.message_id);\n  if (d && text) {\n    const _tl = text.toLowerCase().trim();\n    const _MODES = { 'let it run': 'autonomous', 'you continue': 'autonomous', 'take back': 'approval', 'pause': 'paused' };\n    if (_MODES[_tl]) {\n      return { json: { action: 'set_mode', mode_customer_id: d.customer_phone, mode_target: _MODES[_tl], mode_label: (d.customer_name || d.customer_phone), admin_chat_id: adminChatId } };\n    }\n    if (d.status === 'pending') {\n      return { json: { action: 'refine', draft_id: d.id, instruction: text, admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'send_to_customer', origin: 'reply', target_chatId: d.customer_phone, final_text: text, draft_id: d.id, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft awaiting an edit\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'sent';\n  return { json: { action: 'send_to_customer', origin: 'edit', target_chatId: awaiting.customer_phone, final_text: text, draft_id: awaiting.id, admin_chat_id: adminChatId } };\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId, ack_text: '⚠️ Nothing sent. To message a customer: reply to their draft message, or use  /send <chatId> <message>' } };"
       },
       "id": "adad4689-4f68-42d0-8f84-71ab64b617f1",
       "name": "Process Text Reply",
@@ -725,6 +725,29 @@
               },
               "renameOutput": true,
               "outputKey": "refine"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "e1b96327-8692-598c-be3d-a59e069025ee",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "set_mode",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "set_mode"
             }
           ]
         },
@@ -1308,6 +1331,166 @@
         1540,
         260
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "4e10036e-9636-54b3-9924-6e80a4c25a11",
+              "leftValue": "={{ $json.conversation_mode }}",
+              "rightValue": "autonomous",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4d8593b7-efee-5ea5-9d4f-74429263abbc",
+      "name": "IF Autonomous",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://waha.13-63-82-112.sslip.io/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify($json.customer_phone) }},\n  \"text\": {{ JSON.stringify(Array.isArray($json.messages) ? $json.messages.join(\"\\n\\n\") : String($json.messages || \"\")) }}\n}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "33f6e66e-fd56-55de-86d7-9354146b09c1",
+      "name": "Auto-Send to Customer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        -360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "WAHA API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify(\"🤖 AUTO-SENT (autonomous mode) — \" + ($('Parse Response').item.json.customer_name || $('Parse Response').item.json.customer_phone) + \"\\n\\n\" + (Array.isArray($('Parse Response').item.json.messages) ? $('Parse Response').item.json.messages.join(\"\\n\\n\") : \"\") + \"\\n\\n📝 \" + ($('Parse Response').item.json.notes || \"\")) }}\n}",
+        "options": {}
+      },
+      "id": "6f1a4f05-5105-5e4a-b41d-9014398453f0",
+      "name": "Auto-Send FYI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/set-mode",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($('Process Text Reply').item.json.mode_customer_id) }},\n  \"mode\": {{ JSON.stringify($('Process Text Reply').item.json.mode_target) }},\n  \"activated_by\": \"telegram\"\n}",
+        "options": {
+          "timeout": 150000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "6bd4fa32-1fa9-5336-bd73-0d9ef7661f00",
+      "name": "Set Conversation Mode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Hermes Bridge"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Process Text Reply').item.json.admin_chat_id }},\n  \"text\": {{ JSON.stringify(\"✅ Conversation mode — \" + $('Process Text Reply').item.json.mode_label + \" → \" + $('Process Text Reply').item.json.mode_target + ($('Process Text Reply').item.json.mode_target === \"autonomous\" ? \"\\n\\n⚠️ Hermes will now reply to this customer automatically (no approval). Reply \\\"take back\\\" to one of its drafts, or send /manual, to stop.\" : \"\")) }}\n}",
+        "options": {}
+      },
+      "id": "c86d6246-6df4-5970-aac1-0db906f28f19",
+      "name": "Confirm Mode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        340
+      ]
     }
   ],
   "connections": {
@@ -1338,7 +1521,7 @@
       "main": [
         [
           {
-            "node": "Queue & Format",
+            "node": "IF Autonomous",
             "type": "main",
             "index": 0
           }
@@ -1585,6 +1768,13 @@
         [
           {
             "node": "Prep Refine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Conversation Mode",
             "type": "main",
             "index": 0
           }
@@ -1841,6 +2031,60 @@
         [
           {
             "node": "Confirm Rule Saved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Autonomous": {
+      "main": [
+        [
+          {
+            "node": "Auto-Send to Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue & Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Send to Customer": {
+      "main": [
+        [
+          {
+            "node": "Auto-Send FYI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Conversation Mode": {
+      "main": [
+        [
+          {
+            "node": "Confirm Mode",
             "type": "main",
             "index": 0
           }

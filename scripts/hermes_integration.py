@@ -481,12 +481,173 @@ def _apply_5(wf):
     return True
 
 
+# --- Step 8 — autonomous mode ----------------------------------------------
+
+ID_IF_AUTONOMOUS = _uid("node/if-autonomous")
+ID_AUTOSEND = _uid("node/auto-send-customer")
+ID_AUTOSEND_FYI = _uid("node/auto-send-fyi")
+ID_SET_MODE_NODE = _uid("node/set-conversation-mode")
+ID_CONFIRM_MODE = _uid("node/confirm-mode")
+ID_COND_AUTONOMOUS = _uid("cond/if-autonomous")
+ID_COND_SETMODE = _uid("cond/route-text-set-mode")
+
+BRIDGE_SETMODE_URL = "http://172.18.0.1:8788/set-mode"
+WAHA_SENDTEXT_URL = "https://waha.13-63-82-112.sslip.io/api/sendText"
+
+AUTOSEND_BODY = r'''={
+  "session": "default",
+  "chatId": {{ JSON.stringify($json.customer_phone) }},
+  "text": {{ JSON.stringify(Array.isArray($json.messages) ? $json.messages.join("\n\n") : String($json.messages || "")) }}
+}'''
+
+AUTOSEND_FYI_BODY = r'''={
+  "chat_id": 5532831477,
+  "text": {{ JSON.stringify("🤖 AUTO-SENT (autonomous mode) — " + ($('Parse Response').item.json.customer_name || $('Parse Response').item.json.customer_phone) + "\n\n" + (Array.isArray($('Parse Response').item.json.messages) ? $('Parse Response').item.json.messages.join("\n\n") : "") + "\n\n📝 " + ($('Parse Response').item.json.notes || "")) }}
+}'''
+
+SET_MODE_BODY = r'''={
+  "customer_id": {{ JSON.stringify($('Process Text Reply').item.json.mode_customer_id) }},
+  "mode": {{ JSON.stringify($('Process Text Reply').item.json.mode_target) }},
+  "activated_by": "telegram"
+}'''
+
+CONFIRM_MODE_BODY = r'''={
+  "chat_id": {{ $('Process Text Reply').item.json.admin_chat_id }},
+  "text": {{ JSON.stringify("✅ Conversation mode — " + $('Process Text Reply').item.json.mode_label + " → " + $('Process Text Reply').item.json.mode_target + ($('Process Text Reply').item.json.mode_target === "autonomous" ? "\n\n⚠️ Hermes will now reply to this customer automatically (no approval). Reply \"take back\" to one of its drafts, or send /manual, to stop." : "")) }}
+}'''
+
+MANUAL_SNIPPET = """
+
+// Step 8: /manual kill switch — return every conversation to approval
+if (text.toLowerCase().trim() === '/manual') {
+  return { json: { action: 'set_mode', mode_customer_id: '__ALL__', mode_target: 'approval', mode_label: 'ALL conversations', admin_chat_id: adminChatId } };
+}"""
+
+MODECMD_SNIPPET = """    const _tl = text.toLowerCase().trim();
+    const _MODES = { 'let it run': 'autonomous', 'you continue': 'autonomous', 'take back': 'approval', 'pause': 'paused' };
+    if (_MODES[_tl]) {
+      return { json: { action: 'set_mode', mode_customer_id: d.customer_phone, mode_target: _MODES[_tl], mode_label: (d.customer_name || d.customer_phone), admin_chat_id: adminChatId } };
+    }
+"""
+
+
+def _apply_8(wf):
+    by = {n["name"]: n for n in wf["nodes"]}
+    if "IF Autonomous" in by:
+        return False
+    for req in ["Parse Response", "Queue & Format", "Process Text Reply",
+                "Route Text Action", "Build Alert"]:
+        if req not in by:
+            raise SystemExit(f"x 8: expected node '{req}' not found")
+
+    # 1. Parse Response surfaces the conversation mode from the bridge response
+    pr = by["Parse Response"]["parameters"]
+    a0 = "  hermes_session_id: (r && r.session_id) || '',"
+    if a0 not in pr["jsCode"]:
+        raise SystemExit("x 8: Parse Response anchor not found (drift?)")
+    pr["jsCode"] = pr["jsCode"].replace(
+        a0, "  conversation_mode: (r && r.conversation_mode) || 'approval',\n" + a0, 1)
+
+    # 2. auto-send branch nodes
+    wf["nodes"].append({
+        "parameters": {
+            "conditions": {
+                "options": {"caseSensitive": True, "leftValue": "",
+                            "typeValidation": "loose"},
+                "conditions": [{
+                    "id": ID_COND_AUTONOMOUS,
+                    "leftValue": "={{ $json.conversation_mode }}",
+                    "rightValue": "autonomous",
+                    "operator": {"type": "string", "operation": "equals"},
+                }],
+                "combinator": "and",
+            },
+            "options": {},
+        },
+        "id": ID_IF_AUTONOMOUS, "name": "IF Autonomous",
+        "type": "n8n-nodes-base.if", "typeVersion": 2.2,
+        "position": [1300, -360],
+    })
+    wf["nodes"].append({
+        "parameters": {
+            "method": "POST", "url": WAHA_SENDTEXT_URL,
+            "sendHeaders": True,
+            "headerParameters": {
+                "parameters": [{"name": "Content-Type", "value": "application/json"}]
+            },
+            "sendBody": True, "specifyBody": "json", "jsonBody": AUTOSEND_BODY,
+            "options": {},
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth",
+        },
+        "id": ID_AUTOSEND, "name": "Auto-Send to Customer",
+        "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2,
+        "position": [1500, -360],
+        "credentials": {"httpHeaderAuth": {"id": None, "name": "WAHA API"}},
+        "onError": "continueErrorOutput",
+    })
+    wf["nodes"].append(_http_node(ID_AUTOSEND_FYI, "Auto-Send FYI", [1700, -360],
+                                  TG_URL + "sendMessage", AUTOSEND_FYI_BODY))
+
+    # 3. operator mode-command nodes
+    wf["nodes"].append(_http_node(ID_SET_MODE_NODE, "Set Conversation Mode",
+                                  [1100, 340], BRIDGE_SETMODE_URL, SET_MODE_BODY,
+                                  on_error=True, credential=True))
+    wf["nodes"].append(_http_node(ID_CONFIRM_MODE, "Confirm Mode", [1320, 340],
+                                  TG_URL + "sendMessage", CONFIRM_MODE_BODY))
+
+    # 4. Process Text Reply recognises /manual + reply-to-draft mode commands
+    ptr = by["Process Text Reply"]["parameters"]
+    a1 = "const queue = data.pendingQueue || [];"
+    if a1 not in ptr["jsCode"]:
+        raise SystemExit("x 8: Process Text Reply queue anchor not found")
+    ptr["jsCode"] = ptr["jsCode"].replace(a1, a1 + MANUAL_SNIPPET, 1)
+    a2 = "  if (d && text) {\n    if (d.status === 'pending') {"
+    if a2 not in ptr["jsCode"]:
+        raise SystemExit("x 8: Process Text Reply reply anchor not found")
+    ptr["jsCode"] = ptr["jsCode"].replace(
+        a2, "  if (d && text) {\n" + MODECMD_SNIPPET
+        + "    if (d.status === 'pending') {", 1)
+
+    # 5. Route Text Action gains a `set_mode` rule
+    by["Route Text Action"]["parameters"]["rules"]["values"].append({
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": "",
+                        "typeValidation": "loose"},
+            "conditions": [{
+                "id": ID_COND_SETMODE,
+                "leftValue": "={{ $json.action }}",
+                "rightValue": "set_mode",
+                "operator": {"type": "string", "operation": "equals"},
+            }],
+            "combinator": "and",
+        },
+        "renameOutput": True, "outputKey": "set_mode",
+    })
+
+    # 6. connections — fail-closed: anything but 'autonomous' -> approval branch
+    c = wf["connections"]
+    c["Parse Response"] = {"main": [[_conn("IF Autonomous")]]}
+    c["IF Autonomous"] = {"main": [[_conn("Auto-Send to Customer")],
+                                   [_conn("Queue & Format")]]}
+    c["Auto-Send to Customer"] = {"main": [[_conn("Auto-Send FYI")],
+                                           [_conn("Build Alert")]]}
+    rta = c.setdefault("Route Text Action", {"main": []})
+    while len(rta["main"]) < 3:
+        rta["main"].append([])
+    rta["main"].append([_conn("Set Conversation Mode")])   # output 3 = set_mode
+    c["Set Conversation Mode"] = {"main": [[_conn("Confirm Mode")],
+                                           [_conn("Build Alert")]]}
+    return True
+
+
 def surgery(wf):
-    """Apply Steps 3d + 4 + 5.3 idempotently. Returns (wf, changed)."""
+    """Apply Steps 3d + 4 + 5.3 + 8 idempotently. Returns (wf, changed)."""
     c3 = _apply_3d(wf)
     c4 = _apply_4(wf)
     c5 = _apply_5(wf)
-    return wf, (c3 or c4 or c5)
+    c8 = _apply_8(wf)
+    return wf, (c3 or c4 or c5 or c8)
 
 
 def main():
@@ -504,6 +665,7 @@ def main():
     print("    3d:  drafting via Call Hermes Bridge (+ Regen)")
     print("    4:   reply-to-pending-draft -> refine loop")
     print("    5.3: refinement -> suggested rule -> [Save as rule] -> /save-rule")
+    print("    8:   IF Autonomous auto-send branch + set_mode operator commands")
     print("    next: run scripts/build_workflow.py")
 
 

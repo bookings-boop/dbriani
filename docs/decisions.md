@@ -83,3 +83,23 @@ the docker network, so this is also the least-exposed path.
   summary.
 - Kept lean: one latest-snapshot row per customer, no per-draft history, no
   separate health UI. Additive + reversible.
+
+### Step 8 — autonomous mode (deployed, dormant)
+- Originally planned to defer the live auto-send branch (unsupervised overnight
+  = the irreversible risk to skip). The operator then chose to stay online, so
+  it was **built and deployed in full** — but it is **dormant**: every
+  conversation defaults to `approval`, the `IF Autonomous` node fail-closes to
+  the approval branch, and nothing auto-activates.
+- Bridge: `get_mode` / `set_mode` / `manual_killswitch`; `POST /set-mode`
+  (`customer_id:"__ALL__"` = kill switch). `/draft` returns `conversation_mode`.
+- Workflow: `IF Autonomous` → `Auto-Send to Customer` (WAHA) / approval branch;
+  operator commands (`let it run`, `take back`, `pause`, `/manual`).
+- **DEFERRED — safety caps & auto-break (spec §5.7):** daily/per-conversation
+  caps and automatic break conditions are NOT built. A conversation set to
+  `autonomous` auto-sends every reply until `take back` / `/manual`. The
+  primary safety is per-conversation opt-in + the `/manual` kill switch.
+  **Flagged for review — recommend adding caps before real use.** See
+  `docs/autonomous-mode.md`.
+- Autonomous mode is **deployed but not behaviourally tested** (testing needs a
+  live autonomous conversation + a test number) — test steps in
+  `docs/autonomous-mode.md`.

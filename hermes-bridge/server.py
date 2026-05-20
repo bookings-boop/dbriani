@@ -157,6 +157,56 @@ def save_health(customer_id, customer_name, score, reason):
         return False, repr(e)
 
 
+def get_mode(customer_id):
+    """Current conversation mode for a customer (Step 8). Fail-closed: any
+    error, missing row, or unrecognised value -> 'approval'."""
+    cid = (customer_id or "").replace("'", "''")
+    sql = (f"SELECT mode FROM conversation_modes WHERE customer_id = '{cid}' "
+           "ORDER BY id DESC LIMIT 1")
+    try:
+        out, err = _psql(sql)
+        if err:
+            return "approval"
+        lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
+        m = lines[0] if lines else ""
+        return m if m in ("approval", "autonomous", "paused") else "approval"
+    except Exception:
+        return "approval"
+
+
+def set_mode(customer_id, mode, activated_by):
+    """Record a conversation-mode change. Returns (mode, None) or (None, err)."""
+    if mode not in ("approval", "autonomous", "paused"):
+        return None, "invalid mode (use approval|autonomous|paused)"
+    sql = (
+        "INSERT INTO conversation_modes "
+        "(customer_id, mode, activated_at, activated_by) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(mode)])
+        + ", now(), " + _lit(activated_by) + ")"
+    )
+    try:
+        _, err = _psql(sql)
+        return (None, err) if err else (mode, None)
+    except Exception as e:
+        return None, repr(e)
+
+
+def manual_killswitch():
+    """Kill switch — force every known conversation back to 'approval'."""
+    sql = (
+        "INSERT INTO conversation_modes "
+        "(customer_id, mode, activated_at, activated_by, break_reason) "
+        "SELECT DISTINCT customer_id, 'approval', now(), 'manual_killswitch', "
+        "'/manual kill switch' FROM conversation_modes "
+        "WHERE customer_id IS NOT NULL"
+    )
+    try:
+        _, err = _psql(sql)
+        return (err is None), err
+    except Exception as e:
+        return False, repr(e)
+
+
 # --- drafting --------------------------------------------------------------
 
 def load_system_prompt():
@@ -307,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/draft", "/save-rule"):
+        if self.path not in ("/draft", "/save-rule", "/set-mode"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -321,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/save-rule":
             self._save_rule(payload)
+        elif self.path == "/set-mode":
+            self._set_mode(payload)
         else:
             self._draft(payload)
 
@@ -375,10 +427,11 @@ class Handler(BaseHTTPRequestHandler):
                 trig.get("confidence", 0.5))
             if not trig_id:
                 log("trigger save failed:", terr)
+        conv_mode = get_mode(payload.get("customer_id"))
         log(f"draft OK customer={payload.get('customer_name')!r} "
-            f"mode={payload.get('mode', 'initial')} msgs={len(messages)} "
-            f"rule_suggested={sugg is not None} trigger={trig_id} "
-            f"elapsed={elapsed}ms session={sid}")
+            f"mode={payload.get('mode', 'initial')} conv_mode={conv_mode} "
+            f"msgs={len(messages)} rule_suggested={sugg is not None} "
+            f"trigger={trig_id} elapsed={elapsed}ms session={sid}")
         self._send(200, {
             "ok": True,
             "messages": messages,
@@ -387,6 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             "detected_trigger": trig if trig_id else None,
             "trigger_id": trig_id,
             "health": health,
+            "conversation_mode": conv_mode,
             "raw": blob,
             "session_id": sid,
             "elapsed_ms": elapsed,
@@ -410,6 +464,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         log(f"rule saved id={rid} scope={scope} text={text[:70]!r}")
         self._send(200, {"ok": True, "rule_id": rid, "scope": scope})
+
+    def _set_mode(self, payload):
+        cid = (payload.get("customer_id") or "").strip()
+        mode = (payload.get("mode") or "").strip().lower()
+        by = (payload.get("activated_by") or "operator").strip()
+        if not cid:
+            self._send(400, {"ok": False, "error": "customer_id is required"})
+            return
+        if cid == "__ALL__":  # /manual kill switch
+            ok, err = manual_killswitch()
+            if not ok:
+                log("manual killswitch failed:", err)
+                self._send(502, {"ok": False, "error": str(err)})
+                return
+            log("MANUAL KILL SWITCH — all conversations -> approval")
+            self._send(200, {"ok": True, "message": "all conversations set to approval"})
+            return
+        m, err = set_mode(cid, mode, by)
+        if m is None:
+            log("set-mode failed:", err)
+            self._send(502, {"ok": False, "error": str(err)})
+            return
+        log(f"conversation mode set: {cid} -> {m} (by {by})")
+        self._send(200, {"ok": True, "customer_id": cid, "mode": m})
 
 
 def main():

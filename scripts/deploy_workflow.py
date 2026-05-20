@@ -155,36 +155,49 @@ def main():
         print("Re-run without --dry-run to deploy.")
         return
 
-    # --- phase 5: Hermes Bridge credential ---
-    if args.cred_id:
-        cred_id = args.cred_id
-        print(f"5. reusing existing 'Hermes Bridge' credential (id={cred_id})\n")
-    else:
-        cred_script = (
-            'read -r K; '
-            'TOK=$(grep -E "^BRIDGE_TOKEN=" ~/hermes-bridge/.env | cut -d= -f2-); '
-            '[ -z "$TOK" ] && { echo \'{"error":"no bridge token on box"}\'; exit 0; }; '
-            'printf \'{"name":"Hermes Bridge","type":"httpHeaderAuth",'
-            '"data":{"name":"X-Bridge-Token","value":"%s"}}\' "$TOK" > /tmp/dbn_cred.json; '
-            f'curl -s -m 25 -X POST -H "X-N8N-API-KEY: $K" -H "Content-Type: application/json" '
-            f'--data-binary @/tmp/dbn_cred.json {API}/credentials; '
-            'rm -f /tmp/dbn_cred.json'
-        )
-        out = ssh_run(cred_script, key, "create credential")
-        cred = as_json(out, "create credential")
-        cred_id = cred.get("id")
-        if not cred_id:
-            die(f"credential creation returned no id: {json.dumps(cred)[:400]}")
-        print(f"5. credential 'Hermes Bridge' created (id={cred_id})\n")
+    # --- phase 5: credential name->id map from the LIVE workflow ---
+    cred_map = {}
+    for n in live.get("nodes", []):
+        for cref in (n.get("credentials") or {}).values():
+            if cref.get("id") and cref.get("name"):
+                cred_map[cref["name"]] = cref["id"]
+    print("5. live credentials: "
+          + (", ".join(f"{k}={v}" for k, v in cred_map.items()) or "(none)"))
+    if "Hermes Bridge" not in cred_map:
+        if args.cred_id:
+            cred_map["Hermes Bridge"] = args.cred_id
+            print(f"   Hermes Bridge: using --cred-id {args.cred_id}")
+        else:
+            cred_script = (
+                'read -r K; '
+                'TOK=$(grep -E "^BRIDGE_TOKEN=" ~/hermes-bridge/.env | cut -d= -f2-); '
+                '[ -z "$TOK" ] && { echo \'{"error":"no bridge token"}\'; exit 0; }; '
+                'printf \'{"name":"Hermes Bridge","type":"httpHeaderAuth",'
+                '"data":{"name":"X-Bridge-Token","value":"%s"}}\' "$TOK" > /tmp/dbn_cred.json; '
+                f'curl -s -m 25 -X POST -H "X-N8N-API-KEY: $K" -H "Content-Type: application/json" '
+                f'--data-binary @/tmp/dbn_cred.json {API}/credentials; rm -f /tmp/dbn_cred.json'
+            )
+            cred = as_json(ssh_run(cred_script, key, "create credential"),
+                           "create credential")
+            if not cred.get("id"):
+                die(f"credential creation returned no id: {json.dumps(cred)[:400]}")
+            cred_map["Hermes Bridge"] = cred["id"]
+            print(f"   Hermes Bridge credential created: {cred['id']}")
+    print()
 
-    # --- phase 6: patch bridge nodes with the credential id ---
-    patched = 0
+    # --- phase 6: fill every null credential id from the live map ---
+    filled, missing = 0, set()
     for n in rewired["nodes"]:
-        url = (n.get("parameters") or {}).get("url", "")
-        if ":8788/" in url and n.get("credentials", {}).get("httpHeaderAuth"):
-            n["credentials"]["httpHeaderAuth"]["id"] = cred_id
-            patched += 1
-    print(f"6. patched {patched} bridge node(s) with credential id\n")
+        for cref in (n.get("credentials") or {}).values():
+            if not cref.get("id"):
+                if cref.get("name") in cred_map:
+                    cref["id"] = cred_map[cref["name"]]
+                    filled += 1
+                else:
+                    missing.add(cref.get("name"))
+    if missing:
+        die(f"credential names with no resolvable id: {sorted(missing)}")
+    print(f"6. filled {filled} null credential id(s) from the live map\n")
 
     # --- phase 7: PUT the workflow ---
     put_body = {
