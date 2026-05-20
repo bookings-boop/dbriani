@@ -33,6 +33,14 @@ rules), so Phase 1B loses no drafting capability by running memory-less.
 | Claude Code | Deleted the `Supermemory` node from the Phase 1B workflow. `Filter Inbound` now connects directly to `Build Prompt`. `Build Prompt`'s `memoryContext` field is a hardcoded empty string. |
 | Zayn | Reconnecting the Supermemory Google Drive connector to the correct scope only: `/ZAYN_AI_BRAIN/Supermemory - Dubriani/`. |
 
+## The `Bearer Auth account` N8N credential
+
+The N8N credential `Bearer Auth account` (httpBearerAuth) is currently blank
+— it shows N8N's `__n8n_BLANK_VALUE` sentinel. This is **harmless**: the
+Supermemory node was deleted, so **no node in the Phase 1B workflow
+references this credential**. Leave it as-is; it is safe to delete (or
+repopulate) during the Phase 2 Supermemory re-enable cleanup.
+
 ## Open action — PII removal (Zayn)
 
 ⚠️ After the connector is re-pointed and re-ingestion completes, the
