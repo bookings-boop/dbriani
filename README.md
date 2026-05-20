@@ -15,12 +15,11 @@ source for the workflow, the system prompt, and the operational tooling.
 
 | Phase | What | State |
 |-------|------|-------|
-| 1A | WhatsApp admin approval (14 nodes) | Live in N8N |
-| 1B | Telegram approval bot — Send / Edit / Regen / Skip | In delivery — steps 0–4 |
+| 1B | Telegram approval bot — Send / Edit / Regen / Skip | **Live in N8N** (deployed 2026-05-20, T1–T6 passed) |
 
-Execution scope is **steps 0–4 only** (see `HANDOFF.md` §0). Everything beyond
-— HubSpot, Postgres, Gmail, weekly distillation, Redis, the full 7-button UI —
-is deferred until 0–4 are validated on real traffic for ~1 week.
+Execution scope was **steps 0–4 only** (see `HANDOFF.md` §0) — **all complete.**
+Everything beyond — HubSpot, Postgres, Gmail, weekly distillation, Redis, the
+full 7-button UI — is deferred until 0–4 are validated on real traffic for ~1 week.
 
 | # | Step | State |
 |---|------|-------|
@@ -28,7 +27,15 @@ is deferred until 0–4 are validated on real traffic for ~1 week.
 | 1 | Git repo + `.env` externalization | Done |
 | 2 | Verify Supermemory — connector mis-scoped; MVP ships memory-less | Done |
 | 3 | Supermemory node removed from workflow — see `docs/supermemory-status.md` | Done |
-| 4 | Deploy Phase 1B (Telegram approval) | In progress |
+| 4 | Deploy Phase 1B (Telegram approval) — T1–T6 passed | Done |
+
+### Deferred (post-MVP, after the ~1-week validation)
+
+- **Risk fixes R5, R9, R10** — double-send idempotency guard; regen failure
+  rendering + `max_tokens` bump; static-data concurrency (Redis migration).
+- **Supermemory re-enable** (Phase 2) — see `docs/supermemory-status.md`,
+  including the customer-PII file purge.
+- **Steps 5+** — HubSpot, Postgres, Gmail, weekly distillation, 7-button UI.
 
 ---
 
