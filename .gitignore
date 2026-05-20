@@ -1,0 +1,16 @@
+# ── Secrets — never commit ──────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# Runnable workflow copies with secrets inlined (build_workflow.py output)
+*.local.json
+
+# ── OS / editor / build noise ───────────────────────────────────
+.DS_Store
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
