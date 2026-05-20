@@ -35,7 +35,14 @@ full 7-button UI — is deferred until 0–4 are validated on real traffic for ~
   rendering + `max_tokens` bump; static-data concurrency (Redis migration).
 - **Supermemory re-enable** (Phase 2) — see `docs/supermemory-status.md`,
   including the customer-PII file purge.
+- **Phase 1C — Meta WhatsApp Cloud API migration** (~2 weeks) — replaces WAHA,
+  solves `@lid` permanently. See `docs/whatsapp-api-roadmap.md`.
 - **Steps 5+** — HubSpot, Postgres, Gmail, weekly distillation, 7-button UI.
+
+### Post-deploy improvement batches
+
+- **Batch 1 (done, commit `79bb62d`)** — #1 conversation memory, #2 one-message
+  default, #4 proactive send; #3 reduced to a header cleanup (delivered with #1).
 
 ---
 
