@@ -64,7 +64,10 @@ Each call returns JSON including an `id`. The workflow links by **name**, so
 the id is optional — but you may record it in `.env` (`N8N_CRED_ANTHROPIC_ID`,
 `N8N_CRED_WAHA_ID`) for reference.
 
-### Supermemory (existing — no action)
+### Supermemory (existing — not used by Phase 1B)
+
+> Removed from the Phase 1B workflow — see `docs/supermemory-status.md`. The
+> credential is kept in N8N for the Phase 2 re-enable.
 
 Already present as `Bearer Auth account` (`httpBearerAuth`), id
 `aKreN1AB4QYfQKlz`. To retrieve the token for Step 2's verification script:

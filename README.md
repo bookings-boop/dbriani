@@ -26,9 +26,9 @@ is deferred until 0–4 are validated on real traffic for ~1 week.
 |---|------|-------|
 | 0 | Rotate Anthropic API key | Done |
 | 1 | Git repo + `.env` externalization | Done |
-| 2 | Verify Supermemory contents + tag schema | Pending |
-| 3 | Tighten Supermemory search with `containerTags` | Pending |
-| 4 | Deploy Phase 1B (Telegram approval) | Pending |
+| 2 | Verify Supermemory — connector mis-scoped; MVP ships memory-less | Done |
+| 3 | Supermemory node removed from workflow — see `docs/supermemory-status.md` | Done |
+| 4 | Deploy Phase 1B (Telegram approval) | In progress |
 
 ---
 
@@ -65,8 +65,9 @@ contains **no secrets**:
 |--------|-----------------------------|
 | Anthropic API key | N8N credential `Anthropic API` (httpHeaderAuth) |
 | WAHA API key | N8N credential `WAHA API` (httpHeaderAuth) |
-| Supermemory token | N8N credential `Bearer Auth account` (httpBearerAuth) |
 | Telegram bot token | `{{ $env.TELEGRAM_BOT_TOKEN }}` — N8N container env var |
+
+(Supermemory is removed from the MVP workflow — see `docs/supermemory-status.md`.)
 
 See `docs/credentials-map.md` for setup. Real values live only in `.env`
 (gitignored) and inside N8N.

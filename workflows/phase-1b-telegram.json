@@ -70,41 +70,6 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://api.supermemory.ai/v3/search",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpBearerAuth",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"q\": {{ JSON.stringify($json.body.payload.body) }},\n  \"limit\": 5\n}",
-        "options": {}
-      },
-      "id": "ad9e618a-76c3-4b48-9dfc-39c980c71839",
-      "name": "Supermemory",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        440,
-        -200
-      ],
-      "credentials": {
-        "httpBearerAuth": {
-          "id": null,
-          "name": "Bearer Auth account"
-        }
-      }
-    },
-    {
-      "parameters": {
         "mode": "manual",
         "duplicateItem": false,
         "assignments": {
@@ -124,7 +89,7 @@
             {
               "id": "c3dd9bcf-ec5d-4706-af14-1bbd90d635f0",
               "name": "memoryContext",
-              "value": "={{ JSON.stringify($json) }}",
+              "value": "",
               "type": "string"
             },
             {
@@ -1019,23 +984,12 @@
       "main": [
         [
           {
-            "node": "Supermemory",
+            "node": "Build Prompt",
             "type": "main",
             "index": 0
           }
         ],
         []
-      ]
-    },
-    "Supermemory": {
-      "main": [
-        [
-          {
-            "node": "Build Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ]
       ]
     },
     "Build Prompt": {
