@@ -53,6 +53,15 @@
                 "type": "string",
                 "operation": "notEmpty"
               }
+            },
+            {
+              "id": "ae871689-b17a-55b5-b69a-ed8467f4cfea",
+              "leftValue": "={{ $json.body.payload.from }}",
+              "rightValue": "@c.us",
+              "operator": {
+                "type": "string",
+                "operation": "endsWith"
+              }
             }
           ],
           "combinator": "and"
@@ -161,7 +170,8 @@
           "id": null,
           "name": "Anthropic API"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -218,7 +228,8 @@
       "position": [
         1540,
         -200
-      ]
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -514,7 +525,8 @@
           "id": null,
           "name": "WAHA API"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -604,7 +616,7 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// Mark draft as awaiting edit, return chat info for \"type your edit\" prompt\nconst draftId = $('Parse Callback').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) entry.status = 'awaiting_edit';\n\nreturn {\n  json: {\n    draft_id: draftId,\n    customer_phone: entry ? entry.customer_phone : 'unknown',\n    original_draft: entry ? entry.draft_text : 'unknown'\n  }\n};"
+        "jsCode": "// R4: only one draft may await an edit at a time\nconst draftId = $('Parse Callback').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\nconst entry = queue.find(d => d.id === draftId);\nconst conflict = queue.find(d => d.status === 'awaiting_edit' && d.id !== draftId);\nif (conflict) {\n  return { json: { blocked: true, blocking_phone: conflict.customer_phone || 'unknown', draft_id: draftId } };\n}\nif (entry) entry.status = 'awaiting_edit';\nreturn { json: {\n  blocked: false,\n  draft_id: draftId,\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  original_draft: entry ? entry.draft_text : 'unknown'\n} };"
       },
       "id": "722e62f8-45fd-4a48-9f79-ef5f82c46e10",
       "name": "Set Awaiting Edit",
@@ -756,7 +768,8 @@
           "id": null,
           "name": "Anthropic API"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -911,7 +924,8 @@
           "id": null,
           "name": "WAHA API"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -966,6 +980,107 @@
         1100,
         440
       ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// R1: build a failure alert for Zayn from a node error-output item\nconst j = $input.item.json || {};\nconst err = j.error || {};\nlet msg;\ntry { msg = err.message || err.description || (typeof err === 'string' ? err : '') || JSON.stringify(err); }\ncatch (e) { msg = 'unrecognised error'; }\nlet phone = j.customerPhone || j.customer_phone || '';\ntry { if (!phone && j.draft) phone = j.draft.customer_phone || ''; } catch (e) {}\nconst text = '\\u26a0\\ufe0f Phase 1B \\u2014 a step failed\\n\\n'\n  + 'The workflow caught the error instead of dying silently.\\n\\n'\n  + 'Error: ' + (msg || 'unknown') + '\\n'\n  + (phone ? 'Customer: ' + phone + '\\n' : '')\n  + '\\nNothing was force-sent. Open N8N \\u2192 Executions to find the failed '\n  + 'node and check the pending queue, then handle it manually.';\nreturn { json: { chat_id: 5532831477, alert_text: text } };"
+      },
+      "id": "6e6c3c7a-5ff1-5908-88b3-cca6466e1031",
+      "name": "Build Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        580
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": {{ $json.chat_id }},\n  \"text\": {{ JSON.stringify($json.alert_text) }}\n}",
+        "options": {}
+      },
+      "id": "7c99e42b-2306-552a-b8b0-21367e339996",
+      "name": "Alert Zayn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        580
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "40b642a3-9dcd-5ebf-9d03-795828050643",
+              "leftValue": "={{ $json.blocked }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f7b8b17b-e05f-5c55-8ea6-7222487a14e1",
+      "name": "IF Edit Blocked",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify(\"\\u26a0\\ufe0f A draft for \" + $('Set Awaiting Edit').item.json.blocking_phone + \" is still awaiting your edit.\\n\\nSend that reply (or tap \\u274c Skip on it) before editing another draft.\") }}\n}",
+        "options": {}
+      },
+      "id": "6a517f3b-f8e1-50f0-bfa6-2074a04bcf85",
+      "name": "Notify Edit Blocked",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1720,
+        460
+      ]
     }
   ],
   "connections": {
@@ -1011,6 +1126,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1041,6 +1163,13 @@
         [
           {
             "node": "Save Telegram MsgID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Alert",
             "type": "main",
             "index": 0
           }
@@ -1154,6 +1283,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1193,7 +1329,7 @@
       "main": [
         [
           {
-            "node": "Edit Telegram (Edit Prompt)",
+            "node": "IF Edit Blocked",
             "type": "main",
             "index": 0
           }
@@ -1232,6 +1368,13 @@
         [
           {
             "node": "Parse Regen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Alert",
             "type": "main",
             "index": 0
           }
@@ -1291,6 +1434,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1300,6 +1450,45 @@
       ]
     },
     "Ack No Pending": {
+      "main": [
+        []
+      ]
+    },
+    "Build Alert": {
+      "main": [
+        [
+          {
+            "node": "Alert Zayn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Zayn": {
+      "main": [
+        []
+      ]
+    },
+    "IF Edit Blocked": {
+      "main": [
+        [
+          {
+            "node": "Notify Edit Blocked",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Telegram (Edit Prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Edit Blocked": {
       "main": [
         []
       ]
