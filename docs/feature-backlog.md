@@ -288,10 +288,16 @@ Telegram, the intervention window, the Take-over exit.
 
 The residual risk is the **unsupervised** window — if the operator isn't
 watching (asleep, busy) an Auto conversation keeps replying on the 1–5 min
-delays alone. Additional guardrails are **pending an operator decision** (see
-the question raised 2026-05-21) — candidates from the Hermes §5.7 work: a daily
-auto-send cap, a checkpoint after N consecutive auto-replies with no operator
-input, an optional quiet-hours pause.
+delays alone. **Resolved (operator, 2026-05-21): add hard safety caps** on top
+of the delay window, reusing the Hermes §5.7 work:
+- a **daily auto-send cap** (default ~20/day; configurable);
+- a **consecutive-checkpoint** — after N auto-replies with no operator input,
+  Auto pauses that conversation and asks the operator to confirm before
+  continuing;
+- an optional **quiet-hours pause** — during a configured window Auto holds
+  (does not auto-send) and queues the proposed reply for the operator instead.
+
+Auto mode still runs, but cannot run away unattended.
 
 ### Relationship to other items
 - **FR-1** (Edit feedback loop) — how the operator steers a proposed auto-reply
@@ -323,5 +329,5 @@ loop, the auto-send branch, the exit. Reuses the paused Hermes autonomous-mode
 nodes. **~2–3 days**, built **after FR-1**.
 
 ### Status
-**Deferred** — captured 2026-05-21. Depends on FR-1. One decision pending:
-unsupervised-mode safety caps.
+**Deferred** — fully spec'd 2026-05-21 (safety caps confirmed). Depends on
+FR-1; reuses the paused Hermes autonomous-mode + §5.7 cap work.
