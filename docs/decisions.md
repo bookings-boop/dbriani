@@ -251,3 +251,25 @@ the docker network, so this is also the least-exposed path.
   harmless, nothing is wired to it). `~/.hermes/skills` (8.4 MB) exists —
   relevant to FR-5's "check all skills". A few `config.yaml.bak.*` remain from
   the build (minor hygiene).
+
+### 🛠️ HERMES REVIVAL — Phase 4 (2026-05-21) — background improver built
+- **4.1 — bridge `/improve`** (`hermes-bridge/server.py`, deployed via
+  `scripts/deploy_bridge.py`): given a draft + conversation, Hermes reviews it
+  and returns a better version only if it can meaningfully improve it. Tested
+  end-to-end — a stiff/corporate draft was rewritten into Maria's voice
+  (lowercase, warm, didn't re-ask a detail already given) in ~18s,
+  `improved:true`.
+- **4.2 — the n8n improver branch** (`scripts/build_fr5_improver.py`, 52 → 57
+  nodes): off `Save Telegram MsgID` — Improve Wait (20s) → Check Pending →
+  Hermes Improve → Apply Improvement → Edit Improved Card. ~20s after a draft
+  card posts, if it is still pending, Hermes improves it and the card is
+  re-rendered in place with a "✨ improved by Hermes" marker. One pass per
+  draft (a multi-pass loop is a later enhancement).
+- **Off the critical path:** the fast direct-Claude draft posts first and is
+  unaffected; the improver runs after. `Hermes Improve`'s error output is
+  unwired — a slow/failed/down bridge leaves the draft as-is and breaks
+  nothing. This is the structural fix for the rollback incident.
+- The flaky SSH path to the box persists — the deploy scripts' 5× connection
+  retry carried each deploy through.
+- 4.2 deployed but **not yet behaviourally tested** on a real draft. Remaining:
+  **Phase 4.3 — the learning loop** (Send/Edit/Skip → `behavior_rules`).

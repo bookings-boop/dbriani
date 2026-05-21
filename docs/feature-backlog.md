@@ -398,7 +398,8 @@ Hermes: **additive, not a replacement.**
   approved) — the established Hermes design.
 
 ### Status
-**In progress (2026-05-21)** — operator chose to revive Hermes as the FR-5
-brain. Phased: (1) diagnose latency, (2) fix, (3) re-integration design —
-Hermes as a background improver on the current 52-node workflow, (4) deploy +
-test. See `docs/decisions.md`.
+**In progress (2026-05-21).** Phase 1 (diagnosis — no latency bug), Phase 3
+(design), Phase 4.1 (bridge `/improve` — deployed + tested) and Phase 4.2 (the
+n8n improver branch — deployed, 57 nodes) are **done** — the background
+improver is live. Remaining: **Phase 4.3 — the learning loop** (Send/Edit/Skip
+→ behaviour rules). See `docs/decisions.md` and `docs/hermes-revival-design.md`.
