@@ -194,15 +194,17 @@ def get_mode(customer_id):
         return "approval"
 
 
-def set_mode(customer_id, mode, activated_by):
-    """Record a conversation-mode change. Returns (mode, None) or (None, err)."""
+def set_mode(customer_id, mode, activated_by, break_reason=None):
+    """Record a conversation-mode change. Returns (mode, None) or (None, err).
+    break_reason is recorded when an automatic break-condition triggered the
+    change; it is NULL for a normal operator-driven mode change."""
     if mode not in ("approval", "autonomous", "paused"):
         return None, "invalid mode (use approval|autonomous|paused)"
     sql = (
         "INSERT INTO conversation_modes "
-        "(customer_id, mode, activated_at, activated_by) VALUES ("
+        "(customer_id, mode, activated_at, activated_by, break_reason) VALUES ("
         + ", ".join([_lit(customer_id), _lit(mode)])
-        + ", now(), " + _lit(activated_by) + ")"
+        + ", now(), " + _lit(activated_by) + ", " + _lit(break_reason) + ")"
     )
     try:
         _, err = _psql(sql)
@@ -838,6 +840,7 @@ class Handler(BaseHTTPRequestHandler):
         cid = (payload.get("customer_id") or "").strip()
         mode = (payload.get("mode") or "").strip().lower()
         by = (payload.get("activated_by") or "operator").strip()
+        break_reason = (payload.get("break_reason") or "").strip() or None
         if not cid:
             self._send(400, {"ok": False, "error": "customer_id is required"})
             return
@@ -850,7 +853,7 @@ class Handler(BaseHTTPRequestHandler):
             log("MANUAL KILL SWITCH — all conversations -> approval")
             self._send(200, {"ok": True, "message": "all conversations set to approval"})
             return
-        m, err = set_mode(cid, mode, by)
+        m, err = set_mode(cid, mode, by, break_reason)
         if m is None:
             log("set-mode failed:", err)
             self._send(502, {"ok": False, "error": str(err)})
