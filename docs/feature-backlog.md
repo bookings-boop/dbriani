@@ -62,12 +62,12 @@ sub-path (build refine prompt → Claude → render a new draft card) instead of
   → Claude → render-card sub-path; route the `awaiting_edit` text there instead
   of to `Send to Customer (Manual)`.
 
-### ⚠️ Open question — the other non-Send send paths
-"Only Send sends" is *not* true today (paths #3 and #4 above). Path #3
-(reply-to-card) is the operator's quick way to fire a follow-up like a payment
-link — and is the path the wrong-customer bug was on (now fixed, newest-match).
-**Pending operator decision:** keep #3/#4 as deliberate direct-sends, or fold
-them into a confirm-then-Send too?
+### Resolved — the other non-Send send paths (operator, 2026-05-21)
+Paths #3 (reply-to-card follow-up, e.g. a payment link) and #4 (`/send`)
+**stay as deliberate direct sends** — they are explicit "send this now"
+actions, not draft review. Only the **Edit** button (#2) is re-scoped. So after
+FR-1: among the *buttons*, only Send delivers to the customer; reply-to-card
+and `/send` remain quick manual send tools by design.
 
 ### Effort estimate
 ~4–6 nodes: repurpose the Edit path, add the refine sub-path (Build Refine
@@ -232,3 +232,96 @@ testing.
 ### Status
 **Deferred** per the operator (2026-05-21) — build later. Independent of
 Hermes; can be built on the current live workflow whenever wanted.
+
+---
+
+## FR-4 — Supervised autonomous mode ("Auto" — delayed auto-send with an intervention window)
+
+**Requested by the operator (Zayn), 2026-05-21.**
+
+> "I want another button to tell Claude to continue the chat itself — but it
+> has to always send the updates in the Telegram bot. Never respond faster than
+> 1 min, sometimes 2 min, sometimes 3–5 min — too-fast responding shows we have
+> nothing to do. When the customer responds it should show the customer's
+> response in Telegram, show its suggested response, and the time until it will
+> respond — giving the customer time to speak more and giving me time to give
+> feedback before it's sent."
+
+### Concept
+A **5th button — "Auto"** — on the draft card. Pressing it hands the
+conversation to Claude, which continues the back-and-forth itself — but **never
+silently**. Every customer message and every proposed reply appears in
+Telegram, and every outgoing reply waits out a **visible delay** during which
+the operator can review, steer, or stop it.
+
+### Flow (a conversation in Auto mode)
+1. Customer sends a WhatsApp message → posted to Telegram (the customer's text).
+2. Claude drafts the reply → posted to Telegram as an **Auto card** showing:
+   - the proposed reply text,
+   - a **countdown** — e.g. *"sending in 3m 40s"*,
+   - buttons: **[Edit] [Send now] [Cancel] [Take over]**.
+3. A **human-like delay** runs before the reply sends — randomised **1–5 min**
+   (never under 1 min; varied so replies don't look robotic).
+4. During the window:
+   - **Customer sends more** → the new messages are folded in, Claude re-drafts,
+     the Auto card + countdown update. (The window deliberately gives the
+     customer room to finish — see FR-3.)
+   - **Operator presses Edit** → the FR-1 feedback loop: type feedback → Claude
+     re-drafts → updated Auto card + countdown.
+   - **Send now** → skip the wait, send immediately. **Cancel** → drop this
+     reply. **Take over** → exit Auto for this conversation, back to manual
+     approval.
+5. Countdown hits zero with no intervention → the proposed reply **auto-sends**
+   to the customer via WAHA, logged in Telegram as sent.
+
+### Why the delay (operator's rationale)
+- **Looks human** — instant replies signal idleness; a luxury brand replies
+  considered, not robotic.
+- Gives the **customer** time to add follow-up messages before a reply commits.
+- Gives the **operator** a window to review and steer before anything sends.
+
+### ⚠️ This introduces autonomous sends
+A deliberate, explicit departure from strict "approval-first": after the window
+a message reaches the customer **without** the operator pressing Send. Built-in
+safeguards: per-conversation opt-in (the Auto button), every message visible in
+Telegram, the intervention window, the Take-over exit.
+
+The residual risk is the **unsupervised** window — if the operator isn't
+watching (asleep, busy) an Auto conversation keeps replying on the 1–5 min
+delays alone. Additional guardrails are **pending an operator decision** (see
+the question raised 2026-05-21) — candidates from the Hermes §5.7 work: a daily
+auto-send cap, a checkpoint after N consecutive auto-replies with no operator
+input, an optional quiet-hours pause.
+
+### Relationship to other items
+- **FR-1** (Edit feedback loop) — how the operator steers a proposed auto-reply
+  during the window. **FR-4 depends on FR-1.**
+- **FR-3** (message debounce) — the Auto window naturally absorbs rapid-fire
+  customer messages; FR-4's window and FR-3's quiet-window should share the
+  message-buffering logic rather than be built twice.
+- **Paused Hermes autonomous mode** — the Hermes integration already built a
+  per-conversation autonomous mode (`IF Autonomous` branch, `Auto-Send to
+  Customer`, the §5.7 safety caps, `conversation_modes` table, `let it run` /
+  `take back` / `/manual` commands). **FR-4 is a refined, *supervised* version
+  of it** — reuse/adapt that work; don't rebuild from scratch.
+
+### Design decisions (proposed — confirm when building)
+- 5th button label: **"🤖 Auto"**. Normal draft card → 5 buttons
+  (Send / Edit / Regen / Skip / Auto). Once in Auto, the card becomes the
+  **Auto card** (countdown + Edit / Send now / Cancel / Take over).
+- Delay: random **1–5 min** per reply, configurable; never < 1 min.
+- Exit: **Take over** on any Auto card → that conversation back to manual; a
+  global kill-switch command stops *all* Auto conversations at once.
+- Per-conversation — Auto applies only where the operator pressed the button;
+  every other conversation stays manual-approval.
+
+### Effort estimate
+The largest of the FRs. n8n: a scheduled/cancellable delayed-send mechanism
+(a staticData "pending auto-send" record + a Wait branch + a last-writer-wins
+"still current?" check), the countdown rendering, the re-draft-on-new-input
+loop, the auto-send branch, the exit. Reuses the paused Hermes autonomous-mode
+nodes. **~2–3 days**, built **after FR-1**.
+
+### Status
+**Deferred** — captured 2026-05-21. Depends on FR-1. One decision pending:
+unsupervised-mode safety caps.
