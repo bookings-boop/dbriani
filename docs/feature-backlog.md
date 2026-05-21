@@ -74,17 +74,31 @@ WhatsApp number bans. Recommended guardrails:
 - The proper long-term fix is **Phase 1C — Meta WhatsApp Cloud API**, which
   supports approved message templates for compliant first-contact.
 
-### Open questions to resolve before build
-- **Q1 — input format:** structured `Name: / Phone: / Details:` lines (proposed),
-  or a free-form one-liner?
-- **Q2 — phone format:** what will the operator paste — always `+971…`
-  international, or local `05x`? (Determines phone normalization rules.)
-- **Q3 — opener style:** fully Claude-drafted each time, or anchored to a fixed
-  greeting template?
+### Resolved decisions (operator, 2026-05-21)
+- **Q1 — input format: free-form.** The operator types the lead naturally — no
+  rigid `Name:/Phone:/Details:` template. Parsing: a **regex extracts the phone
+  number** (the routing anchor — it picks the digit run of phone length,
+  ≥9 digits, so guest counts / "50ft" / dates like "25" are ignored); the full
+  free-form text + the extracted phone is handed to Claude, which infers the
+  name and context. If no valid phone is found, the bot replies to the operator
+  ("couldn't find a phone number — please resend") rather than guessing.
+- **Q2 — phone format: accept both.** International with a `+` prefix
+  (`+9715…`) **and** local UAE mobiles (`05x xxx xxxx`). Normalization: strip
+  `+` / `00` and inner spaces/dashes; a leading `0` on a local mobile →
+  replace with `971`; numbers already starting `971` pass through. Result →
+  `<digits>@c.us` for WAHA. (UAE country code assumed — Dubriani is Dubai-based.)
+- **Q3 — opener style: fully Claude-drafted.** No fixed template — the opener
+  is composed from the lead details. Subsequent replies adapt to the customer's
+  responses through the existing conversation flow (nothing extra needed).
 
 ### Effort estimate
 ~4–5 nodes added to the live 40-node workflow via a surgery script; roughly
 half a day including testing.
+
+### Status
+**Build-ready** — all open questions resolved (2026-05-21). Parked in the
+backlog (task 3) per the operator; independent of Hermes, so it can be built
+on the current live workflow on request.
 
 ---
 
@@ -145,4 +159,5 @@ double draft) — no regression.
 testing.
 
 ### Status
-Requested — pending decision: build now on the live workflow, or defer.
+**Deferred** per the operator (2026-05-21) — build later. Independent of
+Hermes; can be built on the current live workflow whenever wanted.
