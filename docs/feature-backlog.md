@@ -6,49 +6,77 @@ for live-system status and `docs/decisions.md` for the build history.
 
 ---
 
-## FR-1 — Conversational refinement loop (shared capability)
+## FR-1 — Edit button → Claude feedback loop (shared capability)
 
-**Requested by the operator (Zayn). Scope expanded 2026-05-21 to a shared
-capability used by FR-2.**
+**Requested by the operator (Zayn). Re-scoped 2026-05-21.**
 
-A natural-language back-and-forth with the bot about a draft, *before* anything
-goes to the customer. Beyond Send / Edit (type the exact text) / Regen / Skip,
-the operator can reply to a draft card with a **plain-language direction** —
-*"ask him his date first"*, *"shorter, drop the price"*, *"he's a VIP, be
-warmer"*, *"suggest ways to put pressure on him"*, *"ignore this one"* — and the
-bot:
-- re-drafts the message honoring the direction, and/or
-- replies back to the operator (a question, options, suggestions) so they
-  decide the next move together,
+The draft card keeps its four buttons — **Send / Edit / Regen / Skip** — but
+their roles are made consistent: **Send is the only button that ever delivers
+a message to the customer. Edit, Regen and Skip are all internal.**
 
-iterating until the operator hits **Send** (or drops it).
+The change is **Edit**. Today Edit means "type the final message yourself" —
+and that typed text is sent **straight to the customer** with no further
+approval (see *Current behaviour* below). Re-scoped:
 
-### Entry points
-- **Skip** on any draft card — instead of just dismissing, hand Claude
-  directions and discuss the reply.
-- **New-lead openers (FR-2)** — refine the first-contact message
-  conversationally before it sends.
-- Optionally any draft card — a "Discuss" affordance alongside Edit / Regen.
+> **Edit (new):** press Edit → the bot asks *"What should Claude change?"* →
+> the operator types **feedback / directions for Claude** (not the final text)
+> — e.g. *"ask his date first"*, *"shorter, drop the price"*, *"he's a VIP, be
+> warmer"*, *"suggest how to pressure him"* → Claude re-drafts using
+> `{current draft + conversation context + feedback}` → a **new draft card** is
+> shown with the same four buttons. **Nothing is sent.** Press Edit again to
+> iterate — this is the refinement loop. The customer receives a message only
+> when the operator presses **Send**.
+
+**Regen** — re-draft with no feedback (unchanged). **Skip** — dismiss
+(unchanged). Both internal.
+
+### Current behaviour (live workflow — to be changed)
+Verified 2026-05-21 against the live workflow. Today a customer can be messaged
+**four** ways and only one is the Send button:
+1. **Send** button → `Prepare Send` → `Send One to Customer`. *(the intended one)*
+2. **Edit** button → `Set Awaiting Edit` (marks the draft `awaiting_edit`) →
+   prompts for text → the operator's typed text → `Process Text Reply` (the
+   `awaiting_edit` branch) → `Send to Customer (Manual)` → **delivered
+   immediately.**
+3. **Reply to a draft card** with text (e.g. a payment link after Send) →
+   `Process Text Reply` (the `reply_to_message` branch) → `Send to Customer
+   (Manual)` → delivered immediately.
+4. **`/send <chatId> <message>`** slash command → `Send to Customer (Manual)`.
+
+The re-scope removes #2: the `awaiting_edit` text routes into a new **refine**
+sub-path (build refine prompt → Claude → render a new draft card) instead of
+`Send to Customer (Manual)`. #3 and #4 — see the open question below.
+
+### Entry points for the loop
+- **Edit button** on any draft card — the primary entry point.
+- **New-lead openers (FR-2)** — the opener card has the same four buttons, so
+  Edit refines it the same way.
 
 ### Design notes
-- **Approval-gated** — any resulting message still goes through the normal
-  approval card before reaching the customer.
-- **Not Hermes-dependent** (correction to an earlier note). A directed re-draft
-  is just another Claude call — `{direction + current draft + conversation
-  context} → revised draft / reply`. Buildable on the current live workflow;
-  Hermes would enrich it but is not required.
-- **Mechanism:** the operator's reply to a draft card is classified as a
-  *direction* (vs a literal Edit); the workflow sends it to Claude, which
-  returns either a revised draft (new card) or a message to the operator
-  (continue the thread). Loop until Send / Skip.
+- **Approval-gated** — a re-drafted message still goes out only on **Send**.
+- **Not Hermes-dependent** — the refine call is just another Claude call
+  (`{draft + context + feedback} → revised draft`), built like the existing
+  `Claude AI (Regen)` path. Buildable on the current live workflow.
+- **Mechanism:** repoint `Set Awaiting Edit` / the `awaiting_edit` status from
+  "awaiting replacement text" to "awaiting feedback"; add a Build Refine Prompt
+  → Claude → render-card sub-path; route the `awaiting_edit` text there instead
+  of to `Send to Customer (Manual)`.
+
+### ⚠️ Open question — the other non-Send send paths
+"Only Send sends" is *not* true today (paths #3 and #4 above). Path #3
+(reply-to-card) is the operator's quick way to fire a follow-up like a payment
+link — and is the path the wrong-customer bug was on (now fixed, newest-match).
+**Pending operator decision:** keep #3/#4 as deliberate direct-sends, or fold
+them into a confirm-then-Send too?
 
 ### Effort estimate
-~3–5 nodes (classify reply → Claude refine call → re-render card / reply);
-~half a day.
+~4–6 nodes: repurpose the Edit path, add the refine sub-path (Build Refine
+Prompt → Claude → render card), rewire `Route Text Action`. ~half a day to
+1 day with testing.
 
 ### Status
-**Deferred** — also the shared dependency for FR-2's conversational handling.
-Buildable on the live workflow; does **not** need Hermes.
+**Deferred** — bundled with FR-2 (shared loop). Buildable on the live workflow;
+does **not** need Hermes.
 
 ---
 
@@ -121,12 +149,12 @@ WhatsApp number bans. Recommended guardrails:
 
 ### Conversational handling — uses FR-1 (operator decision, 2026-05-21)
 Beyond instructions written into the lead text, the operator can **steer a
-lead conversationally** — the FR-1 conversational refinement loop applies to
-new-lead openers. After the opener draft card appears (and at any later draft
-in that conversation), the operator can reply with plain-language directions —
+lead conversationally** — the FR-1 Edit feedback loop applies to new-lead
+openers. After the opener draft card appears (and on any later draft in that
+conversation), the operator presses **Edit** and types feedback for Claude —
 *"ask his date first"*, *"shorter"*, *"he's a VIP, be warmer"*, *"suggest how
-to pressure him"* — and the bot re-drafts / replies back, iterating before
-Send. So per-lead handling instructions can be given **two ways**:
+to pressure him"* — and the bot re-drafts, iterating before Send. So per-lead
+handling instructions can be given **two ways**:
 - **at intake** — written into the free-form lead text (one-shot); and/or
 - **in the loop** — conversationally, on the draft card (FR-1).
 
