@@ -85,3 +85,64 @@ WhatsApp number bans. Recommended guardrails:
 ### Effort estimate
 ~4–5 nodes added to the live 40-node workflow via a surgery script; roughly
 half a day including testing.
+
+---
+
+## FR-3 — Batch rapid-fire customer messages (debounce before drafting)
+
+**Requested by the operator (Zayn), 2026-05-21.**
+
+> "When a customer sends 2 lines — 'good afternoon', 'yes for 25 Monday' — in
+> Telegram it comes as 2 different messages. Take ~30 seconds to collect all
+> the messages and context, then message me once, so I don't miss any message
+> and don't get unnecessary separate messages to respond to."
+
+### Problem
+Customers often spread one thought across several WhatsApp messages sent
+seconds apart. Each arrives as its **own** WAHA webhook event, so the workflow
+drafts a separate reply to each — the operator gets **two (or more) draft
+cards** for what is really one message, can miss the later one, or wastes a
+reply on a fragment ("good afternoon" alone).
+
+### Intended behaviour
+When an inbound message arrives, hold it for a short **quiet-window**
+(~30s, configurable). If the same customer sends more messages inside the
+window, keep collecting and restart the timer. Once the customer has been
+silent for the full window, draft **one** reply against the **combined**
+messages + conversation context, and send the operator **one** draft card.
+
+### Proposed design (n8n)
+- After the webhook extracts `customer_phone` + text, a **Buffer Message** node
+  appends `{text, ts}` to `staticData.global.inboundBuffer[phone]` and stamps
+  `lastSeq[phone]` with a unique token for this message.
+- A **Wait** node pauses this execution ~30s.
+- A **Flush Check** node re-reads `staticData`:
+  - if `lastSeq[phone]` still equals this execution's token (full 30s of
+    silence) → **flush**: join all buffered messages, clear the buffer,
+    continue into the existing `Build Prompt → Claude` drafting path;
+  - if a newer message arrived (token changed) → this execution ends quietly;
+    the newest message's execution does the flush. (Last-writer-wins.)
+- Config: window length default **30s**, configurable.
+
+### Trade-off
+Every reply now appears **~30s later** (the quiet-window). Acceptable here —
+the operator approves manually anyway and 30s ≪ approval time — but it is a
+conscious choice, stated so.
+
+### Bonus
+Fewer duplicate draft cards ⇒ fewer `pendingQueue` entries ⇒ less queue bloat
+and a smaller `telegram_message_id` collision surface (related to the
+reply-routing bug fixed 2026-05-21).
+
+### Risk
+Touches the **live inbound path** — the most critical path — right after the
+incident. Needs careful testing; rollback backups exist. The last-writer-wins
+guard means a `staticData` race degrades, at worst, to today's behaviour (a
+double draft) — no regression.
+
+### Effort estimate
+~4–6 nodes added to the live workflow via a surgery script; ~half a day with
+testing.
+
+### Status
+Requested — pending decision: build now on the live workflow, or defer.
