@@ -303,5 +303,14 @@ the docker network, so this is also the least-exposed path.
   (caps clear); reset → approval. `scripts/deploy_bridge.py` SSH retry budget
   raised 5 → 10 (the path to the box is intermittently unreachable for
   multi-minute windows).
-- Remaining: 4-B (enter/exit autonomous mode + card states), 4-C (the
-  autonomous-send branch), 4-D (behavioural test).
+- **4-B — `/auto` + `/manual` mode commands** (`scripts/build_fr4_modecmd.py`,
+  64 → 67 nodes): reply to a draft card with `/auto` → that conversation goes
+  autonomous; `/manual` → back to approval; `/manual` on its own → global kill
+  switch. Routes through the bridge `/set-mode`. **Mode plumbing only —
+  nothing auto-sends.** Deployed + verified. (Operator chose a command over a
+  5th card button — far simpler/safer surgery.)
+- Remaining: **4-C — the autonomous-send branch** (the delayed auto-send; the
+  step that actually crosses into autonomous sending) and **4-D — a
+  behavioural test on a controlled test number** before any real customer goes
+  autonomous. 4-C must not be deployed live until 4-D is ready (per
+  `docs/fr4-autonomous-design.md`).
