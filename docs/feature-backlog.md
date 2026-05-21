@@ -338,49 +338,65 @@ FR-1; reuses the paused Hermes autonomous-mode + §5.7 cap work.
 
 ---
 
-## FR-5 — Use the wait window for deeper response generation + learning
+## FR-5 — Background draft improvement + continuous learning
 
-**Requested by the operator (Zayn), 2026-05-21.**
+**Requested by the operator (Zayn), 2026-05-21. Refined the same day.**
 
-> "In this time [the FR-3 / FR-4 wait window] we can also do pattern
-> recognition and check all skills to generate the best response and learn.
-> Response within 1 min is less important than the best response."
+> "We can do pattern recognition and check all skills to generate the best
+> response and learn. Response within 1 min is less important than the best
+> response."
+> "Don't delay time, keep it fast — but if a message is not immediately sent,
+> let it do research to see if the draft is the best possible, or there is
+> space for improvement. Keep the learning loop and improve when and where
+> needed."
 
-### Principle
-The wait windows are not idle time. FR-3's 30s debounce and FR-4's 1–5 min
-auto-delay create a **time budget** — use it to produce a *better* reply and
-to *learn*. Explicit operator priority: **quality > speed.** A considered reply
-in 2–3 minutes beats a fast shallow one.
+### The model
+- **Fast first draft** — generated and shown to the operator immediately, no
+  artificial delay. ("Keep it fast.")
+- **Background improvement while pending** — a draft then *sits unsent* in the
+  approval queue until the operator taps Send (seconds, often minutes). For as
+  long as it is pending, a background pass researches whether it is the best
+  possible reply and improves it where there is room — updating the card in
+  place. If the operator sends instantly, nothing extra runs.
+- **Continuous learning loop** — learn from outcomes; grow and improve the
+  behaviour-rules / pattern store over time, "when and where needed."
 
-### What "deeper" means
+The earlier framing ("add a wait window for deep processing") is **superseded**
+— the operator does not want added delay. Improvement happens in the
+background, off the critical path. (FR-3's debounce and FR-4's auto-delay still
+stand; they serve different purposes — not double-drafting, and looking human
+in autonomous mode.)
+
+### What the background pass does
 - **Pattern recognition** — read the customer's intent and stage; match against
   what has worked in similar past conversations.
-- **Use all available knowledge** — the full system-prompt knowledge (pricing,
-  yachts, packages, hard rules), the conversation history, and learned
-  behaviour rules — optimise for the best response, not the fastest.
-- **Learn** — capture what works into a growing store of behaviour rules /
-  patterns so the agent improves over time.
+- **Use all available knowledge** — system-prompt knowledge, conversation
+  history, learned behaviour rules — to find a better reply.
+- **Learn** — capture what works into a growing behaviour-rules / pattern store.
 
-### This is the Hermes "learning brain" — and the constraint that killed it is gone
-The **paused Hermes integration was exactly this**: pattern/trigger detection,
-a `behavior_rules` store of learned rules, conversation-health scoring, a
-learning loop. Hermes was rolled back on 2026-05-21 because its drafts were
-slow (20–50s, sometimes >120s) against a fast-reply expectation.
+### This is the Hermes "learning brain" — and it now belongs OFF the critical path
+The paused Hermes integration was exactly this brain (pattern/trigger
+detection, a `behavior_rules` store, conversation-health scoring, a learning
+loop). It was rolled back 2026-05-21 because its drafts were slow (20–50s,
+sometimes >120s).
 
-**The operator's "quality > speed" stance + the FR-3/FR-4 wait windows remove
-that objection.** If a draft is allowed 30s–3min — because the workflow is
-deliberately waiting anyway — Hermes's latency is no longer a defect; the wait
-window *is* the time budget Hermes needs. FR-5 is, in effect, the case for
-**reviving Hermes properly**, drafting inside the wait window.
+**The refined model fixes the root cause of that incident.** The original
+integration put Hermes *on the critical path* — every customer reply waited on
+Hermes, so when Hermes was slow, everything broke (502s, missed/misrouted
+sends). In this model the **fast direct-Claude draft stays the critical path**,
+and **Hermes runs as the background improver** on pending drafts. Hermes being
+slow no longer matters — it has the whole pending-window to work, and if it is
+slow or fails, the fast draft is already there. This is the safe way to revive
+Hermes: **additive, not a replacement.**
 
 ### Open questions
-- **"Check all skills"** — confirm scope: use all our knowledge (pricing / past
-  conversations / learned rules), or is a specific skill/tool system intended?
-- **"Learn"** — persistent cross-conversation learning (behaviour rules that
-  accumulate and improve), operator-approved before they take effect — as the
-  Hermes design already specified (`active=false` until approved)?
+- **"Check all skills"** — confirm scope: all our knowledge (pricing / past
+  conversations / learned rules), or a specific skill/tool system.
+- **"Learn"** — persistent cross-conversation learning, operator-approved
+  before rules take effect (`active=false` until approved, as Hermes designed).
 
 ### Status
-**Deferred** — captured 2026-05-21. Strategically significant: it reframes
-whether to revive the paused Hermes integration (the latency objection no
-longer applies). Direction decision pending.
+**In progress (2026-05-21)** — operator chose to revive Hermes as the FR-5
+brain. Phased: (1) diagnose latency, (2) fix, (3) re-integration design —
+Hermes as a background improver on the current 52-node workflow, (4) deploy +
+test. See `docs/decisions.md`.
