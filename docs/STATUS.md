@@ -22,9 +22,12 @@ everything actually stands. Chronological detail is in `docs/decisions.md`.
 - **FR-5** — background improver + learning loop (bridge `/improve`, `/learn`,
   `/rules`). Never behaviourally tested.
 - **FR-4** — autonomous mode: 🤖 Auto button, `/auto` `/manual`, the
-  autonomous-send branch, bridge `/autosend-check`. The Auto button is sluggish
-  ("~3 taps"); never behaviourally tested. Dormant until a conversation is on
-  `/auto`.
+  autonomous-send branch, bridge `/autosend-check`. **Wiring verified by
+  inspection (2026-05-21):** the 🤖 Auto button routes correctly end-to-end —
+  button → `Parse Callback` → `Route Action` output 4 → `Set Auto Mode` →
+  bridge `/set-mode` (endpoint live). It will work on a fresh draft card; on an
+  orphaned card it hits the same null-draft crash as Send (see issue #3). Still
+  needs one live operator press to confirm + to diagnose the "~3 taps".
 
 ## Known issues — must fix before relying on them
 
@@ -32,12 +35,15 @@ everything actually stands. Chronological detail is in `docs/decisions.md`.
    n8n `staticData`, which n8n does not share across concurrent executions — so
    each line produces its own draft. Needs a **Redis-backed redesign** (Redis
    is already on the box).
-2. **The deploy scripts clobber the live draft queue.** Each `build_*.py` PUTs
-   the workflow with a `staticData` snapshot taken minutes earlier (during the
-   slow, flaky-SSH deploy). Drafts created in that window are overwritten —
-   this orphaned draft cards during the session. **Before any future deploy:**
-   the deploy must re-fetch `staticData` immediately before the PUT (or omit it
-   so n8n keeps the live copy).
+2. **Deploy-script queue clobber — FIXED (2026-05-21).** The old `build_*.py`
+   each PUT a `staticData` snapshot taken minutes earlier (during the slow,
+   flaky-SSH deploy), overwriting any drafts created in that window — this
+   orphaned draft cards during the session. Fixed by `scripts/n8n_deploy.py`:
+   its `safe_put()` re-fetches `staticData` in the instant before the PUT
+   (lost-draft window: minutes → ~1-3s) and warns if the queue shrank. **All
+   future deploys MUST go through `n8n_deploy.py`.** The old `build_*.py` are
+   spent (they early-return on re-run, so cannot clobber) and are left as-is
+   for history. The residual ~1-3s race is covered by issue #3's fix.
 3. **`Prepare Send` and the callback handlers crash on a missing draft.** When
    a card is orphaned (`draft_found:false`) the handler hits a null and the
    execution errors. They must fail gracefully ("draft expired — ask the
@@ -45,7 +51,8 @@ everything actually stands. Chronological detail is in `docs/decisions.md`.
 
 ## Pending work (priority order)
 
-1. Fix the deploy-script `staticData` clobber — gate for everything below.
+1. ~~Fix the deploy-script `staticData` clobber~~ — **DONE (2026-05-21)**:
+   `scripts/n8n_deploy.py` `safe_put()`. Future deploys are unblocked.
 2. Make `Prepare Send` / callback handlers graceful on a missing draft.
 3. FR-3 — Redis-backed debounce redesign.
 4. FR-4 / FR-5 — a real operator test pass to verify or find the bugs.

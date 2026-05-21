@@ -376,3 +376,27 @@ the docker network, so this is also the least-exposed path.
   buffer — every line produces its own draft. A correct fix needs a shared
   store (Redis — already on the box), not `staticData`. The `staticData`
   debounce should be considered non-functional.
+
+### 🛡️ SAFE-DEPLOY HELPER — queue-clobber fixed (2026-05-21)
+- Root cause confirmed: every old `build_*.py` did GET workflow → modify nodes
+  (minutes, over flaky SSH) → PUT including the *stale* `staticData` snapshot
+  from the GET. Customer drafts created during that window were rolled back —
+  orphaning Telegram cards, which then crash Send / 🤖 Auto on a null draft.
+- Fix: new `scripts/n8n_deploy.py` — a single `N8N` client. `safe_put()`
+  **re-fetches `staticData` in the instant before the PUT** and sends that, so
+  the live `pendingQueue` is never rolled back. Lost-draft window shrinks from
+  minutes to the ~1-3s of the PUT. It also: backs up the modified workflow,
+  prints the `pendingQueue` size before/after, **warns if the queue shrank**,
+  and **fails closed** (aborts, never PUTs a stale snapshot) if the re-fetch
+  fails. Read-only `__main__` self-test passed (82 nodes, 57 drafts in queue).
+- n8n nests global static data under `staticData.global` (the workflow reads
+  it via `$getWorkflowStaticData('global')`); the draft queue is
+  `staticData.global.pendingQueue`.
+- The old `build_*.py` are spent (they early-return on re-run → no PUT) and
+  left as-is for history. **Rule going forward: every deploy uses
+  `n8n_deploy.py`.** Residual ~1-3s race is left to the graceful-handler fix
+  (STATUS.md issue #3).
+- 🤖 Auto button wiring verified by inspection: button → `Parse Callback` →
+  `Route Action` output 4 → `Set Auto Mode` → bridge `/set-mode` (endpoint
+  live). Correct end-to-end; fails only on an orphaned card (same null-draft
+  crash as Send). Still needs one live operator press to confirm.
