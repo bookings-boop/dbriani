@@ -75,8 +75,10 @@ Prompt → Claude → render card), rewire `Route Text Action`. ~half a day to
 1 day with testing.
 
 ### Status
-**Deferred** — bundled with FR-2 (shared loop). Buildable on the live workflow;
-does **not** need Hermes.
+**✅ Deployed 2026-05-21** — live workflow now 49 nodes. Edit re-scoped to the
+feedback loop (Prep Refine → Build Refine Prompt → Claude AI (Refine) → Parse
+Refine → Edit Telegram (Refine)). Built by `scripts/build_fr1_fr2.py`.
+Awaiting operator behavioural test.
 
 ---
 
@@ -166,10 +168,10 @@ Intake + outbound path ~4–5 nodes, plus the FR-1 loop ~3–5 nodes. Built
 together, roughly **1 day** including testing.
 
 ### Status
-**Build-ready** — all decisions resolved (2026-05-21). Parked in the backlog
-(task 3) per the operator. Bundled with FR-1 (shared conversational loop);
-neither needs Hermes — both can be built on the current live workflow on
-request.
+**✅ Deployed 2026-05-21** — live workflow now 49 nodes. `/lead` intake live
+(Prep Lead Draft → Build Lead Prompt → Claude AI (Lead) → Parse Lead Response
+→ the existing Queue & Format → Send Draft to Telegram → Save Telegram MsgID).
+Built by `scripts/build_fr1_fr2.py`. Awaiting operator behavioural test.
 
 ---
 

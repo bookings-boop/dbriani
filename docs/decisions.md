@@ -194,3 +194,22 @@ the docker network, so this is also the least-exposed path.
   the queue will re-bloat. The structural fix (self-prune in `Queue & Format`,
   or the R10 Redis migration) is still pending. Re-run `prune_queue.py` as
   interim hygiene whenever the queue gets large.
+
+### 🛠️ FR-1 + FR-2 DEPLOYED (2026-05-21) — Edit feedback loop + `/lead` intake
+- `scripts/build_fr1_fr2.py` applied FR-1 (Edit button → Claude feedback loop)
+  and FR-2 (`/lead` outbound new-lead intake) to the live workflow: **40 → 49
+  nodes**. 9 nodes added, 4 modified (Process Text Reply, Route Text Action,
+  Edit Telegram (Edit Prompt), Queue & Format). Backups: `PRE-FR12-*.json`.
+- **PUT "unauthorized" — transient.** Two `build_fr1_fr2.py --deploy` runs
+  failed with the n8n API returning `{"message":"unauthorized"}` on the PUT
+  while every GET in the same run worked. Diagnostics proved the API key is
+  valid for writes — an empty-body PUT/POST returned a clean `400` schema
+  error (auth passed), and a no-op PUT succeeded. The FR-12 PUT then went
+  through. Cause: a transient on the n8n side, not the key and not the body.
+- **staticData snapshot caveat:** the successful PUT carried a draft-queue
+  snapshot ~6 min old (from the build's GET). Any draft created or actioned
+  in that ~15:09–15:15 window is not reflected in the queue — its Telegram
+  card would be orphaned ("draft not found" on a button tap). Low-traffic
+  afternoon window; flagged to the operator.
+- FR-1 + FR-2 are deployed but **not yet behaviourally tested** — operator to
+  test the Edit feedback loop and a `/lead` message.
