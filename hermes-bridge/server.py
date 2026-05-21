@@ -5,6 +5,8 @@ Endpoints (all POST except /health; POSTs require X-Bridge-Token):
   GET  /health      liveness probe
   POST /draft       customer context -> Hermes draft (JSON {messages, notes_for_zayn})
   POST /improve     review + improve an existing draft (FR-5 background pass)
+  POST /learn       judge operator feedback -> capture a behavior_rule (inactive)
+  POST /rules       list pending rules; activate or discard one
   POST /save-rule   persist a behavior_rule (INSERT into Postgres)
 
 Drafting runs `hermes chat -q ... -Q` headless. On a refinement the prompt
@@ -225,6 +227,61 @@ def manual_killswitch():
         return (err is None), err
     except Exception as e:
         return False, repr(e)
+
+
+# --- behavior-rule review (FR-5 learning loop) -----------------------------
+
+def list_pending_rules(limit=25):
+    """Inactive (awaiting-approval) behavior rules, newest first."""
+    sql = ("SELECT id || E'\\t' || scope || E'\\t' || rule_text "
+           "FROM behavior_rules WHERE active = false "
+           "AND scope IN ('global', 'customer', 'scenario', 'tier') "
+           f"ORDER BY created_at DESC LIMIT {int(limit)}")
+    try:
+        out, err = _psql(sql)
+        if err:
+            return None, err
+        rows = []
+        for ln in (out or "").splitlines():
+            p = ln.split("\t")
+            if len(p) >= 3 and p[0].strip().isdigit():
+                rows.append({"id": p[0].strip(), "scope": p[1].strip(),
+                             "rule_text": "\t".join(p[2:]).strip()})
+        return rows, None
+    except Exception as e:
+        return None, repr(e)
+
+
+def activate_rule(rule_id):
+    """Set a behavior_rule active=true. Returns (ok, err)."""
+    try:
+        rid = int(rule_id)
+    except (TypeError, ValueError):
+        return False, "rule_id must be an integer"
+    out, err = _psql(f"UPDATE behavior_rules SET active = true "
+                     f"WHERE id = {rid} RETURNING id")
+    if err:
+        return False, err
+    lines = [x for x in (out or "").splitlines() if x.strip()]
+    ok = bool(lines) and lines[0].strip().isdigit()
+    return ok, (None if ok else "no rule with that id")
+
+
+def discard_rule(rule_id):
+    """Discard a pending behavior_rule. The hermes_rw role has no DELETE grant,
+    so this UPDATEs the scope to a sentinel ('_discarded') — the rule then
+    never matches fetch_behavior_rules or list_pending_rules. Returns (ok, err)."""
+    try:
+        rid = int(rule_id)
+    except (TypeError, ValueError):
+        return False, "rule_id must be an integer"
+    out, err = _psql(f"UPDATE behavior_rules SET scope = '_discarded' "
+                     f"WHERE id = {rid} AND active = false RETURNING id")
+    if err:
+        return False, err
+    lines = [x for x in (out or "").splitlines() if x.strip()]
+    ok = bool(lines) and lines[0].strip().isdigit()
+    return ok, (None if ok else "no pending rule with that id")
 
 
 # --- autonomous-mode safety caps (§5.7) ------------------------------------
@@ -458,6 +515,30 @@ def build_improve_query(p):
     return "\n".join(parts)
 
 
+def build_learn_query(p):
+    """Ask Hermes whether an operator's correction is a DURABLE behaviour rule
+    (FR-5 learning loop) versus a one-off tweak."""
+    fb = (p.get("feedback") or "").strip()
+    draft = p.get("draft_text")
+    if isinstance(draft, list):
+        draft = "\n\n".join(str(m) for m in draft)
+    name = (p.get("customer_name") or "the customer").strip()
+    return "\n".join([
+        "TASK: An operator (Zayn) reviewed a drafted WhatsApp reply for "
+        "Dubriani Yachts and gave a correction. Decide whether that correction "
+        "is a DURABLE preference that should shape FUTURE drafts — a lasting "
+        "style or policy preference, or a fact about this customer — as opposed "
+        "to a one-off tweak to this single message.",
+        f"\nThe draft (for {name}) was:\n" + str(draft or "").strip(),
+        "\nThe operator's correction was:\n" + fb,
+        "\nRespond with ONLY one JSON object — no fences, no commentary:\n"
+        '{"is_rule": true|false, "rule_text": "<if is_rule: a concise '
+        'imperative rule, 25 words max>", "scope": "global" (applies to all '
+        'customers) or "customer" (only this one), "reasoning": "<one line>"}\n'
+        'If the correction is a one-off tweak, return {"is_rule": false}.',
+    ])
+
+
 def run_hermes(query):
     cmd = [HERMES, "--profile", "default", "chat", "-q", query, "-Q",
            "--source", "tool", "--yolo", "-t", "memory"]
@@ -512,7 +593,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/draft", "/improve", "/save-rule", "/set-mode", "/caps"):
+        if self.path not in ("/draft", "/improve", "/learn", "/rules",
+                             "/save-rule", "/set-mode", "/caps"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -528,6 +610,10 @@ class Handler(BaseHTTPRequestHandler):
             self._save_rule(payload)
         elif self.path == "/improve":
             self._improve(payload)
+        elif self.path == "/learn":
+            self._learn(payload)
+        elif self.path == "/rules":
+            self._rules(payload)
         elif self.path == "/set-mode":
             self._set_mode(payload)
         elif self.path == "/caps":
@@ -655,6 +741,75 @@ class Handler(BaseHTTPRequestHandler):
             "session_id": sid,
             "elapsed_ms": elapsed,
         })
+
+    def _learn(self, payload):
+        fb = (payload.get("feedback") or "").strip()
+        if not fb:
+            self._send(400, {"ok": False, "error": "feedback is required"})
+            return
+        query = build_learn_query(payload)
+        try:
+            rc, out, err, elapsed = run_hermes(query)
+        except subprocess.TimeoutExpired:
+            self._send(502, {"ok": False, "error": "hermes timeout"})
+            return
+        except Exception as e:
+            self._send(502, {"ok": False, "error": f"hermes exec error: {e}"})
+            return
+        parsed, blob = extract_json(out)
+        if not isinstance(parsed, dict):
+            log(f"learn FAIL rc={rc} (no parseable JSON)")
+            self._send(502, {"ok": False, "error": "hermes produced no result",
+                             "rc": rc, "raw": (blob or out)[:1000]})
+            return
+        if not parsed.get("is_rule"):
+            log(f"learn: feedback judged one-off elapsed={elapsed}ms")
+            self._send(200, {"ok": True, "captured": False,
+                             "reason": "feedback judged a one-off tweak"})
+            return
+        rule_text = (parsed.get("rule_text") or "").strip()
+        if not rule_text:
+            self._send(200, {"ok": True, "captured": False,
+                             "reason": "no rule_text returned"})
+            return
+        scope = (parsed.get("scope") or "global").strip().lower()
+        if scope not in VALID_SCOPES:
+            scope = "global"
+        scope_value = ((payload.get("customer_id") or "").strip()
+                       if scope == "customer" else None)
+        rid, e2 = save_behavior_rule(rule_text, scope, scope_value,
+                                     "edit_feedback", parsed.get("reasoning"))
+        if rid is None:
+            log("learn save FAILED:", e2)
+            self._send(502, {"ok": False, "error": "rule insert failed: " + str(e2)})
+            return
+        log(f"learn: rule captured id={rid} scope={scope} text={rule_text[:70]!r}")
+        self._send(200, {"ok": True, "captured": True, "rule_id": rid,
+                         "rule_text": rule_text, "scope": scope,
+                         "reasoning": parsed.get("reasoning", ""),
+                         "elapsed_ms": elapsed})
+
+    def _rules(self, payload):
+        action = (payload.get("action") or "list").strip().lower()
+        if action == "list":
+            rows, err = list_pending_rules()
+            if rows is None:
+                self._send(502, {"ok": False, "error": str(err)})
+                return
+            self._send(200, {"ok": True, "pending": rows, "count": len(rows)})
+            return
+        if action in ("activate", "discard"):
+            fn = activate_rule if action == "activate" else discard_rule
+            ok, err = fn(payload.get("rule_id"))
+            if not ok:
+                code = 400 if "integer" in str(err) else 404
+                self._send(code, {"ok": False, "error": str(err)})
+                return
+            log(f"rule {action}d: id={payload.get('rule_id')}")
+            self._send(200, {"ok": True, "action": action,
+                             "rule_id": payload.get("rule_id")})
+            return
+        self._send(400, {"ok": False, "error": "action must be list|activate|discard"})
 
     def _save_rule(self, payload):
         text = (payload.get("rule_text") or "").strip()

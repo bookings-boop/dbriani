@@ -271,5 +271,16 @@ the docker network, so this is also the least-exposed path.
   nothing. This is the structural fix for the rollback incident.
 - The flaky SSH path to the box persists — the deploy scripts' 5× connection
   retry carried each deploy through.
-- 4.2 deployed but **not yet behaviourally tested** on a real draft. Remaining:
-  **Phase 4.3 — the learning loop** (Send/Edit/Skip → `behavior_rules`).
+- 4.2 deployed but **not yet behaviourally tested** on a real draft.
+- **4.3a — bridge learning endpoints** (`hermes-bridge/server.py`): `/learn`
+  asks Hermes whether operator feedback is a durable rule and, if so, captures
+  it as a `behavior_rule` (inactive); `/rules` lists pending rules and
+  activates / discards them. Tested end-to-end — durable feedback ("always
+  address customers as Mr/Ms…") was captured as a clean global rule; list +
+  discard verified. **Found:** the `hermes_rw` Postgres role has
+  SELECT/INSERT/UPDATE but **no DELETE** — so `discard` was changed from DELETE
+  to an UPDATE (scope → `_discarded` sentinel, filtered out of fetch + list).
+- **Remaining — Phase 4.3b:** the n8n side — the FR-1 refine path calls
+  `/learn` when the operator gives Edit feedback, and `/rules` review commands
+  in Telegram. Plus behavioural testing of FR-3 + the 4.2 improver on real
+  traffic.

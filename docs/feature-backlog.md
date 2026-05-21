@@ -398,8 +398,12 @@ Hermes: **additive, not a replacement.**
   approved) — the established Hermes design.
 
 ### Status
-**In progress (2026-05-21).** Phase 1 (diagnosis — no latency bug), Phase 3
-(design), Phase 4.1 (bridge `/improve` — deployed + tested) and Phase 4.2 (the
-n8n improver branch — deployed, 57 nodes) are **done** — the background
-improver is live. Remaining: **Phase 4.3 — the learning loop** (Send/Edit/Skip
-→ behaviour rules). See `docs/decisions.md` and `docs/hermes-revival-design.md`.
+**In progress (2026-05-21).** Done: Phase 1 (diagnosis — no latency bug),
+Phase 3 (design), Phase 4.1 (bridge `/improve` — deployed + tested), Phase 4.2
+(n8n improver branch — deployed, 57 nodes), Phase 4.3a (bridge `/learn` +
+`/rules` learning endpoints — deployed + tested). The background improver is
+live; the learning brain's bridge side is ready.
+**Remaining: Phase 4.3b** — the n8n side: wire the FR-1 Edit feedback to
+`/learn`, add `/rules` review commands in Telegram. Plus real-traffic
+behavioural testing of FR-3 + the 4.2 improver. See `docs/decisions.md` and
+`docs/hermes-revival-design.md`.
