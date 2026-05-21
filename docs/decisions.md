@@ -354,3 +354,25 @@ the docker network, so this is also the least-exposed path.
 - Pending: 4-D behavioural test on a test number; resolve button
   responsiveness (box health); real-traffic testing of FR-3 / improver /
   learning loop.
+
+### 📨 REPLY-TO-CLAUDE RULE (2026-05-21)
+- Operator: replying to a draft card with text was *sending that text to the
+  customer*. Re-scoped: reply-to-card text now routes to **Claude as feedback
+  (refine)** by default — it never auto-sends. Exceptions: `send this: X`
+  sends X verbatim; `ask this: X` refines with an instruction to ask X.
+  `scripts/build_reply_to_claude.py` patched the Process Text Reply (A) block.
+  Deployed + verified (82 nodes).
+- Deferred: PDF-attachment handling (operator attaches a PDF → Claude drafts
+  from it) — needs Telegram document download; a separate build.
+
+### 🔎 BOX DIAGNOSIS CORRECTION (2026-05-21)
+- An earlier claim that the box was overloaded / n8n OOM-restarting was
+  **wrong**. Direct check: 1.5 GB RAM free, load 0.10, n8n container 0
+  restarts, `OOMKilled=false`. The box is healthy. n8n executions are saved
+  and recent ones all show `status=success`.
+- **FR-3 debounce is broken by design** (independent of box health): it buffers
+  inbound messages in n8n `staticData`, but n8n loads/saves staticData
+  per-execution, so concurrent message executions cannot see each other's
+  buffer — every line produces its own draft. A correct fix needs a shared
+  store (Redis — already on the box), not `staticData`. The `staticData`
+  debounce should be considered non-functional.
