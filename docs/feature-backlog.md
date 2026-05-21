@@ -6,21 +6,49 @@ for live-system status and `docs/decisions.md` for the build history.
 
 ---
 
-## FR-1 — Skip → conversational directions
+## FR-1 — Conversational refinement loop (shared capability)
 
-**Requested by the operator (Zayn).**
+**Requested by the operator (Zayn). Scope expanded 2026-05-21 to a shared
+capability used by FR-2.**
 
-After tapping **Skip** on a draft card, let the operator give Claude
-conversational directions instead of just dismissing the draft — e.g.
-*"ignore"*, *"ask him first how he wants to pay"*, *"suggest ways to put
-pressure on him"* — and have Claude reply back to the operator so they decide
-the next reply together (a short back-and-forth before anything goes to the
-customer).
+A natural-language back-and-forth with the bot about a draft, *before* anything
+goes to the customer. Beyond Send / Edit (type the exact text) / Regen / Skip,
+the operator can reply to a draft card with a **plain-language direction** —
+*"ask him his date first"*, *"shorter, drop the price"*, *"he's a VIP, be
+warmer"*, *"suggest ways to put pressure on him"*, *"ignore this one"* — and the
+bot:
+- re-drafts the message honoring the direction, and/or
+- replies back to the operator (a question, options, suggestions) so they
+  decide the next move together,
 
-- **Status:** deferred until the Hermes integration is stable + re-deployed
-  (this feature is most natural on the Hermes refinement loop).
-- **Approval-gated:** any message that results still goes through the normal
+iterating until the operator hits **Send** (or drops it).
+
+### Entry points
+- **Skip** on any draft card — instead of just dismissing, hand Claude
+  directions and discuss the reply.
+- **New-lead openers (FR-2)** — refine the first-contact message
+  conversationally before it sends.
+- Optionally any draft card — a "Discuss" affordance alongside Edit / Regen.
+
+### Design notes
+- **Approval-gated** — any resulting message still goes through the normal
   approval card before reaching the customer.
+- **Not Hermes-dependent** (correction to an earlier note). A directed re-draft
+  is just another Claude call — `{direction + current draft + conversation
+  context} → revised draft / reply`. Buildable on the current live workflow;
+  Hermes would enrich it but is not required.
+- **Mechanism:** the operator's reply to a draft card is classified as a
+  *direction* (vs a literal Edit); the workflow sends it to Claude, which
+  returns either a revised draft (new card) or a message to the operator
+  (continue the thread). Loop until Send / Skip.
+
+### Effort estimate
+~3–5 nodes (classify reply → Claude refine call → re-render card / reply);
+~half a day.
+
+### Status
+**Deferred** — also the shared dependency for FR-2's conversational handling.
+Buildable on the live workflow; does **not** need Hermes.
 
 ---
 
@@ -32,16 +60,14 @@ customer).
 > number and details if any, and have the bot start a chat with the customer."
 
 ### Intended flow
-1. Operator messages the approval bot, e.g.:
+1. Operator messages the approval bot — `/lead` keyword, then **free-form** text:
    ```
-   /lead
-   Name: John Smith
-   Phone: +971501234567
-   Details: wants a 50ft yacht Saturday sunset, 8 guests
+   /lead John Smith +971501234567 — returning client, wants a 50ft yacht
+   Saturday sunset, 8 guests, push the sunset package, no hard-selling
    ```
-2. Telegram trigger → router detects the `/lead` command → **Parse Lead** node
-   extracts name / phone / details and normalizes the phone to a WAHA chatId
-   (`<digits>@c.us`).
+2. Telegram trigger → router detects the `/lead` keyword → **Parse Lead** node
+   regex-extracts the phone, normalizes it to a WAHA chatId (`<digits>@c.us`),
+   and passes the remaining free-form text to Claude as context.
 3. Build an outbound drafting prompt — *"New outbound lead, no prior message.
    Draft Maria's first-contact WhatsApp opener to &lt;name&gt;. Context:
    &lt;details&gt;."* → Claude drafts the opening message.
@@ -63,6 +89,8 @@ customer).
 - **Independent of Hermes** — this could be built on the *current* live
   pre-Hermes workflow; it does not need the paused Hermes integration. Held in
   the backlog per the operator's call, but can be un-deferred if wanted.
+- **Depends on FR-1** — the conversational handling (below) is the FR-1 loop;
+  FR-2 and FR-1 are built together.
 
 ### ⚠️ Risk to flag before building
 WAHA is the **unofficial** WhatsApp API. Messaging numbers that have **not**
@@ -91,14 +119,29 @@ WhatsApp number bans. Recommended guardrails:
   is composed from the lead details. Subsequent replies adapt to the customer's
   responses through the existing conversation flow (nothing extra needed).
 
+### Conversational handling — uses FR-1 (operator decision, 2026-05-21)
+Beyond instructions written into the lead text, the operator can **steer a
+lead conversationally** — the FR-1 conversational refinement loop applies to
+new-lead openers. After the opener draft card appears (and at any later draft
+in that conversation), the operator can reply with plain-language directions —
+*"ask his date first"*, *"shorter"*, *"he's a VIP, be warmer"*, *"suggest how
+to pressure him"* — and the bot re-drafts / replies back, iterating before
+Send. So per-lead handling instructions can be given **two ways**:
+- **at intake** — written into the free-form lead text (one-shot); and/or
+- **in the loop** — conversationally, on the draft card (FR-1).
+
+This makes FR-1 and FR-2 one connected capability — **FR-2 is built together
+with FR-1**.
+
 ### Effort estimate
-~4–5 nodes added to the live 40-node workflow via a surgery script; roughly
-half a day including testing.
+Intake + outbound path ~4–5 nodes, plus the FR-1 loop ~3–5 nodes. Built
+together, roughly **1 day** including testing.
 
 ### Status
-**Build-ready** — all open questions resolved (2026-05-21). Parked in the
-backlog (task 3) per the operator; independent of Hermes, so it can be built
-on the current live workflow on request.
+**Build-ready** — all decisions resolved (2026-05-21). Parked in the backlog
+(task 3) per the operator. Bundled with FR-1 (shared conversational loop);
+neither needs Hermes — both can be built on the current live workflow on
+request.
 
 ---
 
