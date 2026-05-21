@@ -228,3 +228,26 @@ the docker network, so this is also the least-exposed path.
   Verified: 52 nodes, active, all 3 new nodes present.
 - FR-3 deployed but **not yet behaviourally tested** — operator to send two
   quick messages and confirm one combined draft card appears after ~30s.
+
+### 🔬 HERMES REVIVAL — Phase 1 diagnosis (2026-05-21)
+- `scripts/diagnose_hermes.py` ran off the live path: located the CLI (Hermes
+  Agent v0.14.0), inspected `~/.hermes`, ran 6 timed `hermes chat` test drafts.
+- **Finding — Hermes drafting is healthy.** Sequential drafts averaged **~13s**
+  (12.8–14.9s with `-t memory`, 10.9–13.6s without), all `rc=0` with real draft
+  output. The memory tool adds only **+1.5s** — negligible. No 20–50s slowness
+  and no 120s timeouts were reproduced in isolation.
+- `~/.hermes` is 1.5 GB, but that is the Hermes install itself (bundled node,
+  claude-code, the agent repo + a 229 MB git pack). The actual `profiles` dir
+  is 44 MB and `sessions` 1.4 MB — moderate, **not** the cause. The
+  "profile-state bloat" hypothesis is ruled out.
+- **Conclusion: there is no Hermes latency *bug*.** The rollback slowdown was a
+  **critical-path / concurrency** effect — Hermes sat on the live path, so
+  under concurrent customer traffic the executions piled up. The FR-5 refined
+  design (Hermes OFF the critical path, as a background improver) sidesteps
+  this entirely. **Phase 2 (latency fix) is largely moot;** the revival
+  proceeds to Phase 3 (re-integration design).
+- Side notes: the `hermes-bridge` service is actually `active` (the handoff
+  recorded it stopped — it is running, just `disabled` from boot autostart;
+  harmless, nothing is wired to it). `~/.hermes/skills` (8.4 MB) exists —
+  relevant to FR-5's "check all skills". A few `config.yaml.bak.*` remain from
+  the build (minor hygiene).
