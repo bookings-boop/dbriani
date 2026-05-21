@@ -232,8 +232,10 @@ double draft) — no regression.
 testing.
 
 ### Status
-**Deferred** per the operator (2026-05-21) — build later. Independent of
-Hermes; can be built on the current live workflow whenever wanted.
+**✅ Deployed 2026-05-21** — live workflow now 52 nodes. 30s quiet-window via
+Buffer Message → Debounce Wait → Flush Check inserted before Get Chat History;
+Format Context drafts against the combined buffered messages. Built by
+`scripts/build_fr3.py`. Awaiting operator behavioural test.
 
 ---
 

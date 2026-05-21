@@ -213,3 +213,18 @@ the docker network, so this is also the least-exposed path.
   afternoon window; flagged to the operator.
 - FR-1 + FR-2 are deployed but **not yet behaviourally tested** — operator to
   test the Edit feedback loop and a `/lead` message.
+
+### 🛠️ FR-3 DEPLOYED (2026-05-21) — message debounce (30s quiet-window)
+- `scripts/build_fr3.py` inserted a 30s quiet-window into the inbound chain:
+  Filter Inbound → **Buffer Message → Debounce Wait (30s) → Flush Check** → Get
+  Chat History. **49 → 52 nodes.** Format Context modified to draft against the
+  combined buffered messages. Backup: `PRE-FR3-*.json`.
+- **Intermittent SSH connectivity:** the deploy hit repeated `ssh exit 255`
+  (connect timeout to the box) — roughly 1 in 3 connections failed. The box
+  itself is healthy (load 0.06, n8n `/healthz` 200 in ~1ms); the flakiness is
+  the network path to it, not the box or n8n. `build_fr3.py`'s `ssh_run` /
+  `ssh_upload` retry idempotent SSH calls up to 5×, which pushed the deploy
+  through (resolve-ip, list, upload, PUT, activate, verify all needed retries).
+  Verified: 52 nodes, active, all 3 new nodes present.
+- FR-3 deployed but **not yet behaviourally tested** — operator to send two
+  quick messages and confirm one combined draft card appears after ~30s.
