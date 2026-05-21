@@ -314,3 +314,26 @@ the docker network, so this is also the least-exposed path.
   behavioural test on a controlled test number** before any real customer goes
   autonomous. 4-C must not be deployed live until 4-D is ready (per
   `docs/fr4-autonomous-design.md`).
+
+### 🤖 FR-4 — 4-C built, switched to a 5th button, deploy BLOCKED (2026-05-21)
+- **4-C** (`scripts/build_fr4_autosend.py`): the autonomous-send branch — a
+  second branch off Save Telegram MsgID (Auto Prep → Auto Gate → Render Auto
+  Card → Auto Wait → Auto Decide → Auto Commit → Auto Send WAHA → Mark Auto
+  Sent → Edit Auto-Sent Card). Written, dry-run-validated, **not deployed**.
+- Operator tested the 4-B `/auto` command, found it unreliable, asked for a
+  **5th button** instead. `scripts/build_fr4_button.py`: a 🤖 Auto button on
+  all four card renders + `auto`/`takeover` callbacks → bridge `/set-mode`.
+  Written, dry-run-validated (67 → 71 nodes).
+- **BLOCKER — the FR-4-button PUT fails `{"message":"unauthorized"}`.** This is
+  *not* the key — an empty-body `{}` PUT returns a clean `400` (auth passes),
+  and the key has done many successful PUTs this session. It is *not* a blanket
+  transient — a 325 KB **no-op PUT** of the current 67-node workflow
+  **succeeds**. The FR-4-button body *specifically* is rejected; the cause was
+  not determinable remotely. Context: a multi-minute SSH connectivity outage to
+  the box, and n8n logs showing it **recently restarted** — the box / n8n is in
+  an unstable state.
+- **Live workflow unchanged at 67 nodes — safe.** FR-4 cannot auto-send: 4-C is
+  not deployed, so an autonomous-flagged conversation does nothing.
+- **Next (fresh session):** verify box + n8n health and stability, then re-run
+  `build_fr4_button.py --deploy`. If it still fails, capture
+  `docker logs n8n-n8n-1` during a failed PUT to read n8n's literal reason.
