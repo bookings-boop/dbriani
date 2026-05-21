@@ -7,6 +7,7 @@ Endpoints (all POST except /health; POSTs require X-Bridge-Token):
   POST /improve     review + improve an existing draft (FR-5 background pass)
   POST /learn       judge operator feedback -> capture a behavior_rule (inactive)
   POST /rules       list pending rules; activate or discard one
+  POST /autosend-check  mode + caps decision for an autonomous draft (FR-4)
   POST /save-rule   persist a behavior_rule (INSERT into Postgres)
 
 Drafting runs `hermes chat -q ... -Q` headless. On a refinement the prompt
@@ -594,7 +595,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
-                             "/save-rule", "/set-mode", "/caps"):
+                             "/autosend-check", "/save-rule", "/set-mode",
+                             "/caps"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -614,6 +616,8 @@ class Handler(BaseHTTPRequestHandler):
             self._learn(payload)
         elif self.path == "/rules":
             self._rules(payload)
+        elif self.path == "/autosend-check":
+            self._autosend_check(payload)
         elif self.path == "/set-mode":
             self._set_mode(payload)
         elif self.path == "/caps":
@@ -853,6 +857,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         log(f"conversation mode set: {cid} -> {m} (by {by})")
         self._send(200, {"ok": True, "customer_id": cid, "mode": m})
+
+    def _autosend_check(self, payload):
+        """FR-4: mode + caps decision for an autonomous draft. With
+        commit=true, also logs the auto-send (advances the cap counters)."""
+        cid = (payload.get("customer_id") or "").strip()
+        if not cid:
+            self._send(400, {"ok": False, "error": "customer_id is required"})
+            return
+        commit = bool(payload.get("commit"))
+        mode = get_mode(cid)
+        if mode != "autonomous":
+            self._send(200, {"ok": True, "mode": mode, "auto_send": False,
+                             "reason": "conversation is not in autonomous mode"})
+            return
+        ok, reason = evaluate_caps(cid)
+        if commit and ok:
+            log_autosend(cid, "auto")
+        log(f"autosend-check customer={cid} mode={mode} auto_send={ok} "
+            f"commit={commit} reason={reason!r}")
+        self._send(200, {"ok": True, "mode": mode, "auto_send": ok,
+                         "reason": reason})
 
 
 def main():

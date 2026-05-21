@@ -28,7 +28,7 @@ def die(m):
 
 def ssh_run(script, label, timeout=60):
     last = ""
-    for a in range(1, 6):
+    for a in range(1, 11):
         r = None
         try:
             r = subprocess.run(SSH + [script], capture_output=True, text=True,
@@ -39,16 +39,16 @@ def ssh_run(script, label, timeout=60):
             if r.returncode != 255:
                 return r.stdout, r.stderr, r.returncode
             last = "ssh exit 255 (connect timeout)"
-        if a < 5:
+        if a < 10:
             print(f"  [{label}] connect attempt {a} failed ({last}) — retry 5s",
                   flush=True)
             time.sleep(5)
-    die(f"{label}: connection failed after 5 attempts — {last}")
+    die(f"{label}: connection failed after 10 attempts — {last}")
 
 
 def ssh_upload(data, remote, label):
     last = ""
-    for a in range(1, 6):
+    for a in range(1, 11):
         r = None
         try:
             r = subprocess.run(SSH + [f"cat > {remote}"], input=data,
@@ -59,11 +59,11 @@ def ssh_upload(data, remote, label):
             if r.returncode == 0:
                 return
             last = f"exit {r.returncode}"
-        if a < 5:
+        if a < 10:
             print(f"  [{label}] upload attempt {a} failed ({last}) — retry 5s",
                   flush=True)
             time.sleep(5)
-    die(f"{label}: upload failed after 5 attempts — {last}")
+    die(f"{label}: upload failed after 10 attempts — {last}")
 
 
 def main():

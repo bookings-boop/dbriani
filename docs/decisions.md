@@ -290,5 +290,18 @@ the docker network, so this is also the least-exposed path.
   just means no rule captured. Deployed + verified (64 nodes, active).
 - **FR-5 is complete** — the background improver + the learning loop are live.
   **Not yet behaviourally tested on real traffic** (FR-3, the 4.2 improver, the
-  4.3 learning loop). FR-4 (supervised autonomous mode) remains spec'd, not
-  built — see `docs/feature-backlog.md`.
+  4.3 learning loop).
+
+### 🤖 FR-4 — supervised autonomous mode (2026-05-21)
+- Operator **explicitly authorised** the build (via a deliberate prompt — the
+  first feature that lets the agent send to a customer without approval).
+  Implementation design: `docs/fr4-autonomous-design.md`.
+- **4-A — bridge `/autosend-check`** (`hermes-bridge/server.py`): given a
+  `customer_id`, returns `{mode, auto_send, reason}` — reads `get_mode`, and
+  if autonomous evaluates the §5.7 caps; `commit:true` also logs the auto-send.
+  Tested: fresh customer → approval / no-send; set autonomous → `auto_send=true`
+  (caps clear); reset → approval. `scripts/deploy_bridge.py` SSH retry budget
+  raised 5 → 10 (the path to the box is intermittently unreachable for
+  multi-minute windows).
+- Remaining: 4-B (enter/exit autonomous mode + card states), 4-C (the
+  autonomous-send branch), 4-D (behavioural test).
