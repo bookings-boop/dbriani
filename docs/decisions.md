@@ -280,7 +280,15 @@ the docker network, so this is also the least-exposed path.
   discard verified. **Found:** the `hermes_rw` Postgres role has
   SELECT/INSERT/UPDATE but **no DELETE** — so `discard` was changed from DELETE
   to an UPDATE (scope → `_discarded` sentinel, filtered out of fetch + list).
-- **Remaining — Phase 4.3b:** the n8n side — the FR-1 refine path calls
-  `/learn` when the operator gives Edit feedback, and `/rules` review commands
-  in Telegram. Plus behavioural testing of FR-3 + the 4.2 improver on real
-  traffic.
+- **4.3b — the n8n learning loop** (`scripts/build_fr5_learning.py`, 57 → 64
+  nodes): after the FR-1 refine path renders the refined card, `Prep Learn →
+  Hermes Learn` sends the operator's Edit feedback to the bridge `/learn`; a
+  captured rule triggers a "📚 learned a possible rule" Telegram notice. New
+  `/rules`, `/approverule <id>`, `/discardrule <id>` commands (Process Text
+  Reply + a `rules_cmd` Route Text Action output → `Hermes Rules → Format
+  Rules Reply → Send Rules Reply`). Off the critical path — a bridge failure
+  just means no rule captured. Deployed + verified (64 nodes, active).
+- **FR-5 is complete** — the background improver + the learning loop are live.
+  **Not yet behaviourally tested on real traffic** (FR-3, the 4.2 improver, the
+  4.3 learning loop). FR-4 (supervised autonomous mode) remains spec'd, not
+  built — see `docs/feature-backlog.md`.
