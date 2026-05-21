@@ -182,3 +182,15 @@ the docker network, so this is also the least-exposed path.
 - **FOLLOW-UP (flagged):** the `pendingQueue` grows unbounded — `Mark Sent` /
   `Mark Skipped` never remove entries. Prune it / remove actioned entries; the
   deferred Redis-queue migration (R10) is the proper structural fix.
+
+### 🧹 QUEUE PRUNE (2026-05-21) — one-time de-bloat of the live draft queue
+- Ran `scripts/prune_queue.py` against the live workflow: queue **61 → 34**.
+- Rule: keep **every `pending` entry** (22 — the operator's actionable queue,
+  never dropped) + the **12 most-recent done** (`sent`/`skipped`) entries (so
+  reply-to-a-recent-draft still resolves); dropped 27 stale done entries.
+- Backup: `workflows/phase-1b-telegram.PRE-PRUNE-*.json` (gitignored — holds
+  customer data in staticData). Workflow re-activated + verified (34 entries).
+- This is a **one-time** cleanup. The unbounded-growth design flaw remains —
+  the queue will re-bloat. The structural fix (self-prune in `Queue & Format`,
+  or the R10 Redis migration) is still pending. Re-run `prune_queue.py` as
+  interim hygiene whenever the queue gets large.

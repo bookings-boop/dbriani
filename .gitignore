@@ -19,5 +19,4 @@ node_modules/
 *.bak.*
 *.LIVE-backup-*
 *.bak.pre-*
-*.PRE-ROLLBACK-*
-*.PRE-FIX-*
+*.PRE-*
