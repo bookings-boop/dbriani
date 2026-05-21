@@ -677,14 +677,14 @@ class Handler(BaseHTTPRequestHandler):
             if not trig_id:
                 log("trigger save failed:", terr)
         conv_mode = get_mode(payload.get("customer_id"))
-        # Step §5.7: autonomous mode is gated by the safety caps
+        # /draft NEVER decides or logs an autonomous send. Autonomous-send
+        # gating — the safety caps, the QC sample, and the cap counters — is
+        # owned solely by /autosend-check, which the workflow calls AFTER the
+        # operator wait window. Evaluating it here would auto-send before that
+        # window exists and would double-count against /autosend-check, so
+        # /draft only ever drafts. conversation_mode is reported below for the
+        # operator's awareness only; it is never acted on here.
         auto_send, auto_send_reason = False, ""
-        if conv_mode == "autonomous":
-            auto_send, auto_send_reason = evaluate_caps(payload.get("customer_id"))
-            if auto_send:
-                log_autosend(payload.get("customer_id"), "auto")
-            else:
-                notes = "🛑 autonomous → approval: " + auto_send_reason + "\n" + notes
         log(f"draft OK customer={payload.get('customer_name')!r} "
             f"mode={payload.get('mode', 'initial')} conv_mode={conv_mode} "
             f"auto_send={auto_send} msgs={len(messages)} "
