@@ -859,8 +859,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"ok": True, "customer_id": cid, "mode": m})
 
     def _autosend_check(self, payload):
-        """FR-4: mode + caps decision for an autonomous draft. With
-        commit=true, also logs the auto-send (advances the cap counters)."""
+        """FR-4: mode + caps decision for an autonomous draft.
+
+        The autonomous branch calls this TWICE per draft:
+          - Auto Gate   (commit=false): only needs to know the conversation
+            is still autonomous, to decide whether to start the countdown.
+          - Auto Commit (commit=true): the final decision — caps are
+            evaluated here, exactly ONCE per draft, so the QC sample is
+            rolled once and the checkpoint event is logged once. Also logs
+            the auto-send (advances the cap counters).
+
+        Caps are deliberately NOT evaluated on the gate probe: evaluate_caps()
+        rolls the QC sample and logs the checkpoint event, so evaluating on
+        both calls would roll QC twice and double-count the checkpoint."""
         cid = (payload.get("customer_id") or "").strip()
         if not cid:
             self._send(400, {"ok": False, "error": "customer_id is required"})
@@ -871,11 +882,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "mode": mode, "auto_send": False,
                              "reason": "conversation is not in autonomous mode"})
             return
+        if not commit:
+            # Gate probe — mode only. The workflow (Auto Is Autonomous) reads
+            # just `mode` from this response; caps are the commit call's job.
+            log(f"autosend-check GATE customer={cid} mode=autonomous "
+                "(caps deferred to commit)")
+            self._send(200, {"ok": True, "mode": mode, "auto_send": True,
+                             "reason": "autonomous — caps evaluated at commit"})
+            return
         ok, reason = evaluate_caps(cid)
-        if commit and ok:
+        if ok:
             log_autosend(cid, "auto")
-        log(f"autosend-check customer={cid} mode={mode} auto_send={ok} "
-            f"commit={commit} reason={reason!r}")
+        log(f"autosend-check COMMIT customer={cid} mode=autonomous "
+            f"auto_send={ok} reason={reason!r}")
         self._send(200, {"ok": True, "mode": mode, "auto_send": ok,
                          "reason": reason})
 
