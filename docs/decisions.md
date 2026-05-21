@@ -337,3 +337,20 @@ the docker network, so this is also the least-exposed path.
 - **Next (fresh session):** verify box + n8n health and stability, then re-run
   `build_fr4_button.py --deploy`. If it still fails, capture
   `docker logs n8n-n8n-1` during a failed PUT to read n8n's literal reason.
+
+### 🤖 FR-4 FULLY DEPLOYED (2026-05-21) — button + 4-C
+- The `unauthorized` PUT failures were a **flickery n8n transient**, not the
+  body — a 325 KB no-op PUT succeeded between failures. Pruning the queue
+  (66 → 43) and retrying caught a good window: the **🤖 Auto button** deployed
+  (→ 71 nodes) and **4-C the autonomous-send branch** deployed (→ **82 nodes**).
+  FR-4 is structurally complete. Deploy-script PUT-retry budgets raised to 12.
+- **Not behaviourally tested.** Operator tried the button: visible, but takes
+  ~3 taps to register and "doesn't send". The send gap is because 4-C was not
+  yet deployed at test time (now it is). The 3-taps is most likely n8n/box
+  sluggishness — the box was degraded all session (connectivity outages, the
+  flickery transient). The `auto`-handler nodes were inspected and are
+  structurally correct.
+- **Live = 82 nodes.** FR-4 stays dormant until a conversation is on /auto.
+- Pending: 4-D behavioural test on a test number; resolve button
+  responsiveness (box health); real-traffic testing of FR-3 / improver /
+  learning loop.

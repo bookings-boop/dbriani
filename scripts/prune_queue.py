@@ -50,18 +50,43 @@ def resolve_base():
 
 
 def ssh_run(script, stdin, label, timeout=120):
-    r = subprocess.run(SSH + [script], input=stdin, capture_output=True,
-                       text=True, timeout=timeout)
-    if r.returncode != 0:
-        die(f"{label}: ssh exit {r.returncode}\n{r.stderr[:400]}")
-    return r.stdout
+    last = ""
+    for attempt in range(1, 11):
+        r = None
+        try:
+            r = subprocess.run(SSH + [script], input=stdin, capture_output=True,
+                               text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            last = f"timed out after {timeout}s"
+        if r is not None:
+            if r.returncode == 0:
+                return r.stdout
+            if r.returncode != 255:
+                die(f"{label}: ssh exit {r.returncode}\n{r.stderr[:400]}")
+            last = f"ssh exit 255 ({r.stderr.strip()[:100]})"
+        if attempt < 10:
+            print(f"   [{label}] connect attempt {attempt} failed: {last} — retry 5s")
+            time.sleep(5)
+    die(f"{label}: connection failed after 10 attempts — {last}")
 
 
 def ssh_upload(data, remote, label):
-    r = subprocess.run(SSH + [f"cat > {remote}"], input=data,
-                       capture_output=True, timeout=60)
-    if r.returncode != 0:
-        die(f"{label}: upload failed")
+    last = ""
+    for attempt in range(1, 11):
+        r = None
+        try:
+            r = subprocess.run(SSH + [f"cat > {remote}"], input=data,
+                               capture_output=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            last = "timed out"
+        if r is not None:
+            if r.returncode == 0:
+                return
+            last = f"exit {r.returncode}"
+        if attempt < 10:
+            print(f"   [{label}] upload attempt {attempt} failed: {last} — retry 5s")
+            time.sleep(5)
+    die(f"{label}: upload failed after 10 attempts — {last}")
 
 
 def as_json(t, label):

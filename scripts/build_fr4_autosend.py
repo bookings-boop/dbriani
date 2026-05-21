@@ -378,7 +378,7 @@ def main():
     ssh_upload((json.dumps(put, ensure_ascii=False) + "\n").encode("utf-8"),
                "/tmp/fr4c_wf.json", "upload")
     res = None
-    for attempt in range(1, 4):
+    for attempt in range(1, 13):
         out = ssh_run(
             f'read -r K; curl -s -m90 -X PUT -H "X-N8N-API-KEY: $K" '
             f'-H "Content-Type: application/json" --data-binary @/tmp/fr4c_wf.json '
@@ -386,9 +386,9 @@ def main():
         res = as_json(out, "PUT")
         if res.get("id") == wf_id:
             break
-        if "unauthorized" in out.lower() and attempt < 3:
-            print(f"   PUT attempt {attempt}: transient 'unauthorized' — retry in 6s")
-            time.sleep(6)
+        if "unauthorized" in out.lower() and attempt < 12:
+            print(f"   PUT attempt {attempt}: transient unauthorized — retry in 12s")
+            time.sleep(12)
             continue
         ssh_run("rm -f /tmp/fr4c_wf.json", "", "cleanup")
         die(f"PUT failed: {out[:300]}")
