@@ -96,9 +96,12 @@ reuses the overnight build's `behavior_rules` table and `/save-rule` code
 - Hermes is reached via the **existing bridge** (HTTP), never n8n→shell.
 - Autonomous mode (FR-4) stays a **separate, later** track — not bundled here.
 
-## Open questions (operator)
-- **"Check all skills"** — what should the improver draw on? (See the question
-  raised 2026-05-21.)
+## Resolved + open
+- **"Check all skills" — RESOLVED (operator, 2026-05-21):** the improver draws
+  on **all our knowledge** — the full system prompt (pricing, yachts, packages,
+  hard rules), the conversation history, learned behaviour rules, and Hermes's
+  memory. No separate skill-module system; `/improve` simply receives the full
+  context. (Simplifies Phase 4.)
 - Rule-approval cadence — assumed: a periodic digest of pending rules to
   approve, not per-rule interruptions. Confirm if you'd prefer otherwise.
 

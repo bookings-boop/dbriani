@@ -389,11 +389,13 @@ slow no longer matters — it has the whole pending-window to work, and if it is
 slow or fails, the fast draft is already there. This is the safe way to revive
 Hermes: **additive, not a replacement.**
 
-### Open questions
-- **"Check all skills"** — confirm scope: all our knowledge (pricing / past
-  conversations / learned rules), or a specific skill/tool system.
-- **"Learn"** — persistent cross-conversation learning, operator-approved
-  before rules take effect (`active=false` until approved, as Hermes designed).
+### Resolved
+- **"Check all skills" (operator, 2026-05-21):** "use all our knowledge" — the
+  full system prompt, conversation history, learned behaviour rules and Hermes
+  memory. No separate skill-module system.
+- **"Learn":** persistent cross-conversation learning via the `behavior_rules`
+  store, operator-approved before rules take effect (`active=false` until
+  approved) — the established Hermes design.
 
 ### Status
 **In progress (2026-05-21)** — operator chose to revive Hermes as the FR-5
