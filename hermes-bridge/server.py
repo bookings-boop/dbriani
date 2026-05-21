@@ -408,8 +408,9 @@ def build_query(p):
 
 
 def run_hermes(query):
-    cmd = [HERMES, "chat", "-q", query, "-Q",
+    cmd = [HERMES, "--profile", "default", "chat", "-q", query, "-Q",
            "--source", "tool", "--yolo", "-t", "memory"]
+    log("hermes call:", " ".join(c for c in cmd if c != query))
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(HERMES) + os.pathsep + env.get("PATH", "")
     t0 = time.time()

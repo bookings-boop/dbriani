@@ -150,3 +150,35 @@ the docker network, so this is also the least-exposed path.
   API-key credentials (`dubriani-prod` on the default profile). Drafting
   verified restored — a live `/draft` returned a clean draft in 7.4s with the
   full field contract (`health`, `auto_send`, etc.) intact.
+
+### 🔴 INCIDENT + ROLLBACK (2026-05-21) — Hermes drafting unstable; reverted
+- Under real traffic the Hermes drafting path degraded: `/draft` latency rose
+  from ~10s to 20–50s+, several calls exceeded the bridge's 120s timeout →
+  `502` → R1 "a step failed". Refinement (same path) failed with it.
+- **DECISION:** rolled the LIVE workflow back to the pre-Hermes Phase 1B
+  (40-node, direct Claude — T1–T6-proven) via `scripts/rollback_workflow.py`,
+  preserving the 60-entry draft queue. Hermes **PAUSED** (bridge stopped +
+  disabled, Dubriani crons removed) — code retained on branch `overnight-build`.
+- 53-node Hermes snapshot: `workflows/phase-1b-telegram.PRE-ROLLBACK-*.json`.
+- **Before re-deploying Hermes:** diagnose the latency regression OFF the live
+  path. Hypotheses: `hermes chat -t memory` multi-turn loops slowing as the
+  profile's memory/session store grew; `default` profile state bloat from
+  build-time drafts. Likely fix: drop `-t memory`; prune profile state;
+  re-measure before any re-deploy.
+
+### 🔴 BUG + FIX (2026-05-21) — reply-to-draft routed to the WRONG customer
+- **Symptom:** after Send, replying to a draft card with a follow-up (e.g. a
+  payment link) delivered it to a *different* customer.
+- **Root cause:** Telegram message IDs are per-chat counters that reset on bot
+  swaps/restarts. The `pendingQueue` never prunes (60 entries) and held old +
+  new drafts sharing IDs — **11 collisions confirmed**, each mapping one ID to
+  two different customers. `Process Text Reply` did `queue.find(x =>
+  x.telegram_message_id === r.message_id)` → *first* (oldest) match → a stale,
+  unrelated customer.
+- **FIX** (`scripts/fix_reply_routing.py`, deployed to live): `Process Text
+  Reply` now scans the queue **newest-first**, matching the current card.
+  Pre-Hermes Phase 1B bug — **the same fix must be folded into the Hermes
+  (`overnight-build`) `Process Text Reply` before Hermes is re-deployed.**
+- **FOLLOW-UP (flagged):** the `pendingQueue` grows unbounded — `Mark Sent` /
+  `Mark Skipped` never remove entries. Prune it / remove actioned entries; the
+  deferred Redis-queue migration (R10) is the proper structural fix.

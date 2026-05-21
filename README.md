@@ -16,12 +16,15 @@ source for the workflow, the system prompt, and the operational tooling.
 | Phase | What | State |
 |-------|------|-------|
 | 1B | Telegram approval bot — Send / Edit / Regen / Skip | **Live in N8N** (T1–T6 passed) |
-| Hermes | Drafting brain + refinement loop, rule capture, trigger detection, health scoring, autonomous mode, daily digest | **Live** — 51-node workflow |
+| Hermes | Drafting brain + refinement, rule capture, triggers, health, autonomous mode, daily digest | **Built, then rolled back — paused** |
 
-The workflow now drafts through the **Hermes Agent** (via the `hermes-bridge`
-service on the EC2 box) and the approval surface is the **"Dubriani Hermes"**
-Telegram bot. See `docs/hermes-architecture.md`, `docs/decisions.md`,
-`docs/test-cases-hermes.md`, and `docs/autonomous-mode.md`.
+⚠️ **Current live state:** the Hermes integration was built and deployed, then
+**rolled back** to the pre-Hermes Phase 1B (direct Claude drafting) after a
+drafting-latency instability under real traffic. The **live workflow is the
+stable 40-node direct-Claude version**; the approval surface is the "Dubriani
+Hermes" Telegram bot. The Hermes integration is **paused** — code on branch
+`overnight-build`. See **`docs/handoff-2026-05-21.md`** and `docs/decisions.md`
+for the full picture; `docs/hermes-architecture.md` describes the paused design.
 
 Original Phase 1B execution scope was **steps 0–4 only** (see `HANDOFF.md` §0) — **all complete.**
 Everything beyond — HubSpot, Postgres, Gmail, weekly distillation, Redis, the
