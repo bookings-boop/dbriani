@@ -4,6 +4,7 @@
 Endpoints (all POST except /health; POSTs require X-Bridge-Token):
   GET  /health      liveness probe
   POST /draft       customer context -> Hermes draft (JSON {messages, notes_for_zayn})
+  POST /improve     review + improve an existing draft (FR-5 background pass)
   POST /save-rule   persist a behavior_rule (INSERT into Postgres)
 
 Drafting runs `hermes chat -q ... -Q` headless. On a refinement the prompt
@@ -407,6 +408,56 @@ def build_query(p):
     return "\n".join(parts)
 
 
+def build_improve_query(p):
+    """Compose the -q query for a background improvement pass on an existing
+    draft (FR-5). Hermes reviews the draft and returns a better version only
+    if it can meaningfully improve it; otherwise it echoes the draft back."""
+    parts = []
+    sp = load_system_prompt()
+    if sp:
+        parts.append(sp)
+        parts.append("=" * 60)
+    parts.append(
+        "TASK: A first-draft WhatsApp reply for Dubriani Yachts has already "
+        "been written and is awaiting operator review. CRITICALLY REVIEW that "
+        "draft against Maria's persona and rules above and the conversation. "
+        "Improve it ONLY if you can make it meaningfully better — a stronger "
+        "opening, better rule adherence, a higher chance of conversion, or a "
+        "fixed mistake. If the draft is already good, leave it unchanged."
+    )
+    name = (p.get("customer_name") or "the customer").strip()
+    hist = (p.get("history") or "").strip()
+    if hist:
+        parts.append("\n--- CONVERSATION SO FAR ---\n" + hist)
+    else:
+        parts.append("\n--- This is a NEW conversation — no prior history. ---")
+    parts.append(
+        f"\n--- NEWEST MESSAGE FROM {name} ---\n"
+        + (p.get("incoming_message") or "").strip()
+    )
+    rules = fetch_behavior_rules(p.get("customer_id"))
+    if rules:
+        parts.append(
+            "\n--- ACTIVE BEHAVIOR RULES (learned corrections — must follow) ---\n"
+            + "\n".join("- " + r for r in rules)
+        )
+    cur = p.get("current_draft")
+    if isinstance(cur, list):
+        cur = "\n\n".join(str(m) for m in cur)
+    parts.append("\n--- CURRENT DRAFT (under review) ---\n" + str(cur or "").strip())
+    parts.append(
+        "\n--- RESPOND NOW ---\n"
+        "Output ONLY one JSON object — no markdown fences, no commentary:\n"
+        '{"improved": true|false, "messages": ["<reply message>", ...], '
+        '"note": "<if improved: one line on what you changed and why; if not: '
+        'one line on why the draft is already good>"}\n'
+        'Set "improved": true ONLY when your messages are a genuine improvement '
+        'on the current draft. If you would not change anything meaningful, set '
+        '"improved": false and echo the current draft text back in messages.'
+    )
+    return "\n".join(parts)
+
+
 def run_hermes(query):
     cmd = [HERMES, "--profile", "default", "chat", "-q", query, "-Q",
            "--source", "tool", "--yolo", "-t", "memory"]
@@ -461,7 +512,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/draft", "/save-rule", "/set-mode", "/caps"):
+        if self.path not in ("/draft", "/improve", "/save-rule", "/set-mode", "/caps"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -475,6 +526,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/save-rule":
             self._save_rule(payload)
+        elif self.path == "/improve":
+            self._improve(payload)
         elif self.path == "/set-mode":
             self._set_mode(payload)
         elif self.path == "/caps":
@@ -558,6 +611,46 @@ class Handler(BaseHTTPRequestHandler):
             "conversation_mode": conv_mode,
             "auto_send": auto_send,
             "auto_send_reason": auto_send_reason,
+            "raw": blob,
+            "session_id": sid,
+            "elapsed_ms": elapsed,
+        })
+
+    def _improve(self, payload):
+        if not payload.get("current_draft"):
+            self._send(400, {"ok": False, "error": "current_draft is required"})
+            return
+        query = build_improve_query(payload)
+        try:
+            rc, out, err, elapsed = run_hermes(query)
+        except subprocess.TimeoutExpired:
+            log(f"improve TIMEOUT after {HERMES_TIMEOUT}s")
+            self._send(502, {"ok": False, "error": "hermes timeout"})
+            return
+        except Exception as e:
+            log("improve EXEC ERROR", repr(e))
+            self._send(502, {"ok": False, "error": f"hermes exec error: {e}"})
+            return
+        parsed, blob = extract_json(out)
+        sid = extract_session(out, err)
+        messages = parsed.get("messages") if isinstance(parsed, dict) else None
+        ok = (rc == 0 and isinstance(messages, list) and len(messages) > 0)
+        if not ok:
+            log(f"improve FAIL rc={rc} parsed={parsed is not None} err={err[:200]!r}")
+            self._send(502, {"ok": False,
+                             "error": "hermes produced no parseable result",
+                             "rc": rc, "raw": (blob or out)[:2000]})
+            return
+        improved = bool(parsed.get("improved"))
+        note = str(parsed.get("note") or "")
+        log(f"improve OK customer={payload.get('customer_name')!r} "
+            f"improved={improved} msgs={len(messages)} "
+            f"elapsed={elapsed}ms session={sid}")
+        self._send(200, {
+            "ok": True,
+            "improved": improved,
+            "messages": messages,
+            "note": note,
             "raw": blob,
             "session_id": sid,
             "elapsed_ms": elapsed,
