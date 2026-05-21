@@ -71,3 +71,25 @@ tables clean (all test rows removed).
 ## Rollback
 Live-workflow backups: `workflows/phase-1b-telegram.LIVE-backup-*.json` and
 `*.bak.pre-step*`. `PUT` one back via the n8n API to roll back.
+
+---
+
+## Post-summary update (2026-05-21)
+
+- **Autonomous-mode safety caps — BUILT & deployed** (resolves warning #2):
+  daily cap (20/day, resets 00:00 Dubai), per-conversation checkpoint (every 5
+  consecutive), 5% QC sampling; `/caps` command; new `autonomous_sends` table.
+  Auto-send is gated on the cap decision, fail-closed. 53-node workflow.
+- **Anthropic auth blocker — occurred mid-build, now RESOLVED.** Drafting
+  failed (`401 invalid x-api-key` / `400` usage limit). Root cause:
+  `~/.claude/.credentials.json` was overriding the Hermes credential pool; the
+  operator disabled it and moved to API-key credentials. Drafting verified
+  restored (live `/draft`, 7.4s).
+- **Data-loss check (requested):** no loss — `behavior_rules` /
+  `customer_triggers` / `conversation_modes` are empty because they are new
+  tables whose only-ever rows were build-time test data (id sequences confirm
+  14 test inserts total, all cleaned up). `conversation_health` has 1 real row;
+  the 52-entry draft queue in `staticData` is intact. See chat log.
+- **Outstanding:** run H7–H9 + cap tests (`docs/h7-h9-test-plan.md`) — the cap
+  auto-send gating is built + structurally verified, not yet behaviourally
+  tested (needs a live autonomous conversation).

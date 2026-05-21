@@ -140,3 +140,9 @@ the docker network, so this is also the least-exposed path.
   and/or add usage at claude.ai/settings/usage, then
   `systemctl --user restart hermes-bridge`. Drafting self-heals once the key
   works — no redeploy needed.
+- **✅ RESOLVED (2026-05-21):** root cause was `~/.claude/.credentials.json`
+  (a Claude Code OAuth token) overriding the `auth.json` credential pool — the
+  operator renamed it to `.disabled-2026-05-21` and moved the anthropic pool to
+  API-key credentials (`dubriani-prod` on the default profile). Drafting
+  verified restored — a live `/draft` returned a clean draft in 7.4s with the
+  full field contract (`health`, `auto_send`, etc.) intact.
