@@ -124,8 +124,12 @@ the docker network, so this is also the least-exposed path.
   `IF Autonomous` now gates on `auto_send`, not the raw mode — fail-closed.
 - New table `autonomous_sends` (event log: `auto` / `checkpoint` /
   `intervention`). `/caps` command + bridge endpoint; caps line in the digest.
-- ⚠️ The cap auto-send gating could **not be behaviourally tested** — see the
-  blocker below.
+- ✅ **Verified 2026-05-21** (after the auth blocker was resolved): all three
+  caps tested bridge-side — per-conversation checkpoint blocks at 5 consecutive
+  (`auto_send=false`), fresh autonomous passes (`auto_send=true`), daily cap
+  blocks at 20 (`auto_send=false, "daily cap reached (26/20)"`), `/caps`
+  reports correctly. The workflow's consumption of `auto_send` is structurally
+  verified; the full WAHA auto-send path is exercised by H7–H9.
 
 ### 🚨 BLOCKER (2026-05-21, ~03:20 Dubai) — Anthropic API access failing
 - Hermes → Anthropic returns `401 invalid x-api-key`, then `400` *"Third-party
