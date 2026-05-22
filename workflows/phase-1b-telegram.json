@@ -1612,7 +1612,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-3: buffer this inbound message; stamp a per-customer token\nconst wh = $('WAHA Webhook').item.json.body.payload;\nconst phone = wh.from;\nconst data = $getWorkflowStaticData('global');\nif (!data.inboundBuffer) data.inboundBuffer = {};\nif (!data.lastSeq) data.lastSeq = {};\nif (!Array.isArray(data.inboundBuffer[phone])) data.inboundBuffer[phone] = [];\ndata.inboundBuffer[phone].push({ id: wh.id, text: wh.body || '', ts: Date.now() });\nconst token = Date.now().toString() + '_' + Math.random().toString(36).slice(2, 8);\ndata.lastSeq[phone] = token;\nreturn { json: { phone: phone, token: token } };\n"
+        "jsCode": "// FR-3 (BUG-1 fix): the bridge buffered this message in Redis and issued\n// a token. staticData is NOT used — it cannot coordinate the concurrent\n// executions that one-per-inbound-message spawns.\nconst wh = $('WAHA Webhook').item.json.body.payload;\nconst r = $('Debounce Buffer').item.json || {};\nreturn { json: {\n  phone: wh.from,\n  token: r.token || '',\n  degraded: !r.token        // bridge/Redis error -> Flush Check fails open\n} };\n"
       },
       "id": "7be73f77-c094-4c27-8a49-90e1d1ea2906",
       "name": "Buffer Message",
@@ -1639,7 +1639,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-3: after the quiet-window — am I the latest message for this customer?\nconst phone = $('Buffer Message').item.json.phone;\nconst token = $('Buffer Message').item.json.token;\nconst data = $getWorkflowStaticData('global');\nif (!data.lastSeq || data.lastSeq[phone] !== token) {\n  // a newer message arrived during the wait; its execution will flush. Stop.\n  return [];\n}\nconst buffered = (data.inboundBuffer && data.inboundBuffer[phone]) || [];\nconst combined = buffered.map(m => m.text).filter(t => t && String(t).trim()).join('\\n');\nconst ids = buffered.map(m => m.id);\ndata.inboundBuffer[phone] = [];\ndelete data.lastSeq[phone];\nreturn [{ json: {\n  phone: phone,\n  combinedMessage: combined,\n  bufferedIds: ids,\n  bufferedCount: buffered.length\n} }];\n"
+        "jsCode": "// FR-3 (BUG-1 fix): proceed only if the bridge says this is the latest\n// message for the customer. Redis-backed — see bridge /debounce.\nconst wh = $('WAHA Webhook').item.json.body.payload;\nconst bm = $('Buffer Message').item.json || {};\nconst r = $('Debounce Flush').item.json || {};\n// Suppress this draft ONLY when buffering succeeded AND the bridge says a\n// newer message superseded it. Every error path falls open (process), so\n// a customer message is never silently dropped.\nif (bm.degraded !== true && r.latest === false) {\n  return [];\n}\nconst combined = (r.combined && String(r.combined).trim())\n  ? r.combined\n  : (wh.body || '');\nreturn [{ json: {\n  phone: wh.from,\n  combinedMessage: combined,\n  bufferedIds: (Array.isArray(r.ids) && r.ids.length) ? r.ids : [wh.id],\n  bufferedCount: r.count || 1\n} }];\n"
       },
       "id": "f2d21de5-0574-4d26-9c06-538ef9d13ede",
       "name": "Flush Check",
@@ -2801,6 +2801,78 @@
         692
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/debounce",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"buffer\", \"phone\": {{ JSON.stringify($json.body.payload.from) }}, \"message_id\": {{ JSON.stringify($json.body.payload.id) }}, \"text\": {{ JSON.stringify($json.body.payload.body || \"\") }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "35248199-a2d9-404a-a799-283d2f55a14a",
+      "name": "Debounce Buffer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4540,
+        1152
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/debounce",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"flush\", \"phone\": {{ JSON.stringify($('Buffer Message').item.json.phone) }}, \"token\": {{ JSON.stringify($('Buffer Message').item.json.token) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "eaaf9844-1b1f-4eb2-abd2-e00a9d670c19",
+      "name": "Debounce Flush",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4940,
+        1152
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -2819,7 +2891,7 @@
       "main": [
         [
           {
-            "node": "Buffer Message",
+            "node": "Debounce Buffer",
             "type": "main",
             "index": 0
           }
@@ -3400,7 +3472,7 @@
       "main": [
         [
           {
-            "node": "Flush Check",
+            "node": "Debounce Flush",
             "type": "main",
             "index": 0
           }
@@ -3888,6 +3960,28 @@
         [
           {
             "node": "Queue & Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debounce Buffer": {
+      "main": [
+        [
+          {
+            "node": "Buffer Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debounce Flush": {
+      "main": [
+        [
+          {
+            "node": "Flush Check",
             "type": "main",
             "index": 0
           }
