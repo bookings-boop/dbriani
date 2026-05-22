@@ -27,6 +27,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
@@ -43,6 +45,7 @@ PG_USER = os.environ.get("BRIDGE_PG_USER", "hermes_rw")
 PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
 REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
 AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
+DEBOUNCE_TTL = int(os.environ.get("BRIDGE_DEBOUNCE_TTL", "120"))
 
 
 def _envflag(key, default):
@@ -58,6 +61,12 @@ CAP_SAMPLE_ACTIVE = _envflag("CAP_SAMPLE_ACTIVE", "true")
 CAP_SAMPLE_PCT = float(os.environ.get("CAP_SAMPLE_PCT", "5"))
 DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
                   "AT TIME ZONE 'Asia/Dubai'")
+
+# --- Nomod payment links (minimal build) -----------------------------------
+NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
+NOMOD_API_BASE = os.environ.get("NOMOD_API_BASE",
+                                "https://api.nomod.com/v1").rstrip("/")
+PAYMENTS_ENABLED = _envflag("PAYMENTS_ENABLED", "true")
 
 SESSION_RE = re.compile(r"session_id:\s*(\S+)")
 FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
@@ -122,6 +131,49 @@ def _lit(v):
     if v is None or v == "":
         return "NULL"
     return "'" + str(v).replace("'", "''") + "'"
+
+
+def nomod_create_link(amount, summary, customer_name):
+    """Create a Nomod payment link. Returns (link_url, link_id, err).
+
+    Currency is hard-coded AED — never taken from the LLM. No expiry_date
+    (Nomod default). The booking summary is the single line item + the note;
+    customer_name goes in the link title."""
+    if not NOMOD_API_KEY:
+        return None, None, "NOMOD_API_KEY not configured on the bridge"
+    summary = (summary or "Yacht charter").strip()
+    title = ("Dubriani Yachts — " + customer_name).strip() \
+        if customer_name else "Dubriani Yachts"
+    body = json.dumps({
+        "currency": "AED",
+        "items": [{"name": summary[:200],
+                   "amount": "%.2f" % amount, "quantity": 1}],
+        "title": title[:50],
+        "note": summary[:280],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        NOMOD_API_BASE + "/links", data=body, method="POST",
+        headers={"X-API-KEY": NOMOD_API_KEY,
+                 "Content-Type": "application/json",
+                 # Nomod's Cloudflare WAF 403s the default Python-urllib UA
+                 "User-Agent": "DubrianiHermesBridge/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        url = resp.get("url")
+        if not url:
+            return None, None, "Nomod response had no link url"
+        return url, resp.get("id"), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+            msg = ((detail.get("error") or {}).get("message")
+                   or detail.get("detail") or json.dumps(detail))
+        except Exception:
+            msg = "HTTP %s" % e.code
+        return None, None, "Nomod %s: %s" % (e.code, msg)
+    except Exception as e:
+        return None, None, "Nomod request failed: %r" % e
 
 
 def fetch_behavior_rules(customer_id):
@@ -776,7 +828,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
-                             "/caps", "/autosend-state", "/customer-facts"):
+                             "/caps", "/autosend-state", "/customer-facts",
+                             "/debounce", "/payment-link"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -806,6 +859,10 @@ class Handler(BaseHTTPRequestHandler):
             self._autosend_state(payload)
         elif self.path == "/customer-facts":
             self._customer_facts(payload)
+        elif self.path == "/debounce":
+            self._debounce(payload)
+        elif self.path == "/payment-link":
+            self._payment_link(payload)
         else:
             self._draft(payload)
 
@@ -1126,9 +1183,42 @@ class Handler(BaseHTTPRequestHandler):
                     data = None
             self._send(200, {"ok": True, "action": "get", "draft_id": did,
                              "armed": bool(data), "data": data})
+        elif action == "update":
+            # FR-5 BUG-3 fix: the improver rewrites the draft text on an armed
+            # autonomous draft so the auto-send dispatches the improved copy,
+            # not the arm-time snapshot. No-op (updated=false) if not armed —
+            # an approval-mode draft has no key, so calling this is harmless.
+            out, err = _redis(["GET", key])
+            if err:
+                log("autosend-state update GET failed:", err)
+                self._send(502, {"ok": False, "error": err})
+                return
+            raw = (out or "").strip()
+            if not raw:
+                self._send(200, {"ok": True, "action": "update",
+                                 "draft_id": did, "updated": False})
+                return
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
+            new_text = payload.get("draft_text")
+            if new_text is not None:
+                data["draft_text"] = str(new_text)
+            ttl_out, _ = _redis(["TTL", key])
+            try:
+                ttl = int((ttl_out or "0").strip())
+            except (TypeError, ValueError):
+                ttl = AUTOSEND_TTL
+            if ttl <= 0:
+                ttl = AUTOSEND_TTL
+            _redis(["SET", key, json.dumps(data), "EX", str(ttl)])
+            log(f"autosend-state UPDATE {did}")
+            self._send(200, {"ok": True, "action": "update",
+                             "draft_id": did, "updated": True})
         else:
             self._send(400, {"ok": False,
-                             "error": "action must be arm|disarm|get"})
+                             "error": "action must be arm|disarm|get|update"})
 
     def _customer_facts(self, payload):
         """feature-header: maintain customer_facts + return a context header.
@@ -1187,6 +1277,117 @@ class Handler(BaseHTTPRequestHandler):
                 "message_count": mc})
             self._send(200, {"ok": True, "extracted": False, "degraded": True,
                              "message_count": mc, "customer_header": hdr})
+
+    def _debounce(self, payload):
+        """BUG-1 fix: Redis-backed inbound debounce for FR-3.
+
+        n8n staticData is loaded per-execution and is NOT shared across the
+        concurrent executions one-per-inbound-message spawns, so the old
+        staticData 'latest token wins' check was inert — every execution saw
+        only its own token and flushed, yielding one draft per message.
+
+        Redis is shared + atomic. Keys (TTL DEBOUNCE_TTL):
+          debounce:buf:<phone>  list  — buffered {id,text} messages
+          debounce:seq:<phone>  str   — token of the most recent message
+
+        action=buffer : append the message, stamp a fresh token, return it.
+        action=flush  : the caller passes the token it was given; if it still
+                        equals debounce:seq it is the latest message — drain +
+                        delete the buffer and return the combined text; if not,
+                        a newer message arrived and the caller must suppress
+                        its draft (latest=false).
+        Fail-OPEN: any Redis error returns latest=true so a customer message
+        is never dropped (a rare duplicate draft is acceptable; a lost message
+        is not)."""
+        action = (payload.get("action") or "").strip().lower()
+        phone = (payload.get("phone") or "").strip()
+        if not phone:
+            self._send(400, {"ok": False, "error": "phone is required"})
+            return
+        bufkey = "debounce:buf:" + phone
+        seqkey = "debounce:seq:" + phone
+        if action == "buffer":
+            token = (str(int(time.time() * 1000)) + "_"
+                     + "".join(random.choice("0123456789abcdef")
+                               for _ in range(6)))
+            msg = json.dumps({"id": str(payload.get("message_id") or ""),
+                              "text": str(payload.get("text") or "")})
+            _redis(["RPUSH", bufkey, msg])
+            _redis(["EXPIRE", bufkey, str(DEBOUNCE_TTL)])
+            _, err = _redis(["SET", seqkey, token, "EX", str(DEBOUNCE_TTL)])
+            if err:
+                log("debounce buffer failed:", err)
+            log(f"debounce BUFFER {phone} token={token}")
+            self._send(200, {"ok": True, "phone": phone, "token": token})
+            return
+        if action == "flush":
+            token = (payload.get("token") or "").strip()
+            cur, err = _redis(["GET", seqkey])
+            if err:
+                log("debounce flush GET failed (fail-open):", err)
+                self._send(200, {"ok": True, "latest": True, "degraded": True,
+                                 "combined": "", "ids": [], "count": 0})
+                return
+            if (cur or "").strip() != token:
+                # a newer message holds the token (or the window lapsed) —
+                # this execution must not produce a draft
+                self._send(200, {"ok": True, "latest": False})
+                return
+            rng, _ = _redis(["LRANGE", bufkey, "0", "-1"])
+            _redis(["DEL", bufkey])
+            _redis(["DEL", seqkey])
+            msgs = []
+            for ln in (rng or "").splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    msgs.append(json.loads(ln))
+                except Exception:
+                    msgs.append({"id": "", "text": ln})
+            texts = [str(m.get("text", "")) for m in msgs
+                     if str(m.get("text", "")).strip()]
+            ids = [m.get("id", "") for m in msgs]
+            log(f"debounce FLUSH {phone} latest=true count={len(msgs)}")
+            self._send(200, {"ok": True, "latest": True,
+                             "combined": "\n".join(texts),
+                             "ids": ids, "count": len(msgs)})
+            return
+        self._send(400, {"ok": False, "error": "action must be buffer|flush"})
+
+    def _payment_link(self, payload):
+        """Nomod minimal build: create a payment link for a confirmed booking.
+        Fail-safe — ALWAYS returns 200 so the workflow's draft is never blocked;
+        an ok:false response just means the card posts without a link."""
+        cid = (payload.get("customer_id") or "").strip()
+        cname = (payload.get("customer_name") or "").strip()
+        summary = (payload.get("payment_summary") or "").strip()
+        if not PAYMENTS_ENABLED:
+            log("payment-link refused — PAYMENTS_ENABLED is off")
+            self._send(200, {"ok": False, "error": "payments are disabled"})
+            return
+        try:
+            amount = float(payload.get("amount"))
+        except (TypeError, ValueError):
+            amount = 0.0
+        # basic input validation only — NOT a business cap (per plan)
+        if amount <= 0:
+            log("payment-link refused — invalid amount %r"
+                % payload.get("amount"))
+            self._send(200, {"ok": False,
+                             "error": "invalid amount: %r"
+                                      % payload.get("amount")})
+            return
+        url, lid, err = nomod_create_link(amount, summary, cname)
+        if err:
+            log("payment-link FAILED customer=%s amount=AED%.2f err=%s"
+                % (cid, amount, err))
+            self._send(200, {"ok": False, "error": err})
+            return
+        log("payment-link OK customer=%s amount=AED%.2f link_id=%s"
+            % (cid, amount, lid))
+        self._send(200, {"ok": True, "link_url": url, "link_id": lid,
+                         "amount": amount})
 
 
 def main():
