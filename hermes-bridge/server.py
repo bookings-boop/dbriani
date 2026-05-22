@@ -927,11 +927,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         key = "autosend:" + did
         if action == "arm":
-            value = json.dumps({
-                "draft_id": did,
-                "customer_phone": payload.get("customer_phone") or "",
-                "draft_text": payload.get("draft_text") or "",
-            })
+            # store the whole payload (minus action) — the autonomous branch
+            # gets every field back from `get`, with no dependency on n8n
+            # staticData or post-Wait node references.
+            value = json.dumps({k: v for k, v in payload.items()
+                                if k != "action"})
             _, err = _redis(["SET", key, value, "EX", str(AUTOSEND_TTL)])
             if err:
                 log("autosend-state arm failed:", err)
