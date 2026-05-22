@@ -63,6 +63,32 @@ SESSION_RE = re.compile(r"session_id:\s*(\S+)")
 FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 VALID_SCOPES = ("global", "customer", "scenario", "tier")
 
+# --- customer facts (feature-header) ---------------------------------------
+FACTS_EXTRACT_TIMEOUT = int(os.environ.get("BRIDGE_FACTS_TIMEOUT", "15"))
+# yacht keywords worth gating extraction on — curated from system-prompt.md §7
+YACHT_NAMES = (
+    "satoshi", "enigma", "aurora", "azimut", "sunseeker", "ferretti",
+    "pershing", "benetti", "beneteau", "galeon", "riva", "princess",
+    "lamborghini", "sanlorenzo", "maiora", "baglietto", "elan", "elise",
+    "diana", "zenith", "bliss", "von dutch", "cabo", "belle", "monaco",
+    "cante", "carina", "haigan", "zirve", "luna", "notorious", "asya",
+    "zeta", "dolce vita", "tatti", "sapphire", "odysea", "royalty",
+    "mila", "athena", "skyfall", "finesse", "sofiya", "eclipse",
+    "royal mirage", "yacht",
+)
+_FACTS_DATE_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|"
+    r"march|april|june|july|august|september|october|november|december|"
+    r"mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|today|tomorrow|tonight|weekend|week|month)\b",
+    re.IGNORECASE)
+_FACTS_NAME_RE = re.compile(
+    r"\b(i'?m |i am |my name|this is |call me |name'?s )", re.IGNORECASE)
+_FACTS_BOOK_RE = re.compile(
+    r"\b(book|booking|reserve|charter|deposit|confirm|pay|payment|guests?|"
+    r"pax|people|persons?|birthday|proposal|anniversary|wedding|corporate)\b",
+    re.IGNORECASE)
+
 
 def log(*a):
     print(time.strftime("%Y-%m-%dT%H:%M:%S"), *a, flush=True)
@@ -381,6 +407,45 @@ def caps_status_text():
         f"Conversations in autonomous mode: {auton if auton is not None else '?'}",
         f"Today: {today} auto-sent, {chk} checkpoints",
     ])
+
+
+# --- customer facts (feature-header) ---------------------------------------
+
+def _facts_extract_gate(incoming_message):
+    """Heuristic: should this (non-first) message trigger a fresh extraction?
+    True if it plausibly carries a new fact — a digit, a known yacht keyword,
+    a date/time word, a self-introduction, or a booking keyword."""
+    m = (incoming_message or "").lower()
+    if not m:
+        return False
+    if any(ch.isdigit() for ch in m):
+        return True
+    if any(y in m for y in YACHT_NAMES):
+        return True
+    return bool(_FACTS_DATE_RE.search(m) or _FACTS_NAME_RE.search(m)
+                or _FACTS_BOOK_RE.search(m))
+
+
+def build_customer_header(facts):
+    """facts: {name,dates,yachts,party_size,message_count} -> header string.
+    Each optional line shows only when its fact is non-empty; the name line,
+    the message-count line and the divider are always present."""
+    f = facts or {}
+    name = str(f.get("name") or "").strip()
+    lines = ["\U0001F464 " + (name or "New contact")]
+    if str(f.get("dates") or "").strip():
+        lines.append("\U0001F4C5 Interested in: " + str(f["dates"]).strip())
+    if str(f.get("yachts") or "").strip():
+        lines.append("\U0001F6E5️ Looking at: " + str(f["yachts"]).strip())
+    if str(f.get("party_size") or "").strip():
+        lines.append("\U0001F465 Party size: " + str(f["party_size"]).strip())
+    try:
+        mc = int(f.get("message_count") or 0)
+    except (TypeError, ValueError):
+        mc = 0
+    lines.append("\U0001F522 Message #" + str(mc) + " in conversation")
+    lines.append("─" * 30)
+    return "\n".join(lines)
 
 
 # --- drafting --------------------------------------------------------------
