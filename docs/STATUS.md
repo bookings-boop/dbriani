@@ -33,8 +33,14 @@ Chronological detail: `docs/decisions.md`. Build history is on `main`.
   autonomous branch decides via Redis (bridge `/autosend-state`), not n8n
   `staticData`. Live test passed — execution 646, auto-send fired end-to-end,
   WAHA-confirmed. See `docs/bug-1-autonomous-send-fix.md`.
-- ⚠️ Autonomous mode is **not yet fully signed off**: H8b (caps), the
-  break-condition tests, `/caps`, H9 and `/manual` still need a run.
+- ✅ **H7–H9 suite complete (2026-05-22).** H7 activate · H8 auto-send · H8b
+  5-consecutive cap · break-conditions 3/3 (discount/human/negative) · H9
+  take-back · `/manual` kill switch — **all PASS**. The core safety
+  machinery (caps · break-conditions · kill switch) is verified working.
+  Full results: `docs/h7-h9-test-plan.md`.
+- ❌ **BUG-2 — `/caps` operator command not wired** (found in the suite).
+  Bridge `/caps` endpoint works; the workflow doesn't route to it. Minor —
+  operator convenience. See `docs/feature-backlog.md` BUG-2.
 - 🟡 Residual: `Mark Auto Sent`'s queue-`status` write still uses `staticData`
   (cosmetic post-send bookkeeping — the message still sends).
 - 🔴 **FR-3 debounce — still broken by design.** Same `staticData` root cause;
@@ -49,9 +55,11 @@ All session work is **merged to `main`** (`131ca2a`, 53 commits).
 
 ## Pending work (priority order)
 
-1. **Finish H7-H9.** H8 now passes (BUG-1 fixed). Still to run: H8b
-   (5-consecutive cap), the break-condition tests, `/caps`, H9, `/manual` —
-   before autonomous mode is fully signed off for real customers.
+1. **Autonomous-mode rollout** — H7–H9 all pass; the safety net (caps,
+   break-conditions, kill switch) is verified. Ready for a *supervised*
+   trial on a few real conversations before a wider rollout.
+2. **BUG-2** — wire the `/caps` command · the `Mark Auto Sent` `staticData`
+   residual — small follow-ups (`docs/feature-backlog.md`).
 2. **Rotate exposed secrets** — `N8N_API_KEY` + the Telegram bot token.
    Runbook: `docs/secret-rotation.md` (operator-driven).
 3. FR-5 — a real behavioural test of the improver + learning loop.
