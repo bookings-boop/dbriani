@@ -2101,7 +2101,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d) return [];\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '🤖 AUTO — auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop · or ✏️ Edit · ❌ Skip)', '',\n  '📩 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '💬 will send:', preview];\nconst reply_markup = { inline_keyboard: [\n  [{ text: '✅ Send now', callback_data: 'send:' + draftId },\n   { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '🔁 Regen', callback_data: 'regen:' + draftId },\n   { text: '❌ Skip', callback_data: 'skip:' + draftId }]\n] };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: d.telegram_message_id,\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
+        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d) return [];\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '🤖 AUTO — auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop · or ✏️ Edit · ❌ Skip)', '',\n  '📩 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '💬 will send:', preview];\nconst reply_markup = { inline_keyboard: [\n  [{ text: '✅ Send now', callback_data: 'send:' + draftId },\n   { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '🔁 Regen', callback_data: 'regen:' + draftId },\n   { text: '❌ Skip', callback_data: 'skip:' + draftId }]\n] };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: d.telegram_message_id,\n      draft_text: d.draft_text || '',\n      customer_name: d.customer_name || '',\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
       },
       "id": "442b1740-643f-400c-95a2-715d3e15e6fb",
       "name": "Auto Prep",
@@ -2205,7 +2205,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-4 4-C: after the delay — proceed only if the draft is STILL pending\nconst prep = $('Auto Prep').item.json;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === prep.draft_id);\n// operator wins: a Send / Skip / Edit during the window abandons the auto-send\nif (!d || d.status !== 'pending') return [];\nreturn [{ json: {\n  draft_id: prep.draft_id,\n  customer_id: prep.customer_id,\n  customer_phone: d.customer_phone || prep.customer_phone,\n  telegram_message_id: prep.telegram_message_id,\n  customer_name: d.customer_name || '',\n  draft_text: d.draft_text\n    || (Array.isArray(d.messages) ? d.messages.join('\\n\\n') : '')\n} }];\n"
+        "jsCode": "// BUG-1 fix: decide via the Redis autosend state (Get Autosend), NOT n8n\n// staticData — staticData is clobbered by concurrent executions across the\n// Auto Wait countdown. armed === true => the operator did not intervene.\nconst r = $('Get Autosend').item.json || {};\nif (r.armed !== true || !r.data) return [];\nconst d = r.data;\nreturn [{ json: {\n  draft_id: d.draft_id,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: d.telegram_message_id,\n  customer_name: d.customer_name || '',\n  draft_text: d.draft_text || ''\n} }];\n"
       },
       "id": "4107ecf0-7144-4d74-9c09-dee5fd0b0187",
       "name": "Auto Decide",
@@ -2533,6 +2533,114 @@
         1440
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/autosend-state",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"arm\", \"draft_id\": {{ JSON.stringify($('Auto Prep').item.json.draft_id) }}, \"customer_phone\": {{ JSON.stringify($('Auto Prep').item.json.customer_phone) }}, \"draft_text\": {{ JSON.stringify($('Auto Prep').item.json.draft_text) }}, \"customer_name\": {{ JSON.stringify($('Auto Prep').item.json.customer_name) }}, \"telegram_message_id\": {{ $('Auto Prep').item.json.telegram_message_id || 0 }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "57458c91-1057-4264-9c46-bb46d2a13351",
+      "name": "Arm Autosend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6960,
+        1360
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/autosend-state",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"disarm\", \"draft_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "ace98068-f90c-4bc5-b6db-c79b855d138d",
+      "name": "Disarm Autosend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5240,
+        1320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/autosend-state",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"get\", \"draft_id\": {{ JSON.stringify($('Auto Prep').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "e2724060-416f-4641-b97e-b7ab4a6feb65",
+      "name": "Get Autosend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7720,
+        1360
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -2682,7 +2790,7 @@
       "main": [
         [
           {
-            "node": "Draft Exists?",
+            "node": "Disarm Autosend",
             "type": "main",
             "index": 0
           }
@@ -3364,7 +3472,7 @@
       "main": [
         [
           {
-            "node": "Render Auto Card",
+            "node": "Arm Autosend",
             "type": "main",
             "index": 0
           }
@@ -3386,7 +3494,7 @@
       "main": [
         [
           {
-            "node": "Auto Decide",
+            "node": "Get Autosend",
             "type": "main",
             "index": 0
           }
@@ -3547,6 +3655,39 @@
         [
           {
             "node": "Break Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arm Autosend": {
+      "main": [
+        [
+          {
+            "node": "Render Auto Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Disarm Autosend": {
+      "main": [
+        [
+          {
+            "node": "Draft Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Autosend": {
+      "main": [
+        [
+          {
+            "node": "Auto Decide",
             "type": "main",
             "index": 0
           }
