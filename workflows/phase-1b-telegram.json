@@ -344,7 +344,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst [action, draftId] = data.split(':');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = queue.find(d => d.id === draftId);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: draftId,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    draft_found: !!draft\n  }\n};"
+        "jsCode": "// Parse callback_data and look up the draft\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst [action, draftId] = data.split(':');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = queue.find(d => d.id === draftId);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: draftId,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    // feedback callbacks aren't about a pendingQueue draft — let the\n    // existing Draft Exists? IF pass them through.\n    draft_found: !!draft || (action || '').indexOf('feedback_') === 0\n  }\n};"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -530,6 +530,78 @@
               },
               "renameOutput": true,
               "outputKey": "takeover"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "1af60442-73f2-489b-bb7e-3f9a62750e82",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_yes",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_yes"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "f36559a8-2c1e-4c70-84f4-7387b3e38d59",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_modify",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_modify"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "0124d0ef-ec05-4129-b7c1-dca45fc056b9",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_no",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_no"
             }
           ]
         },
@@ -3056,6 +3128,195 @@
         5780,
         2160
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"save\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "57deb761-8ebd-4eea-82e0-80ffbedf50c3",
+      "name": "Feedback Save",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(($json.ok === true) ? (\"✅ Saved as \" + ($json.classification || \"rule\") + \":\\n→ \" + ($json.summary || \"\")) : (\"⚠️ Save failed: \" + ($json.error || \"unknown error\"))) }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "787a6bb3-5218-408d-82d2-33588f7e29d3",
+      "name": "Edit Feedback Saved",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"discard\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "0ac79a56-045d-4a2a-898a-cf5b3c31b4e5",
+      "name": "Feedback Modify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2540
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"✏️ Discarded. Re-type with /feedback <updated text> when ready.\") }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "e7f3d140-e1f4-4ab9-9a0c-44f345bc74c0",
+      "name": "Edit Feedback Modify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"discard\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "1463f85d-13ae-41e0-a711-fc657e550d68",
+      "name": "Feedback Discard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2680
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"❌ Discarded.\") }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "8611f964-a504-4a73-8cff-322f6fc3733f",
+      "name": "Edit Feedback Discarded",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2680
+      ]
     }
   ],
   "connections": {
@@ -3252,6 +3513,27 @@
         [
           {
             "node": "Set Manual Mode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feedback Save",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feedback Modify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feedback Discard",
             "type": "main",
             "index": 0
           }
@@ -4228,6 +4510,39 @@
         [
           {
             "node": "Send Feedback Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Save": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Modify": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Modify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Discard": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Discarded",
             "type": "main",
             "index": 0
           }
