@@ -6,6 +6,28 @@ for live-system status and `docs/decisions.md` for the build history.
 
 ---
 
+## ✅ Customer context header — SHIPPED (2026-05-22)
+
+A structured customer-context header above approval-mode draft cards:
+`👤 name · 📅 dates · 🛥️ yachts · 👥 party size · 🔢 message #`, then a divider.
+
+- New Postgres table `customer_facts` (one row per customer).
+- New bridge endpoint `POST /customer-facts` — gated Hermes extraction (first
+  message always; later messages on a keyword heuristic — digit / yacht / date
+  / name / booking word), atomic SQL message-count increment, fail-safe
+  (always 200; any error degrades to cached facts).
+- New workflow node `Customer Facts`; `Queue & Format` prepends the header to
+  the non-lead card. `/lead` path left untouched.
+- `system-prompt.md` §5 + the `Build Prompt` embedded copy: Maria asks the
+  customer's name naturally after 2-3 exchanges if not introduced.
+
+Plan: `docs/feature-header-plan.md`. Built / deployed / tested 2026-05-22 —
+all 4 end-to-end tests passed (header render, skip-gate, `/lead` regression,
+refine regression). Scripts: `build_customer_header.py`,
+`build_ask_name_prompt.py`. Live workflow at 98 nodes.
+
+---
+
 ## FR-1 — Edit button → Claude feedback loop (shared capability)
 
 **Requested by the operator (Zayn). Re-scoped 2026-05-21.**

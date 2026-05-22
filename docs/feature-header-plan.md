@@ -1,5 +1,14 @@
 # Customer Context Header — Implementation Plan
 
+> ✅ **STATUS: IMPLEMENTED, DEPLOYED & TESTED — 2026-05-22.** All 9 tasks
+> complete; all 4 end-to-end tests passed. Open questions resolved per
+> recommendation (Q1 = 15s Hermes timeout). Two build-time corrections to the
+> plan: (a) `extract_customer_facts` dropped its two unused params; (b) because
+> the `Customer Facts` httpRequest sits in the chain, `Queue & Format` resolves
+> its draft data from `$('Parse Response')` / `$('Parse Lead Response')`
+> explicitly (the plan's Task 6 originally assumed `$input` still worked). See
+> `docs/feature-backlog.md` for the shipped summary.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (or
 > subagent-driven-development) to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
