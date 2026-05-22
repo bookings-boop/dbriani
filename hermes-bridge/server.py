@@ -1130,9 +1130,42 @@ class Handler(BaseHTTPRequestHandler):
                     data = None
             self._send(200, {"ok": True, "action": "get", "draft_id": did,
                              "armed": bool(data), "data": data})
+        elif action == "update":
+            # FR-5 BUG-3 fix: the improver rewrites the draft text on an armed
+            # autonomous draft so the auto-send dispatches the improved copy,
+            # not the arm-time snapshot. No-op (updated=false) if not armed —
+            # an approval-mode draft has no key, so calling this is harmless.
+            out, err = _redis(["GET", key])
+            if err:
+                log("autosend-state update GET failed:", err)
+                self._send(502, {"ok": False, "error": err})
+                return
+            raw = (out or "").strip()
+            if not raw:
+                self._send(200, {"ok": True, "action": "update",
+                                 "draft_id": did, "updated": False})
+                return
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
+            new_text = payload.get("draft_text")
+            if new_text is not None:
+                data["draft_text"] = str(new_text)
+            ttl_out, _ = _redis(["TTL", key])
+            try:
+                ttl = int((ttl_out or "0").strip())
+            except (TypeError, ValueError):
+                ttl = AUTOSEND_TTL
+            if ttl <= 0:
+                ttl = AUTOSEND_TTL
+            _redis(["SET", key, json.dumps(data), "EX", str(ttl)])
+            log(f"autosend-state UPDATE {did}")
+            self._send(200, {"ok": True, "action": "update",
+                             "draft_id": did, "updated": True})
         else:
             self._send(400, {"ok": False,
-                             "error": "action must be arm|disarm|get"})
+                             "error": "action must be arm|disarm|get|update"})
 
     def _customer_facts(self, payload):
         """feature-header: maintain customer_facts + return a context header.
