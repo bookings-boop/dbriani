@@ -193,7 +193,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const input = $input.item.json;\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = (Array.isArray(input.messages) && input.messages.length)\n  ? input.messages.map(m => String(m))\n  : ['(empty draft)'];\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '💬 DRAFT:' : ('💬 DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('📜 History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '📜 First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['🆕 NEW LEAD — outbound first contact', '📞 ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes];\n} else {\n  lines = ['📩 from ' + pending.customer_phone];\n  if (pending.customer_name) lines.push('👤 ' + pending.customer_name);\n  lines.push(histLine, '', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes);\n}\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }],\n    [{ text: '🤖 Auto', callback_data: 'auto:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id } };"
+        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = (Array.isArray(input.messages) && input.messages.length)\n  ? input.messages.map(m => String(m))\n  : ['(empty draft)'];\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '💬 DRAFT:' : ('💬 DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('📜 History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '📜 First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['🆕 NEW LEAD — outbound first contact', '📞 ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes];\n} else {\n  lines = ['📩 from ' + pending.customer_phone];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('👤 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes);\n}\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }],\n    [{ text: '🤖 Auto', callback_data: 'auto:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id } };"
       },
       "id": "0353eee2-a420-41e4-9ae9-2e3f4d547b33",
       "name": "Queue & Format",
@@ -2765,6 +2765,42 @@
         1180
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/customer-facts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_phone) }}, \"customer_name\": {{ JSON.stringify($json.customer_name) }}, \"incoming_message\": {{ JSON.stringify($json.user_message) }}, \"history\": {{ JSON.stringify($json.conversation_history) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "48e3a00b-8f21-4ba6-879b-ee39d99e8566",
+      "name": "Customer Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5424,
+        692
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -2823,7 +2859,7 @@
       "main": [
         [
           {
-            "node": "Queue & Format",
+            "node": "Customer Facts",
             "type": "main",
             "index": 0
           }
@@ -3841,6 +3877,17 @@
         [
           {
             "node": "Check Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer Facts": {
+      "main": [
+        [
+          {
+            "node": "Queue & Format",
             "type": "main",
             "index": 0
           }
