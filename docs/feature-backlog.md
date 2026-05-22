@@ -404,3 +404,30 @@ improver branch — 57 nodes), 4.3a (bridge `/learn` + `/rules`), 4.3b (n8n
 learning loop — 64 nodes). The background improver and the learning loop are
 live. **Pending: real-traffic behavioural testing** of FR-3, the improver, and
 the learning loop. See `docs/decisions.md` and `docs/hermes-revival-design.md`.
+
+---
+
+## BUG-1 — Autonomous auto-send unreliable (`Auto Decide` / `staticData`)
+
+**Found 2026-05-22 during H7–H9 behavioural testing.** Full trace in
+`docs/h7-h9-test-plan.md`.
+
+Autonomous mode activates, the autonomous branch engages, the countdown card
+posts and `Auto Wait` runs — but the auto-send **does not fire**. After the
+countdown, `Auto Decide` re-checks the draft with
+`pendingQueue.find(id).status === 'pending'`, reading the queue from n8n
+**`staticData`**. The draft *is* pending, but the read returns no usable
+result, so `Auto Decide` returns `[]` and the branch silently stops before
+`Auto Commit` / `Auto Send WAHA`. Zero `autonomous_sends` `kind=auto` rows.
+
+**Root cause:** n8n `staticData` is not consistent across a Wait-node resume
+or across concurrent executions — the *same* architectural flaw that made
+FR-3's debounce broken-by-design.
+
+**Severity:** autonomous mode cannot be used for real customers. Fails safe —
+the draft remains a normal approval card, nothing wrong is auto-sent.
+
+**Fix direction:** the autonomous branch must not depend on `staticData` for
+post-wait draft state. Hold draft/queue state in **Redis** (already on the
+box) — the same redesign FR-3 needs. Until then, autonomous mode is
+effectively non-functional and should stay off.

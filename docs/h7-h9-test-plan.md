@@ -1,61 +1,89 @@
-# Autonomous Mode — Safe Test Plan (H7–H9 + caps)
+# H7–H9 Behavioural Test — Autonomous Mode + Caps — RESULTS
 
-How to test autonomous mode end to end **with a phone you control** — without
-risk to real customers.
+**Date:** 2026-05-22
+**Status:** ⛔ **HALTED at H8** — autonomous auto-send does not reliably fire.
+**Test-run tag:** `test_run=2026-05-22_h7_h9`
+**Test phone:** +971509767187 — WhatsApp conversation id `274942918680787@lid`
 
-> ⛔ **PREREQUISITE:** drafting must be working. As of the overnight build it is
-> **down** — Hermes → Anthropic returns `401 invalid x-api-key` / `400 usage
-> limit`. Fix `ANTHROPIC_API_KEY` in `~/.hermes/.env` (and/or Anthropic usage),
-> `systemctl --user restart hermes-bridge`, confirm a normal draft works
-> (test H1), **then** run the below.
+*(This file previously held the test procedure; it was replaced with the run
+results. The procedure is in git history at the commit before this one.)*
 
-## Setup
-- Use a **second phone / WhatsApp number you own** as the "test customer".
-- Send it the Dubriani number first so a conversation exists.
-- Keep the n8n Executions view and the Telegram approval chat open.
-- After testing, run `/manual` to clear all autonomous modes.
+## Summary
 
-## H7 — Activate autonomous mode
-1. From the test phone, message the Dubriani number (e.g. *"hi, yacht for
-   saturday?"*).
-2. A normal draft card appears in Telegram.
-3. **Reply to that card** with `let it run`.
-4. **Expect:** *"✅ Conversation mode — <name> → autonomous"* + a warning that
-   Hermes will now reply without approval.
-   *Verify:* `SELECT mode FROM conversation_modes WHERE customer_id='<test>'
-   ORDER BY id DESC LIMIT 1;` → `autonomous`.
+| | |
+|---|---|
+| **Works** | Autonomous-mode activation · break-condition detection (`break_condition` emitted + carried onto the draft) · the autonomous branch engages and runs the countdown. |
+| **Broken** | **Autonomous auto-send does not fire** — the branch aborts at `Auto Decide` after the wait. |
+| **Safe for production** | **Approval mode — yes** (unchanged, operator-confirmed earlier). **Autonomous mode — NO.** Do not enable it for real customers until the `Auto Decide` bug is fixed. |
 
-## H8 — Auto-send
-1. From the test phone, send another message.
-2. **Expect:** the reply **arrives on the test phone automatically** — no
-   approval card — and a *"🤖 AUTO-SENT (autonomous mode)"* notice appears in
-   your Telegram.
-3. Confirm the reply text is sane. If not → `/manual` immediately.
+## Prerequisites — all verified (2026-05-22)
 
-## H8b — Per-conversation checkpoint cap (5 consecutive)
-1. With the test phone still autonomous, send **5 messages** in a row (waiting
-   for each auto-send). Messages 1–5 auto-send.
-2. Send a **6th** message.
-3. **Expect:** the 6th does **NOT** auto-send — it arrives as an approval card
-   whose notes start *"🛑 autonomous → approval: checkpoint after 5
-   consecutive…"*. This is the safety cap forcing a human checkpoint.
-4. Approve (or refine) it normally — that counts as your intervention and the
-   streak resets.
+2A `evaluate_caps` (`0b1afae`) · 2B dead branch removed (`92c43d1`) · 2C error
+alerts (`b5166c0`) · 3 draft guard (`415407c`,`b8da4e7`) — all committed +
+deployed. Live workflow 91 nodes, active. Bridge boot-safe (enabled +
+`Linger=yes`). Docker `unless-stopped` ×4. WAHA session `default` WORKING.
 
-## H9 — Take back
-1. Reply `take back` to any draft card from the test conversation.
-2. **Expect:** *"✅ … → approval"*. Further messages from the test phone go
-   back to normal approval cards.
+## Results
 
-## Cap inspection & kill switch
-- Send `/caps` → expect the cap status (daily used/limit, per-conversation,
-  sampling, autonomous count).
-- Send `/manual` → expect *"all conversations set to approval"*; verify every
-  row's latest mode is `approval`.
+### H7 — Activate autonomous mode — ✅ PASS
+`/set-mode autonomous` on `274942918680787@lid` → effective mode `autonomous`;
+`/autosend-check` gate confirmed `auto_send:true`.
+*Note:* WhatsApp delivers this phone under the linked-id `274942918680787@lid`,
+not `971509767187@c.us`. The first H7 attempt targeted the raw number (wrong
+id) and was redone against the `@lid`. Lesson: identify the conversation by
+the id WAHA actually delivers, not the phone number.
 
-## Notes
-- **Daily cap (20/day)** and **5% QC sampling** are hard to force by hand —
-  trust them or temporarily lower `CAP_DAILY_LIMIT` / raise `CAP_SAMPLE_PCT`
-  in `~/hermes-bridge/.env` + restart the bridge to observe them, then restore.
-- Anything unexpected → `/manual` is the kill switch.
-- Do **not** run H7–H9 on a real customer conversation.
+### H8 — Verify auto-send fires — ❌ FAIL
+- Test message → draft `1779431894763_w8sav` created · `break_condition:{hit:false}` (detection ✓).
+- Autonomous branch engaged: `Find Break → Break Check → Auto Prep → Auto Gate
+  → Auto Is Autonomous → Render Auto Card → Auto Wait (270s) → Auto Decide`.
+- **`Auto Decide` returned `[]`** — branch stopped. `Auto Commit` /
+  `Auto Send Gate` / `Auto Send WAHA` never ran. Zero `autonomous_sends`
+  `kind=auto` rows. No message delivered to the test phone.
+- Execution 645, status `success` — the branch ended cleanly; it simply did
+  not send.
+
+### H8b · break-condition tests · `/caps` · H9 · `/manual` — ⏸️ NOT RUN
+Suite halted — every remaining test depends on auto-send firing, which H8
+proved it does not.
+
+## Root cause
+
+`Auto Decide` re-checks the draft after the countdown —
+`pendingQueue.find(id).status === 'pending'`. The draft *is* pending, but
+`Auto Decide`'s lookup reads the draft queue from n8n **`staticData`** after
+the 270-second `Auto Wait`, and returned no usable result, so it bailed.
+
+This is the **n8n `staticData` unreliability** — the same architectural flaw
+that made FR-3's debounce broken-by-design. `staticData` is not consistent
+across a Wait-node resume or across concurrent executions, so the autonomous
+branch's post-wait `Auto Decide` recheck cannot be trusted.
+
+It **fails safe**: the draft just remains a normal pending approval card —
+nothing wrong is auto-sent.
+
+## Action — backlogged
+
+`docs/feature-backlog.md` → **BUG-1**: *autonomous-send branch — `Auto Decide`'s
+`staticData` recheck is unreliable across the `Auto Wait` resume; needs the
+Redis-backed state redesign (the same fix FR-3 needs).*
+
+## Test data + cleanup
+
+Test conversation `274942918680787@lid` was deactivated → `approval` at the
+end of the run. The stray wrong-id row `971509767187@c.us` is also `approval`.
+
+- `conversation_modes` rows tagged `test_run=2026-05-22_h7_h9`: id 26–29.
+- `autonomous_sends`: `kind=intervention` rows logged by the 4 `/set-mode`
+  calls — not individually tagged.
+- `pendingQueue` test drafts: `…_6kcln`, `…_d0ne9`, `…_w8sav`.
+
+⚠️ `274942918680787@lid` also holds **pre-test** history (used in earlier
+sessions) — clean selectively, not by a blanket `customer_id` delete.
+
+Cleanup (run as the `n8n` Postgres superuser — `hermes_rw` has no DELETE):
+```sql
+DELETE FROM conversation_modes WHERE activated_by LIKE '%test_run=2026-05-22_h7_h9%';
+-- autonomous_sends + pendingQueue test drafts: review first — the @lid id
+-- has pre-test history that should NOT be deleted.
+```
