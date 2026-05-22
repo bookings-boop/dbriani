@@ -776,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
-                             "/caps", "/autosend-state"):
+                             "/caps", "/autosend-state", "/customer-facts"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -804,6 +804,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "text": caps_status_text()})
         elif self.path == "/autosend-state":
             self._autosend_state(payload)
+        elif self.path == "/customer-facts":
+            self._customer_facts(payload)
         else:
             self._draft(payload)
 
@@ -1127,6 +1129,64 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(400, {"ok": False,
                              "error": "action must be arm|disarm|get"})
+
+    def _customer_facts(self, payload):
+        """feature-header: maintain customer_facts + return a context header.
+        Fail-safe — ANY error degrades to cached facts and still returns 200,
+        so the workflow's draft card is never blocked by header logic."""
+        cid = (payload.get("customer_id") or "").strip()
+        cname = (payload.get("customer_name") or "").strip()
+        msg = payload.get("incoming_message") or ""
+        history = payload.get("history") or ""
+        is_refine = bool(payload.get("is_refine"))
+        try:
+            cached = get_customer_facts(cid)
+            if is_refine:
+                # a refine re-renders an existing draft — not a new inbound:
+                # no extraction, no increment. Header from cached facts only.
+                f = cached or {}
+                mc = (cached or {}).get("message_count", 0)
+                hdr = build_customer_header({
+                    "name": f.get("name") or cname,
+                    "dates": f.get("dates", ""), "yachts": f.get("yachts", ""),
+                    "party_size": f.get("party_size", ""),
+                    "message_count": mc})
+                self._send(200, {"ok": True, "extracted": False,
+                                 "message_count": mc, "customer_header": hdr})
+                return
+            do_extract = (cached is None) or _facts_extract_gate(msg)
+            if do_extract:
+                merged = _merge_facts(cached,
+                                      extract_customer_facts(msg, history))
+            else:
+                merged = _merge_facts(cached, None)
+            if not (merged.get("name") or "").strip():
+                merged["name"] = cname
+            new_count, err = upsert_customer_facts(cid, merged["name"], merged)
+            if err:
+                log("customer_facts upsert failed:", err)
+            mc = new_count if isinstance(new_count, int) \
+                else ((cached or {}).get("message_count", 0) + 1)
+            hdr = build_customer_header({**merged, "message_count": mc})
+            log(f"customer-facts cid={cid!r} extract={do_extract} msg#{mc}")
+            self._send(200, {"ok": True, "extracted": bool(do_extract),
+                             "message_count": mc, "customer_header": hdr})
+        except Exception as e:
+            log("customer_facts ERROR:", repr(e))
+            cached = None
+            try:
+                cached = get_customer_facts(cid)
+            except Exception:
+                pass
+            mc = (cached or {}).get("message_count", 0)
+            hdr = build_customer_header({
+                "name": (cached or {}).get("name") or cname,
+                "dates": (cached or {}).get("dates", ""),
+                "yachts": (cached or {}).get("yachts", ""),
+                "party_size": (cached or {}).get("party_size", ""),
+                "message_count": mc})
+            self._send(200, {"ok": True, "extracted": False, "degraded": True,
+                             "message_count": mc, "customer_header": hdr})
 
 
 def main():
