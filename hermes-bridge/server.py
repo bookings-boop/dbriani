@@ -27,6 +27,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
@@ -59,6 +61,12 @@ CAP_SAMPLE_ACTIVE = _envflag("CAP_SAMPLE_ACTIVE", "true")
 CAP_SAMPLE_PCT = float(os.environ.get("CAP_SAMPLE_PCT", "5"))
 DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
                   "AT TIME ZONE 'Asia/Dubai'")
+
+# --- Nomod payment links (minimal build) -----------------------------------
+NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
+NOMOD_API_BASE = os.environ.get("NOMOD_API_BASE",
+                                "https://api.nomod.com/v1").rstrip("/")
+PAYMENTS_ENABLED = _envflag("PAYMENTS_ENABLED", "true")
 
 SESSION_RE = re.compile(r"session_id:\s*(\S+)")
 FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
@@ -123,6 +131,49 @@ def _lit(v):
     if v is None or v == "":
         return "NULL"
     return "'" + str(v).replace("'", "''") + "'"
+
+
+def nomod_create_link(amount, summary, customer_name):
+    """Create a Nomod payment link. Returns (link_url, link_id, err).
+
+    Currency is hard-coded AED — never taken from the LLM. No expiry_date
+    (Nomod default). The booking summary is the single line item + the note;
+    customer_name goes in the link title."""
+    if not NOMOD_API_KEY:
+        return None, None, "NOMOD_API_KEY not configured on the bridge"
+    summary = (summary or "Yacht charter").strip()
+    title = ("Dubriani Yachts — " + customer_name).strip() \
+        if customer_name else "Dubriani Yachts"
+    body = json.dumps({
+        "currency": "AED",
+        "items": [{"name": summary[:200],
+                   "amount": "%.2f" % amount, "quantity": 1}],
+        "title": title[:50],
+        "note": summary[:280],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        NOMOD_API_BASE + "/links", data=body, method="POST",
+        headers={"X-API-KEY": NOMOD_API_KEY,
+                 "Content-Type": "application/json",
+                 # Nomod's Cloudflare WAF 403s the default Python-urllib UA
+                 "User-Agent": "DubrianiHermesBridge/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        url = resp.get("url")
+        if not url:
+            return None, None, "Nomod response had no link url"
+        return url, resp.get("id"), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+            msg = ((detail.get("error") or {}).get("message")
+                   or detail.get("detail") or json.dumps(detail))
+        except Exception:
+            msg = "HTTP %s" % e.code
+        return None, None, "Nomod %s: %s" % (e.code, msg)
+    except Exception as e:
+        return None, None, "Nomod request failed: %r" % e
 
 
 def fetch_behavior_rules(customer_id):
@@ -778,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
-                             "/debounce"):
+                             "/debounce", "/payment-link"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -810,6 +861,8 @@ class Handler(BaseHTTPRequestHandler):
             self._customer_facts(payload)
         elif self.path == "/debounce":
             self._debounce(payload)
+        elif self.path == "/payment-link":
+            self._payment_link(payload)
         else:
             self._draft(payload)
 
@@ -1301,6 +1354,40 @@ class Handler(BaseHTTPRequestHandler):
                              "ids": ids, "count": len(msgs)})
             return
         self._send(400, {"ok": False, "error": "action must be buffer|flush"})
+
+    def _payment_link(self, payload):
+        """Nomod minimal build: create a payment link for a confirmed booking.
+        Fail-safe — ALWAYS returns 200 so the workflow's draft is never blocked;
+        an ok:false response just means the card posts without a link."""
+        cid = (payload.get("customer_id") or "").strip()
+        cname = (payload.get("customer_name") or "").strip()
+        summary = (payload.get("payment_summary") or "").strip()
+        if not PAYMENTS_ENABLED:
+            log("payment-link refused — PAYMENTS_ENABLED is off")
+            self._send(200, {"ok": False, "error": "payments are disabled"})
+            return
+        try:
+            amount = float(payload.get("amount"))
+        except (TypeError, ValueError):
+            amount = 0.0
+        # basic input validation only — NOT a business cap (per plan)
+        if amount <= 0:
+            log("payment-link refused — invalid amount %r"
+                % payload.get("amount"))
+            self._send(200, {"ok": False,
+                             "error": "invalid amount: %r"
+                                      % payload.get("amount")})
+            return
+        url, lid, err = nomod_create_link(amount, summary, cname)
+        if err:
+            log("payment-link FAILED customer=%s amount=AED%.2f err=%s"
+                % (cid, amount, err))
+            self._send(200, {"ok": False, "error": err})
+            return
+        log("payment-link OK customer=%s amount=AED%.2f link_id=%s"
+            % (cid, amount, lid))
+        self._send(200, {"ok": True, "link_url": url, "link_id": lid,
+                         "amount": amount})
 
 
 def main():
