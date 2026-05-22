@@ -1,7 +1,7 @@
 # H7–H9 Behavioural Test — Autonomous Mode + Caps — RESULTS
 
 **Date:** 2026-05-22
-**Status:** ✅ **Suite complete (2026-05-22).** H7 ✓ · H8 ✓ (after the BUG-1 fix) · H8b ✓ · break-conditions ✓ 3/3 · H9 ✓ · `/manual` ✓ · `/caps` ✗ (command not wired).
+**Status:** ✅ **Suite complete (2026-05-22).** H7 ✓ · H8 ✓ (after the BUG-1 fix) · H8b ✓ · break-conditions ✓ 3/3 · H9 ✓ · `/manual` ✓ · `/caps` ✓ (fixed — BUG-2).
 **Test-run tag:** `test_run=2026-05-22_h7_h9`
 **Test phone:** +971509767187 — WhatsApp conversation id `274942918680787@lid`
 
@@ -14,7 +14,7 @@ results. The procedure is in git history at the commit before this one.)*
 |---|---|
 | **Works** | Autonomous-mode activation · break-condition detection (`break_condition` emitted + carried onto the draft) · the autonomous branch engages and runs the countdown. |
 | **BUG-1 — FIXED** | The `Auto Decide` `staticData` failure is fixed (Redis-backed) and **H8 re-passed** — see the H8 re-test below. |
-| **Safe for production** | **Approval mode — yes.** **Autonomous mode — core safety verified:** caps, break-conditions and the `/manual` kill switch all pass; auto-send works. Gaps: `/caps` command not wired (cosmetic) · `Mark Auto Sent` `staticData` residual (cosmetic). |
+| **Safe for production** | **Approval mode — yes.** **Autonomous mode — core safety verified:** caps, break-conditions and the `/manual` kill switch all pass; auto-send works. `/caps` wired (BUG-2 fixed). |
 
 ## Prerequisites — all verified (2026-05-22)
 
@@ -70,13 +70,16 @@ no auto-send, `break_reason` recorded, Telegram alert fired.
 No separate run needed: each of the three break tests flipped the
 conversation `autonomous → approval` with a recorded `break_reason`.
 
-### `/caps` — ❌ FAIL — command not wired
-Sending `/caps` fell through `Process Text Reply → Route Text Action →
+### `/caps` — ❌ FAIL → ✅ FIXED (BUG-2, 2026-05-22)
+Originally `/caps` fell through `Process Text Reply → Route Text Action →
 Ack No Pending` (the "no pending draft" fallback) — no cap status returned.
-The **bridge `/caps` endpoint works** (a direct call returns the status), but
-**nothing in the workflow routes the `/caps` command to it** — `Process Text
-Reply` has no `/caps` branch. Minor — operator convenience, not a safety
-path. Backlogged as BUG-2.
+The bridge `/caps` endpoint worked; nothing in the workflow routed to it.
+
+**↻ Fixed & re-tested (2026-05-22) — ✅ PASS.** `build_bug2_caps_command.py`
+added a `/caps` branch to `Process Text Reply`, switch output #6 `caps_cmd`,
+and `Hermes Caps → Send Caps Reply`. Execution 656 ran the chain end-to-end
+(`success`); the operator received the `🧮 Autonomous-mode safety caps`
+message. See `docs/feature-backlog.md` BUG-2.
 
 ### `/manual` — kill switch — ✅ PASS
 Execution 655 ran `Process Text Reply → Route Text Action → Hermes Set Mode →

@@ -446,19 +446,27 @@ post-send bookkeeping, tracked separately.
 
 ---
 
-## BUG-2 — `/caps` operator command not wired
+## BUG-2 — `/caps` operator command not wired — ✅ RESOLVED (2026-05-22)
 
 **Found 2026-05-22 during the H7–H9 suite.** Sending `/caps` to the operator
-bot falls through `Process Text Reply → Route Text Action → Ack No Pending`
-(the "no pending draft" fallback) — no cap status is returned.
+bot fell through `Process Text Reply → Route Text Action → Ack No Pending`
+(the "no pending draft" fallback) — no cap status was returned.
 
-The bridge `/caps` endpoint works (a direct POST returns `caps_status_text()`),
-but **nothing in the workflow routes the `/caps` command to it** —
-`Process Text Reply` has no `/caps` branch.
+The bridge `/caps` endpoint worked (a direct POST returns `caps_status_text()`),
+but **nothing in the workflow routed the `/caps` command to it** —
+`Process Text Reply` had no `/caps` branch.
 
-**Severity:** minor — operator convenience, not a safety path. Cap data is
-still reachable (the bridge endpoint directly, and the daily-summary cron).
+**Severity:** minor — operator convenience, not a safety path.
 
-**Fix direction:** add a `/caps` branch to `Process Text Reply` that routes to
-an httpRequest node calling the bridge `POST /caps` and replies with the
-returned `text`. Small workflow change.
+**✅ Fixed & verified (2026-05-22).** `scripts/build_bug2_caps_command.py`:
+- `Process Text Reply` — new `(F) /caps` branch → `{action:'caps_cmd'}`.
+- `Route Text Action` — new switch output #6 `caps_cmd`.
+- `Hermes Caps` (new) — `POST http://172.18.0.1:8788/caps` (token-gated,
+  `Hermes Bridge` credential) → `Send Caps Reply` (new) relays the bridge's
+  `text` to the operator via Telegram `sendMessage`.
+
+Wiring: `Route Text Action [out 6] ─▶ Hermes Caps ─▶ Send Caps Reply`.
+
+**Live test — PASSED.** Execution 656: operator sent `/caps`, the chain ran
+end-to-end (`success`), the bridge returned the cap status, and the operator
+received the `🧮 Autonomous-mode safety caps` message in Telegram.
