@@ -46,10 +46,11 @@ All session work is **merged to `main`** (`131ca2a`, 53 commits).
 
 ## Pending work (priority order)
 
-1. **BUG-1 / FR-3 — Redis-backed state redesign.** Move draft/queue state
-   off n8n `staticData` onto Redis (already on the box). Fixes autonomous
-   auto-send *and* the FR-3 debounce. A real architecture rebuild — its own
-   brainstorm → spec → plan → build.
+1. **BUG-1 — autonomous auto-send.** Diagnosis confirmed; the Redis-backed
+   fix is **designed and build-ready** — `docs/bug-1-autonomous-send-fix.md`.
+   Next: build the n8n nodes (~5-6 changes, one new Redis credential) +
+   deploy via `safe_put` + a live re-test. The same Redis foundation also
+   fixes FR-3.
 2. **Rotate exposed secrets** — `N8N_API_KEY` + the Telegram bot token.
    Runbook: `docs/secret-rotation.md` (operator-driven).
 3. FR-5 — a real behavioural test of the improver + learning loop.

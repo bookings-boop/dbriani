@@ -431,3 +431,7 @@ the draft remains a normal approval card, nothing wrong is auto-sent.
 post-wait draft state. Hold draft/queue state in **Redis** (already on the
 box) — the same redesign FR-3 needs. Until then, autonomous mode is
 effectively non-functional and should stay off.
+
+**Build-ready fix design (2026-05-22):** `docs/bug-1-autonomous-send-fix.md` —
+confirmed diagnosis, Redis-backed design, node-level changes, build order,
+test plan. Ready to execute; build + live re-test not yet done.
