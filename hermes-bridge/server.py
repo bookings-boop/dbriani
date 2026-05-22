@@ -43,6 +43,7 @@ PG_USER = os.environ.get("BRIDGE_PG_USER", "hermes_rw")
 PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
 REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
 AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
+DEBOUNCE_TTL = int(os.environ.get("BRIDGE_DEBOUNCE_TTL", "120"))
 
 
 def _envflag(key, default):
@@ -776,7 +777,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
-                             "/caps", "/autosend-state", "/customer-facts"):
+                             "/caps", "/autosend-state", "/customer-facts",
+                             "/debounce"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -806,6 +808,8 @@ class Handler(BaseHTTPRequestHandler):
             self._autosend_state(payload)
         elif self.path == "/customer-facts":
             self._customer_facts(payload)
+        elif self.path == "/debounce":
+            self._debounce(payload)
         else:
             self._draft(payload)
 
@@ -1187,6 +1191,83 @@ class Handler(BaseHTTPRequestHandler):
                 "message_count": mc})
             self._send(200, {"ok": True, "extracted": False, "degraded": True,
                              "message_count": mc, "customer_header": hdr})
+
+    def _debounce(self, payload):
+        """BUG-1 fix: Redis-backed inbound debounce for FR-3.
+
+        n8n staticData is loaded per-execution and is NOT shared across the
+        concurrent executions one-per-inbound-message spawns, so the old
+        staticData 'latest token wins' check was inert — every execution saw
+        only its own token and flushed, yielding one draft per message.
+
+        Redis is shared + atomic. Keys (TTL DEBOUNCE_TTL):
+          debounce:buf:<phone>  list  — buffered {id,text} messages
+          debounce:seq:<phone>  str   — token of the most recent message
+
+        action=buffer : append the message, stamp a fresh token, return it.
+        action=flush  : the caller passes the token it was given; if it still
+                        equals debounce:seq it is the latest message — drain +
+                        delete the buffer and return the combined text; if not,
+                        a newer message arrived and the caller must suppress
+                        its draft (latest=false).
+        Fail-OPEN: any Redis error returns latest=true so a customer message
+        is never dropped (a rare duplicate draft is acceptable; a lost message
+        is not)."""
+        action = (payload.get("action") or "").strip().lower()
+        phone = (payload.get("phone") or "").strip()
+        if not phone:
+            self._send(400, {"ok": False, "error": "phone is required"})
+            return
+        bufkey = "debounce:buf:" + phone
+        seqkey = "debounce:seq:" + phone
+        if action == "buffer":
+            token = (str(int(time.time() * 1000)) + "_"
+                     + "".join(random.choice("0123456789abcdef")
+                               for _ in range(6)))
+            msg = json.dumps({"id": str(payload.get("message_id") or ""),
+                              "text": str(payload.get("text") or "")})
+            _redis(["RPUSH", bufkey, msg])
+            _redis(["EXPIRE", bufkey, str(DEBOUNCE_TTL)])
+            _, err = _redis(["SET", seqkey, token, "EX", str(DEBOUNCE_TTL)])
+            if err:
+                log("debounce buffer failed:", err)
+            log(f"debounce BUFFER {phone} token={token}")
+            self._send(200, {"ok": True, "phone": phone, "token": token})
+            return
+        if action == "flush":
+            token = (payload.get("token") or "").strip()
+            cur, err = _redis(["GET", seqkey])
+            if err:
+                log("debounce flush GET failed (fail-open):", err)
+                self._send(200, {"ok": True, "latest": True, "degraded": True,
+                                 "combined": "", "ids": [], "count": 0})
+                return
+            if (cur or "").strip() != token:
+                # a newer message holds the token (or the window lapsed) —
+                # this execution must not produce a draft
+                self._send(200, {"ok": True, "latest": False})
+                return
+            rng, _ = _redis(["LRANGE", bufkey, "0", "-1"])
+            _redis(["DEL", bufkey])
+            _redis(["DEL", seqkey])
+            msgs = []
+            for ln in (rng or "").splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    msgs.append(json.loads(ln))
+                except Exception:
+                    msgs.append({"id": "", "text": ln})
+            texts = [str(m.get("text", "")) for m in msgs
+                     if str(m.get("text", "")).strip()]
+            ids = [m.get("id", "") for m in msgs]
+            log(f"debounce FLUSH {phone} latest=true count={len(msgs)}")
+            self._send(200, {"ok": True, "latest": True,
+                             "combined": "\n".join(texts),
+                             "ids": ids, "count": len(msgs)})
+            return
+        self._send(400, {"ok": False, "error": "action must be buffer|flush"})
 
 
 def main():
