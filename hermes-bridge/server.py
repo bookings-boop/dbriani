@@ -448,6 +448,105 @@ def build_customer_header(facts):
     return "\n".join(lines)
 
 
+def get_customer_facts(customer_id):
+    """The customer_facts row as a dict, or None if absent / on error.
+    Degrades to None so the header logic never breaks over a DB read."""
+    cid = (customer_id or "").replace("'", "''")
+    sql = ("SELECT name, dates, yachts, party_size, message_count "
+           f"FROM customer_facts WHERE customer_id = '{cid}'")
+    try:
+        out, err = _psql(sql)
+        if err:
+            log("customer_facts fetch failed:", err)
+            return None
+        line = (out or "").strip()
+        if not line:
+            return None
+        p = line.split("|")
+        if len(p) < 5:
+            return None
+        return {"name": p[0], "dates": p[1], "yachts": p[2],
+                "party_size": p[3],
+                "message_count": int(p[4]) if p[4].strip().isdigit() else 0}
+    except Exception as e:
+        log("customer_facts fetch error:", repr(e))
+        return None
+
+
+def upsert_customer_facts(customer_id, name, facts):
+    """UPSERT a customer_facts row. INSERT -> message_count 1; ON CONFLICT ->
+    message_count = existing + 1 (atomic in SQL — no read-modify-write race).
+    Returns (new_message_count, None) or (None, error)."""
+    sql = (
+        "INSERT INTO customer_facts (customer_id, name, dates, yachts, "
+        "party_size, message_count, updated_at) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(name), _lit(facts.get("dates")),
+                     _lit(facts.get("yachts")), _lit(facts.get("party_size"))])
+        + ", 1, now()) ON CONFLICT (customer_id) DO UPDATE SET "
+        "name = EXCLUDED.name, dates = EXCLUDED.dates, "
+        "yachts = EXCLUDED.yachts, party_size = EXCLUDED.party_size, "
+        "message_count = customer_facts.message_count + 1, updated_at = now() "
+        "RETURNING message_count"
+    )
+    try:
+        out, err = _psql(sql)
+        if err:
+            return None, err
+        v = (out or "").strip().splitlines()
+        return (int(v[0]) if v and v[0].strip().isdigit() else None), None
+    except Exception as e:
+        return None, repr(e)
+
+
+def extract_customer_facts(incoming_message, history):
+    """Hermes call: extract {name,dates,yachts,party_size} from the message +
+    history. Returns a dict, or None on timeout/error/bad output — the caller
+    then falls back to cached facts."""
+    q = (
+        "TASK: From the WhatsApp conversation below, extract the customer's "
+        "current yacht-charter booking facts for an internal CRM header. "
+        "Return ONLY a JSON object with exactly these keys, using an empty "
+        'string "" for anything not yet known (never guess):\n'
+        '{"name":"","dates":"","yachts":"","party_size":""}\n'
+        "- name: the customer's first/full name if they have given it\n"
+        '- dates: charter date(s) of interest, short (e.g. "Sat Dec 14")\n'
+        "- yachts: every yacht name discussed, comma-separated\n"
+        '- party_size: group size (e.g. "6-8 guests")\n'
+        "Consider the WHOLE conversation, not just the latest line. Output "
+        "only the JSON object — no markdown fences, no commentary.\n\n"
+        "--- CONVERSATION ---\n" + (history or "(no prior history)") +
+        "\n\n--- LATEST MESSAGE ---\n" + (incoming_message or ""))
+    try:
+        rc, out, err, elapsed = run_hermes(q, timeout=FACTS_EXTRACT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log(f"extract_customer_facts: hermes timeout {FACTS_EXTRACT_TIMEOUT}s")
+        return None
+    except Exception as e:
+        log("extract_customer_facts: hermes error", repr(e))
+        return None
+    if rc != 0:
+        log(f"extract_customer_facts: hermes rc={rc} err={(err or '')[:200]!r}")
+        return None
+    parsed, _ = extract_json(out)
+    if not isinstance(parsed, dict):
+        log("extract_customer_facts: no JSON in hermes output")
+        return None
+    return {k: str(parsed.get(k) or "").strip()
+            for k in ("name", "dates", "yachts", "party_size")}
+
+
+def _merge_facts(cached, extracted):
+    """Merge rule: a non-empty extracted field overwrites; an empty extracted
+    field keeps the cached value — a failed/partial extraction never erases a
+    known fact."""
+    cached = cached or {}
+    out = {}
+    for k in ("name", "dates", "yachts", "party_size"):
+        ev = str((extracted or {}).get(k, "") or "").strip()
+        out[k] = ev or str(cached.get(k) or "")
+    return out
+
+
 # --- drafting --------------------------------------------------------------
 
 def load_system_prompt():
@@ -619,7 +718,9 @@ def build_learn_query(p):
     ])
 
 
-def run_hermes(query):
+def run_hermes(query, timeout=None):
+    if timeout is None:
+        timeout = HERMES_TIMEOUT
     cmd = [HERMES, "--profile", "default", "chat", "-q", query, "-Q",
            "--source", "tool", "--yolo", "-t", "memory"]
     log("hermes call:", " ".join(c for c in cmd if c != query))
@@ -627,7 +728,7 @@ def run_hermes(query):
     env["PATH"] = os.path.dirname(HERMES) + os.pathsep + env.get("PATH", "")
     t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=HERMES_TIMEOUT, env=env)
+                          timeout=timeout, env=env)
     return proc.returncode, proc.stdout, proc.stderr, int((time.time() - t0) * 1000)
 
 
