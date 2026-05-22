@@ -1,7 +1,7 @@
 # H7–H9 Behavioural Test — Autonomous Mode + Caps — RESULTS
 
 **Date:** 2026-05-22
-**Status:** ⛔ **HALTED at H8** — autonomous auto-send does not reliably fire.
+**Status:** H8 FAILED → root cause fixed (BUG-1) → **H8 re-tested 2026-05-22: ✅ PASSED**. H8b / break-tests / `/caps` / H9 / `/manual` still not run.
 **Test-run tag:** `test_run=2026-05-22_h7_h9`
 **Test phone:** +971509767187 — WhatsApp conversation id `274942918680787@lid`
 
@@ -13,8 +13,8 @@ results. The procedure is in git history at the commit before this one.)*
 | | |
 |---|---|
 | **Works** | Autonomous-mode activation · break-condition detection (`break_condition` emitted + carried onto the draft) · the autonomous branch engages and runs the countdown. |
-| **Broken** | **Autonomous auto-send does not fire** — the branch aborts at `Auto Decide` after the wait. |
-| **Safe for production** | **Approval mode — yes** (unchanged, operator-confirmed earlier). **Autonomous mode — NO.** Do not enable it for real customers until the `Auto Decide` bug is fixed. |
+| **BUG-1 — FIXED** | The `Auto Decide` `staticData` failure is fixed (Redis-backed) and **H8 re-passed** — see the H8 re-test below. |
+| **Safe for production** | **Approval mode — yes.** **Autonomous auto-send now works** — but autonomous mode is **not fully signed off**: H8b/caps, break-condition tests, `/caps`, H9 and `/manual` still need a run. |
 
 ## Prerequisites — all verified (2026-05-22)
 
@@ -42,6 +42,12 @@ the id WAHA actually delivers, not the phone number.
   `kind=auto` rows. No message delivered to the test phone.
 - Execution 645, status `success` — the branch ended cleanly; it simply did
   not send.
+
+**↻ Re-test after the BUG-1 fix (2026-05-22) — ✅ PASS.** With the Redis-backed
+autonomous branch deployed, H8 was re-run: execution **646** ran
+`Arm Autosend → Get Autosend → Auto Decide (proceeded) → Auto Send WAHA` — the
+auto-send fired, WAHA confirmed delivery to the test phone, `autonomous_sends`
+logged `kind=auto`. Root cause resolved — see `docs/bug-1-autonomous-send-fix.md`.
 
 ### H8b · break-condition tests · `/caps` · H9 · `/manual` — ⏸️ NOT RUN
 Suite halted — every remaining test depends on auto-send firing, which H8

@@ -1,7 +1,8 @@
 # BUG-1 Fix — Autonomous Auto-Send (Redis-backed state)
 
 **Date:** 2026-05-22
-**Status:** Design finalised — **build-ready, not yet built.**
+**Status:** ✅ **BUILT · DEPLOYED · VERIFIED** — live test passed 2026-05-22
+(execution 646: autonomous auto-send fired end-to-end). See *Outcome* below.
 **Refs:** bug → `docs/feature-backlog.md` BUG-1 · evidence → `docs/h7-h9-test-plan.md`
 
 ## Confirmed diagnosis
@@ -110,3 +111,29 @@ TTL self-cleans anyway — cosmetic).
 - No bridge change. No change to the approval-mode flow.
 - Verifying the fix needs a live autonomous test (test phone + a countdown) —
   it cannot be confirmed without the operator.
+
+## Outcome (2026-05-22)
+
+Built, deployed, verified. One build-time change from the design above: Redis
+access is **bridge-mediated** — a new bridge `/autosend-state` endpoint doing
+`docker exec n8n-redis-1 redis-cli` (the proven `_psql` pattern) — rather than
+n8n's native Redis node. Chosen for a reliable build: known httpRequest +
+bridge patterns, no unknown node schema, no new credential. Same Redis-backed
+design.
+
+Commits: `5cb34e2` + `7742fbf` (bridge `/autosend-state`) · `5bc5c0a`
+(workflow — Arm/Disarm/Get Autosend, `Auto Decide` rewrite) · `18e3690`
+(workflow JSON sync, 94 nodes).
+
+**Live test — PASSED.** Execution 646: `Arm Autosend → Render Auto Card →
+Auto Wait → Get Autosend → Auto Decide (proceeded — out=1) → Auto Commit →
+Auto Send Gate → Auto Send WAHA → Mark Auto Sent`. WAHA confirmed delivery to
+the test phone; `autonomous_sends` logged `kind=auto`. The H8 failure is
+resolved — autonomous auto-send went from never-working to working.
+
+**Minor residual (not BUG-1, tracked separately):** `Mark Auto Sent` still
+writes the draft's queue `status` via n8n `staticData`; that write did not
+reliably flip the test draft to `sent` (it stayed `pending` in the queue).
+Cosmetic — the message was sent once and `Edit Auto-Sent Card` correctly
+relabelled the Telegram card. Same `staticData` root cause, in the post-send
+bookkeeping layer.

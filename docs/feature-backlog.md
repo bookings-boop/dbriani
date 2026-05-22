@@ -434,4 +434,12 @@ effectively non-functional and should stay off.
 
 **Build-ready fix design (2026-05-22):** `docs/bug-1-autonomous-send-fix.md` —
 confirmed diagnosis, Redis-backed design, node-level changes, build order,
-test plan. Ready to execute; build + live re-test not yet done.
+test plan.
+
+**✅ RESOLVED (2026-05-22).** Built (bridge `/autosend-state` + workflow
+Arm/Disarm/Get Autosend, `Auto Decide` rewritten to decide from Redis),
+deployed, and **verified by a live test** — execution 646: autonomous
+auto-send fired end-to-end, WAHA-confirmed delivery, `autonomous_sends`
+`kind=auto` logged. Minor residual: `Mark Auto Sent`'s queue-`status` write
+still uses `staticData` and may not flip the draft reliably — cosmetic
+post-send bookkeeping, tracked separately.

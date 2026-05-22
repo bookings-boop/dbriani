@@ -27,15 +27,18 @@ Chronological detail: `docs/decisions.md`. Build history is on `main`.
   and it is carried onto the queued draft (verified in H8). The break-gate
   (`Find Break → Break Check → Flip To Approval`) is deployed.
 
-## Broken / not safe
+## Status of autonomous mode
 
-- 🔴 **BUG-1 — autonomous auto-send does not fire.** After the countdown,
-  `Auto Decide` rechecks the draft via n8n `staticData` and silently aborts.
-  **Autonomous mode is non-functional — keep it OFF for real customers.**
-  Fails safe (drafts just wait as approval cards). See
-  `docs/h7-h9-test-plan.md` + `docs/feature-backlog.md` BUG-1.
-- 🔴 **FR-3 debounce — broken by design.** Same root cause as BUG-1: n8n
-  `staticData` is not reliable across concurrent executions / Wait resumes.
+- ✅ **BUG-1 — autonomous auto-send — FIXED & verified (2026-05-22).** The
+  autonomous branch decides via Redis (bridge `/autosend-state`), not n8n
+  `staticData`. Live test passed — execution 646, auto-send fired end-to-end,
+  WAHA-confirmed. See `docs/bug-1-autonomous-send-fix.md`.
+- ⚠️ Autonomous mode is **not yet fully signed off**: H8b (caps), the
+  break-condition tests, `/caps`, H9 and `/manual` still need a run.
+- 🟡 Residual: `Mark Auto Sent`'s queue-`status` write still uses `staticData`
+  (cosmetic post-send bookkeeping — the message still sends).
+- 🔴 **FR-3 debounce — still broken by design.** Same `staticData` root cause;
+  the `/autosend-state` Redis pattern is now the template to fix it.
 - 🟡 **FR-5** background improver + learning loop — deployed, never
   behaviourally tested.
 
@@ -46,11 +49,9 @@ All session work is **merged to `main`** (`131ca2a`, 53 commits).
 
 ## Pending work (priority order)
 
-1. **BUG-1 — autonomous auto-send.** Diagnosis confirmed; the Redis-backed
-   fix is **designed and build-ready** — `docs/bug-1-autonomous-send-fix.md`.
-   Next: build the n8n nodes (~5-6 changes, one new Redis credential) +
-   deploy via `safe_put` + a live re-test. The same Redis foundation also
-   fixes FR-3.
+1. **Finish H7-H9.** H8 now passes (BUG-1 fixed). Still to run: H8b
+   (5-consecutive cap), the break-condition tests, `/caps`, H9, `/manual` —
+   before autonomous mode is fully signed off for real customers.
 2. **Rotate exposed secrets** — `N8N_API_KEY` + the Telegram bot token.
    Runbook: `docs/secret-rotation.md` (operator-driven).
 3. FR-5 — a real behavioural test of the improver + learning loop.
