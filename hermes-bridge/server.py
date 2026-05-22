@@ -41,6 +41,8 @@ HERMES_TIMEOUT = int(os.environ.get("BRIDGE_HERMES_TIMEOUT", "120"))
 PG_CONTAINER = os.environ.get("BRIDGE_PG_CONTAINER", "n8n-postgres-1")
 PG_USER = os.environ.get("BRIDGE_PG_USER", "hermes_rw")
 PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
+REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
+AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
 
 
 def _envflag(key, default):
@@ -73,6 +75,16 @@ def _psql(sql, timeout=12):
     r = subprocess.run(
         ["docker", "exec", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB,
          "-tA", "-c", sql],
+        capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        return None, r.stderr.strip()[:200]
+    return r.stdout, None
+
+
+def _redis(args, timeout=8):
+    """Run one redis-cli command via docker exec; return (stdout, err_or_None)."""
+    r = subprocess.run(
+        ["docker", "exec", REDIS_CONTAINER, "redis-cli"] + list(args),
         capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         return None, r.stderr.strip()[:200]
@@ -598,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
-                             "/caps"):
+                             "/caps", "/autosend-state"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -624,6 +636,8 @@ class Handler(BaseHTTPRequestHandler):
             self._set_mode(payload)
         elif self.path == "/caps":
             self._send(200, {"ok": True, "text": caps_status_text()})
+        elif self.path == "/autosend-state":
+            self._autosend_state(payload)
         else:
             self._draft(payload)
 
@@ -900,6 +914,53 @@ class Handler(BaseHTTPRequestHandler):
             f"auto_send={ok} reason={reason!r}")
         self._send(200, {"ok": True, "mode": mode, "auto_send": ok,
                          "reason": reason})
+
+    def _autosend_state(self, payload):
+        """BUG-1 fix: Redis-backed autonomous-send state. action = arm |
+        disarm | get, keyed autosend:<draft_id>. The FR-4 autonomous branch
+        uses this instead of n8n staticData, which is unreliable across the
+        Auto Wait countdown."""
+        action = (payload.get("action") or "").strip().lower()
+        did = (payload.get("draft_id") or "").strip()
+        if not did:
+            self._send(400, {"ok": False, "error": "draft_id is required"})
+            return
+        key = "autosend:" + did
+        if action == "arm":
+            value = json.dumps({
+                "draft_id": did,
+                "customer_phone": payload.get("customer_phone") or "",
+                "draft_text": payload.get("draft_text") or "",
+            })
+            _, err = _redis(["SET", key, value, "EX", str(AUTOSEND_TTL)])
+            if err:
+                log("autosend-state arm failed:", err)
+                self._send(502, {"ok": False, "error": err})
+                return
+            log(f"autosend-state ARM {did}")
+            self._send(200, {"ok": True, "action": "arm", "draft_id": did})
+        elif action == "disarm":
+            _redis(["DEL", key])  # DEL of a missing key is a harmless no-op
+            log(f"autosend-state DISARM {did}")
+            self._send(200, {"ok": True, "action": "disarm", "draft_id": did})
+        elif action == "get":
+            out, err = _redis(["GET", key])
+            if err:
+                log("autosend-state get failed:", err)
+                self._send(502, {"ok": False, "error": err})
+                return
+            raw = (out or "").strip()
+            data = None
+            if raw:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = None
+            self._send(200, {"ok": True, "action": "get", "draft_id": did,
+                             "armed": bool(data), "data": data})
+        else:
+            self._send(400, {"ok": False,
+                             "error": "action must be arm|disarm|get"})
 
 
 def main():
