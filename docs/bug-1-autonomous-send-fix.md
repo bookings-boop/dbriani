@@ -131,9 +131,11 @@ Auto Send Gate → Auto Send WAHA → Mark Auto Sent`. WAHA confirmed delivery t
 the test phone; `autonomous_sends` logged `kind=auto`. The H8 failure is
 resolved — autonomous auto-send went from never-working to working.
 
-**Minor residual (not BUG-1, tracked separately):** `Mark Auto Sent` still
-writes the draft's queue `status` via n8n `staticData`; that write did not
-reliably flip the test draft to `sent` (it stayed `pending` in the queue).
-Cosmetic — the message was sent once and `Edit Auto-Sent Card` correctly
-relabelled the Telegram card. Same `staticData` root cause, in the post-send
-bookkeeping layer.
+**Minor residual — ✅ RESOLVED (2026-05-22).** `Mark Auto Sent` previously
+wrote the draft's queue `status` via n8n `staticData` — an unreliable write
+(same concurrent-execution race as BUG-1) whose only real consumer was the
+FR-5 improver gate (`Check Pending`). Fixed: the `staticData` block is removed
+from `Mark Auto Sent`, and the FR-5 improver now skips autonomous drafts
+outright via the Redis autosend key (new `Check Autosend Key` node feeding a
+gate in `Check Pending`). `scripts/build_mark_auto_sent_residual.py`. See
+`docs/feature-backlog.md` BUG-2.

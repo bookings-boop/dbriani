@@ -440,9 +440,10 @@ test plan.
 Arm/Disarm/Get Autosend, `Auto Decide` rewritten to decide from Redis),
 deployed, and **verified by a live test** — execution 646: autonomous
 auto-send fired end-to-end, WAHA-confirmed delivery, `autonomous_sends`
-`kind=auto` logged. Minor residual: `Mark Auto Sent`'s queue-`status` write
-still uses `staticData` and may not flip the draft reliably — cosmetic
-post-send bookkeeping, tracked separately.
+`kind=auto` logged. Minor residual — `Mark Auto Sent`'s `staticData`
+queue-`status` write — also **fixed (2026-05-22)**: the unreliable write is
+removed and the FR-5 improver now skips autonomous drafts via the Redis
+autosend key. See BUG-2.
 
 ---
 
@@ -470,3 +471,29 @@ Wiring: `Route Text Action [out 6] ─▶ Hermes Caps ─▶ Send Caps Reply`.
 **Live test — PASSED.** Execution 656: operator sent `/caps`, the chain ran
 end-to-end (`success`), the bridge returned the cap status, and the operator
 received the `🧮 Autonomous-mode safety caps` message in Telegram.
+
+### `Mark Auto Sent` `staticData` residual — ✅ RESOLVED (2026-05-22)
+
+`Mark Auto Sent` wrote `d.status='sent'` (+ `d.auto_sent`,
+`d.messages_sent_count`) into `pendingQueue` via `$getWorkflowStaticData` —
+an unreliable write (BUG-1's concurrent-execution race). A literal "port the
+write to Redis" would *orphan* it: `pendingQueue` lives entirely in
+`staticData`, and the only real consumer of an auto-sent draft's `status` is
+`Check Pending` (the FR-5 improver gate), which reads `staticData`.
+(`auto_sent` / `messages_sent_count` had zero readers.)
+
+**Fix** (`scripts/build_mark_auto_sent_residual.py`) — make the FR-5 improver
+skip autonomous drafts outright, via the Redis autosend key that
+`Arm Autosend` already sets:
+- `Check Autosend Key` (new) — `POST /autosend-state {action:get}`, inserted
+  `Improve Wait ─▶ Check Autosend Key ─▶ Check Pending`.
+- `Check Pending` — `if (armed === true) return []` (fail-open: a bridge
+  error → proceed). Runs ~20s after the draft posts — well inside the
+  autosend key's 3600s TTL, and long after `Arm Autosend`. No race, no TTL risk.
+- `Mark Auto Sent` — the `staticData` block is removed entirely; the node is
+  now a pure pass-through to `Edit Auto-Sent Card`.
+
+Deployed 2026-05-22 (97 nodes), structurally verified. A full behavioural
+test (an autonomous draft running past the improver) is the one remaining
+optional check — the FR-5 improver path itself has never been behaviourally
+tested.

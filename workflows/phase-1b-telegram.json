@@ -1666,7 +1666,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-5: improve a draft only while it is still pending (unsent)\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d || d.status !== 'pending') {\n  return [];   // sent / skipped / awaiting_edit / gone — nothing to improve\n}\nreturn [{ json: {\n  draft_id: draftId,\n  telegram_message_id: d.telegram_message_id,\n  customer_name: d.customer_name || '',\n  customer_id: d.customer_phone || '',\n  incoming_message: d.customer_message || '',\n  history: d.conversation_history || '',\n  current_draft: d.draft_text || (Array.isArray(d.messages) ? d.messages.join('\\n\\n') : '')\n} }];\n"
+        "jsCode": "// FR-5: improve a draft only while it is still pending (unsent)\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\n// BUG-2 residual fix: skip autonomous drafts — they auto-send the copy\n// armed at countdown start, so improving them is moot and would edit a\n// card whose text never went out. Detect via the Redis autosend key.\n// Fail-open: a bridge error leaves __as.armed undefined -> proceed.\nconst __as = $('Check Autosend Key').item.json || {};\nif (__as.armed === true) { return []; }\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d || d.status !== 'pending') {\n  return [];   // sent / skipped / awaiting_edit / gone — nothing to improve\n}\nreturn [{ json: {\n  draft_id: draftId,\n  telegram_message_id: d.telegram_message_id,\n  customer_name: d.customer_name || '',\n  customer_id: d.customer_phone || '',\n  incoming_message: d.customer_message || '',\n  history: d.conversation_history || '',\n  current_draft: d.draft_text || (Array.isArray(d.messages) ? d.messages.join('\\n\\n') : '')\n} }];\n"
       },
       "id": "8b3475eb-0d86-4745-9d29-553e1ad8c01a",
       "name": "Check Pending",
@@ -2327,7 +2327,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-4 4-C: mark the draft auto-sent\nconst dec = $('Auto Decide').item.json;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === dec.draft_id);\nif (d) {\n  d.status = 'sent';\n  d.messages_sent_count = Array.isArray(d.messages) ? d.messages.length : 1;\n  d.auto_sent = true;\n}\nreturn [{ json: {\n  draft_id: dec.draft_id,\n  customer_phone: dec.customer_phone,\n  customer_name: dec.customer_name,\n  telegram_message_id: dec.telegram_message_id,\n  draft_text: dec.draft_text\n} }];\n"
+        "jsCode": "// FR-4 4-C: pass the auto-sent draft's identifiers to Edit Auto-Sent Card.\n// BUG-2 residual fix: the old $getWorkflowStaticData('global') write of\n// d.status='sent' was unreliable (concurrent-execution snapshot race) and is\n// no longer needed — the FR-5 improver now skips autonomous drafts via the\n// Redis autosend key (see Check Autosend Key). d.auto_sent and\n// d.messages_sent_count had zero readers, so they are dropped too.\nconst dec = $('Auto Decide').item.json;\nreturn [{ json: {\n  draft_id: dec.draft_id,\n  customer_phone: dec.customer_phone,\n  customer_name: dec.customer_name,\n  telegram_message_id: dec.telegram_message_id,\n  draft_text: dec.draft_text\n} }];\n"
       },
       "id": "3fbca7e6-df7a-4b4d-82d9-d594bb464c87",
       "name": "Mark Auto Sent",
@@ -2727,6 +2727,42 @@
       "position": [
         5620,
         2000
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/autosend-state",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"get\", \"draft_id\": {{ JSON.stringify($('Save Telegram MsgID').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "4748f689-2bf1-4e9e-85c1-bc70867755c1",
+      "name": "Check Autosend Key",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6268,
+        1180
       ],
       "onError": "continueRegularOutput"
     }
@@ -3366,7 +3402,7 @@
       "main": [
         [
           {
-            "node": "Check Pending",
+            "node": "Check Autosend Key",
             "type": "main",
             "index": 0
           }
@@ -3794,6 +3830,17 @@
         [
           {
             "node": "Send Caps Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Autosend Key": {
+      "main": [
+        [
+          {
+            "node": "Check Pending",
             "type": "main",
             "index": 0
           }

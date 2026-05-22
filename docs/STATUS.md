@@ -38,11 +38,12 @@ Chronological detail: `docs/decisions.md`. Build history is on `main`.
   take-back · `/manual` kill switch — **all PASS**. The core safety
   machinery (caps · break-conditions · kill switch) is verified working.
   Full results: `docs/h7-h9-test-plan.md`.
-- ❌ **BUG-2 — `/caps` operator command not wired** (found in the suite).
-  Bridge `/caps` endpoint works; the workflow doesn't route to it. Minor —
-  operator convenience. See `docs/feature-backlog.md` BUG-2.
-- 🟡 Residual: `Mark Auto Sent`'s queue-`status` write still uses `staticData`
-  (cosmetic post-send bookkeeping — the message still sends).
+- ✅ **BUG-2 — `/caps` operator command — FIXED (2026-05-22).** `/caps` now
+  routes to the bridge `/caps` endpoint and replies with the cap status.
+  Live test passed (execution 656). See `docs/feature-backlog.md` BUG-2.
+- ✅ **`Mark Auto Sent` `staticData` residual — FIXED (2026-05-22).** The
+  unreliable queue-`status` write is removed; the FR-5 improver now skips
+  autonomous drafts via the Redis autosend key (`Check Autosend Key`).
 - 🔴 **FR-3 debounce — still broken by design.** Same `staticData` root cause;
   the `/autosend-state` Redis pattern is now the template to fix it.
 - 🟡 **FR-5** background improver + learning loop — deployed, never
@@ -58,8 +59,6 @@ All session work is **merged to `main`** (`131ca2a`, 53 commits).
 1. **Autonomous-mode rollout** — H7–H9 all pass; the safety net (caps,
    break-conditions, kill switch) is verified. Ready for a *supervised*
    trial on a few real conversations before a wider rollout.
-2. **BUG-2** — wire the `/caps` command · the `Mark Auto Sent` `staticData`
-   residual — small follow-ups (`docs/feature-backlog.md`).
 2. **Rotate exposed secrets** — `N8N_API_KEY` + the Telegram bot token.
    Runbook: `docs/secret-rotation.md` (operator-driven).
 3. FR-5 — a real behavioural test of the improver + learning loop.
