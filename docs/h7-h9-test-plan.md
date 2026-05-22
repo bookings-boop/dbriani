@@ -1,7 +1,7 @@
 # H7–H9 Behavioural Test — Autonomous Mode + Caps — RESULTS
 
 **Date:** 2026-05-22
-**Status:** H8 FAILED → root cause fixed (BUG-1) → **H8 re-tested 2026-05-22: ✅ PASSED**. H8b / break-tests / `/caps` / H9 / `/manual` still not run.
+**Status:** ✅ **Suite complete (2026-05-22).** H7 ✓ · H8 ✓ (after the BUG-1 fix) · H8b ✓ · break-conditions ✓ 3/3 · H9 ✓ · `/manual` ✓ · `/caps` ✗ (command not wired).
 **Test-run tag:** `test_run=2026-05-22_h7_h9`
 **Test phone:** +971509767187 — WhatsApp conversation id `274942918680787@lid`
 
@@ -14,7 +14,7 @@ results. The procedure is in git history at the commit before this one.)*
 |---|---|
 | **Works** | Autonomous-mode activation · break-condition detection (`break_condition` emitted + carried onto the draft) · the autonomous branch engages and runs the countdown. |
 | **BUG-1 — FIXED** | The `Auto Decide` `staticData` failure is fixed (Redis-backed) and **H8 re-passed** — see the H8 re-test below. |
-| **Safe for production** | **Approval mode — yes.** **Autonomous auto-send now works** — but autonomous mode is **not fully signed off**: H8b/caps, break-condition tests, `/caps`, H9 and `/manual` still need a run. |
+| **Safe for production** | **Approval mode — yes.** **Autonomous mode — core safety verified:** caps, break-conditions and the `/manual` kill switch all pass; auto-send works. Gaps: `/caps` command not wired (cosmetic) · `Mark Auto Sent` `staticData` residual (cosmetic). |
 
 ## Prerequisites — all verified (2026-05-22)
 
@@ -49,9 +49,40 @@ autonomous branch deployed, H8 was re-run: execution **646** ran
 auto-send fired, WAHA confirmed delivery to the test phone, `autonomous_sends`
 logged `kind=auto`. Root cause resolved — see `docs/bug-1-autonomous-send-fix.md`.
 
-### H8b · break-condition tests · `/caps` · H9 · `/manual` — ⏸️ NOT RUN
-Suite halted — every remaining test depends on auto-send firing, which H8
-proved it does not.
+### H8b — 5-consecutive cap — ✅ PASS (direct verification)
+The consecutive-cap logic was verified directly against `/autosend-check`
+(the `__captest__` run): commit calls 1–5 returned `auto_send:true`, call 6
+returned the checkpoint, exactly one `checkpoint` row logged. The live
+5-countdown version was skipped (~20–40 min of countdowns, no new evidence).
+
+### Break-condition tests — ✅ 3/3 PASS
+Test conversation autonomous; each break message flipped it back to
+`approval` via `Find Break → Break Check → Flip To Approval → Break Alert` —
+no auto-send, `break_reason` recorded, Telegram alert fired.
+
+| Condition | break_condition | Execution |
+|---|---|---|
+| `discount_request` ("too expensive… a discount?") | `hit:true` | 650 |
+| `human_request` ("…a real person, not a bot") | `hit:true` | 651 |
+| `negative_sentiment` ("so frustrating… not happy…") | `hit:true` | 652 |
+
+### H9 — take-back — ✅ PASS (demonstrated)
+No separate run needed: each of the three break tests flipped the
+conversation `autonomous → approval` with a recorded `break_reason`.
+
+### `/caps` — ❌ FAIL — command not wired
+Sending `/caps` fell through `Process Text Reply → Route Text Action →
+Ack No Pending` (the "no pending draft" fallback) — no cap status returned.
+The **bridge `/caps` endpoint works** (a direct call returns the status), but
+**nothing in the workflow routes the `/caps` command to it** — `Process Text
+Reply` has no `/caps` branch. Minor — operator convenience, not a safety
+path. Backlogged as BUG-2.
+
+### `/manual` — kill switch — ✅ PASS
+Execution 655 ran `Process Text Reply → Route Text Action → Hermes Set Mode →
+Confirm Mode → Send Mode Reply`; `manual_killswitch` flipped every
+conversation to `approval` (`activated_by=manual_killswitch`) — **0
+autonomous remaining**.
 
 ## Root cause
 

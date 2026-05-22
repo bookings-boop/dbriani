@@ -443,3 +443,22 @@ auto-send fired end-to-end, WAHA-confirmed delivery, `autonomous_sends`
 `kind=auto` logged. Minor residual: `Mark Auto Sent`'s queue-`status` write
 still uses `staticData` and may not flip the draft reliably — cosmetic
 post-send bookkeeping, tracked separately.
+
+---
+
+## BUG-2 — `/caps` operator command not wired
+
+**Found 2026-05-22 during the H7–H9 suite.** Sending `/caps` to the operator
+bot falls through `Process Text Reply → Route Text Action → Ack No Pending`
+(the "no pending draft" fallback) — no cap status is returned.
+
+The bridge `/caps` endpoint works (a direct POST returns `caps_status_text()`),
+but **nothing in the workflow routes the `/caps` command to it** —
+`Process Text Reply` has no `/caps` branch.
+
+**Severity:** minor — operator convenience, not a safety path. Cap data is
+still reachable (the bridge endpoint directly, and the daily-summary cron).
+
+**Fix direction:** add a `/caps` branch to `Process Text Reply` that routes to
+an httpRequest node calling the bridge `POST /caps` and replies with the
+returned `text`. Small workflow change.
