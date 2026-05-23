@@ -404,10 +404,11 @@ def waha_lookup_push_name(customer_id):
         sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
         if sid == cid:
             pn = (c.get("name") or "").strip()
-            # Same filter as waha_fetch_history — skip raw phone-string
-            # display names and system labels.
-            if pn and not pn.startswith("+") and pn not in (
-                    "WhatsApp Business", "Dubriani admin chat"):
+            # Keep phone-string display names (like '+44 7869 651761') — they
+            # match exactly what the operator sees on their WhatsApp client,
+            # so '+44 7869 651761' on a /review card is recognisable. Only
+            # filter the system labels that aren't actual contacts.
+            if pn and pn not in ("WhatsApp Business", "Dubriani admin chat"):
                 push_name = pn
             break
     _WAHA_PUSHNAME_CACHE[cid] = (push_name, now_ts + _WAHA_PUSHNAME_TTL)
@@ -433,9 +434,11 @@ def waha_fetch_history(customer_id, limit=30):
             sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
             if sid == customer_id:
                 pn = (c.get("name") or "").strip()
-                # Skip pushNames that aren't useful display names
-                if pn and not pn.startswith("+") and pn not in ("WhatsApp Business",
-                                                                "Dubriani admin chat"):
+                # Keep phone-string pushNames — they match what the operator
+                # sees on WhatsApp, so they ARE a useful display fallback when
+                # no real name is available. Only filter the system labels.
+                if pn and pn not in ("WhatsApp Business",
+                                     "Dubriani admin chat"):
                     push_name = pn
                 break
     # Build history string (oldest first, max last 20 with body)
