@@ -993,6 +993,10 @@ CONFIDENCE_DEMOTE_THRESHOLD = 0.4
 # Sameday-interrupt cooldown — one ping per customer per 4 h.
 SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
 
+# Hourly sweep — process at most N customers per run; overflow next hour.
+HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200"))
+HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
+
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 
@@ -1221,7 +1225,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
                              "/debounce", "/payment-link", "/feedback",
-                             "/label-eval", "/conversation-state"):
+                             "/label-eval", "/conversation-state",
+                             "/hourly-sweep"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1261,6 +1266,8 @@ class Handler(BaseHTTPRequestHandler):
             self._label_eval(payload)
         elif self.path == "/conversation-state":
             self._conversation_state(payload)
+        elif self.path == "/hourly-sweep":
+            self._hourly_sweep(payload)
         else:
             self._draft(payload)
 
@@ -2057,6 +2064,139 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
                              "label": None, "interrupt_required": False,
                              "alert_text": None})
+
+    def _hourly_sweep(self, payload):
+        """POST /hourly-sweep — deep re-analysis with skip-if-unchanged.
+
+        Runs every hour from the cron workflow. Algorithm:
+        1. Select customers with new activity since last_analyzed_at
+           (skip-if-unchanged gate). Cap at HOURLY_SWEEP_BATCH_LIMIT.
+        2. For each: run cold-decay (>7d silent → COLD) then re-evaluate
+           via compute_label() against cached facts. Apply confidence
+           dampening from label_corrections.
+        3. UPDATE conversation_state.last_analyzed_at / signal /
+           confidence on every row processed.
+        Always returns 200; per-customer errors logged + skipped (one
+        bad row never kills the sweep)."""
+        import time as _time
+        t0 = _time.time()
+        try:
+            sql = (
+                "SELECT cs.customer_id, "
+                "COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz), "
+                "COALESCE(cs.last_operator_reply_at, 'epoch'::timestamptz), "
+                "COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz), "
+                "EXTRACT(EPOCH FROM (now() - COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz))) "
+                "FROM conversation_state cs "
+                "WHERE COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz) "
+                "    > COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz) "
+                "   OR COALESCE(cs.last_operator_reply_at, 'epoch'::timestamptz) "
+                "    > COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz) "
+                "ORDER BY COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz) ASC "
+                f"LIMIT {HOURLY_SWEEP_BATCH_LIMIT}"
+            )
+            out, err = _psql(sql)
+            if err:
+                log("hourly_sweep select err:", err)
+                self._send(200, {"ok": False, "degraded": True,
+                                 "error": err[:200], "scanned": 0,
+                                 "transitions": 0, "hermes_calls": 0,
+                                 "skipped_unchanged": 0,
+                                 "elapsed_ms": int((_time.time() - t0) * 1000)})
+                return
+            rows = []
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) < 5:
+                    continue
+                cid = parts[0].strip()
+                if not cid:
+                    continue
+                try:
+                    silent_seconds = float(parts[4].strip())
+                except ValueError:
+                    silent_seconds = 0.0
+                rows.append((cid, silent_seconds))
+            scanned = len(rows)
+            transitions = 0
+            for cid, silent_seconds in rows:
+                try:
+                    row = get_current_label_row(cid)
+                    if row is None:
+                        # No customer_facts yet — keep last_analyzed_at fresh,
+                        # but nothing to evaluate.
+                        self._update_last_analysis(cid, "no_facts_row", 1.0)
+                        continue
+                    prev = row.get("label")
+                    # Honor manual lock window.
+                    cid_esc = cid.replace("'", "''")
+                    lock_out, _err = _psql(
+                        "SELECT label_locked_until > now() FROM customer_facts "
+                        f"WHERE customer_id = '{cid_esc}'"
+                    )
+                    is_locked = (lock_out or "").strip().startswith("t")
+                    if is_locked:
+                        self._update_last_analysis(cid, "locked", 1.0)
+                        continue
+                    applied = prev
+                    sig = "hourly_noop"
+                    ev = "no change"
+                    confidence = 1.0
+                    # Cold decay — highest priority for the sweep.
+                    if (silent_seconds > 7 * 86400
+                            and not (prev or "").startswith("PAUSED_")
+                            and prev != "COLD"):
+                        applied = "COLD"
+                        sig = "cold_decay"
+                        ev = (f"silent {int(silent_seconds // 86400)}d "
+                              f"(>{7}d threshold)")
+                    else:
+                        # Re-evaluate against cached facts with no specific
+                        # latest message (catches accumulated multi-yacht etc).
+                        target, sig, ev = compute_label("", row)
+                        confidence = compute_confidence(sig)
+                        applied = target
+                        if confidence < CONFIDENCE_DEMOTE_THRESHOLD:
+                            applied = _TIER_BELOW.get(target, target)
+                    if applied != prev:
+                        _o, err = apply_label_transition(
+                            cid, prev, applied,
+                            f"hourly_sweep:{sig}", ev,
+                            row.get("message_count", 0))
+                        if err:
+                            log(f"hourly_sweep transition err cid={cid!r}:", err)
+                        else:
+                            transitions += 1
+                    self._update_last_analysis(cid, sig, confidence)
+                except Exception as e_inner:
+                    log(f"hourly_sweep cust err cid={cid!r}:", repr(e_inner))
+                    continue
+            # Estimate skipped — every customer NOT in the changed set.
+            skipped_out, _err = _psql(
+                "SELECT count(*) FROM conversation_state WHERE "
+                "COALESCE(last_customer_message_at, 'epoch'::timestamptz) "
+                "  <= COALESCE(last_analyzed_at, 'epoch'::timestamptz) "
+                "AND COALESCE(last_operator_reply_at, 'epoch'::timestamptz) "
+                "  <= COALESCE(last_analyzed_at, 'epoch'::timestamptz)"
+            )
+            try:
+                skipped = int((skipped_out or "0").strip().splitlines()[0])
+            except (ValueError, IndexError):
+                skipped = 0
+            elapsed_ms = int((_time.time() - t0) * 1000)
+            log(f"hourly-sweep scanned={scanned} transitions={transitions} "
+                f"skipped={skipped} elapsed_ms={elapsed_ms}")
+            self._send(200, {
+                "ok": True, "scanned": scanned, "transitions": transitions,
+                "hermes_calls": 0,  # v1: no Hermes-driven disambiguation
+                "skipped_unchanged": skipped, "elapsed_ms": elapsed_ms,
+            })
+        except Exception as e:
+            log("hourly_sweep ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "scanned": 0, "transitions": 0,
+                             "hermes_calls": 0, "skipped_unchanged": 0,
+                             "elapsed_ms": int((_time.time() - t0) * 1000)})
 
     def _conversation_state(self, payload):
         """POST /conversation-state — silent timestamp updater."""

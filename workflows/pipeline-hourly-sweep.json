@@ -1,0 +1,163 @@
+{
+  "name": "Dubriani Pipeline Hourly Sweep",
+  "nodes": [
+    {
+      "id": "9adb994b-95f9-4044-8177-67d83f034066",
+      "name": "Schedule (Hourly)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "4a8442e4-6a32-4f1e-9294-4e7d17314ab1",
+      "name": "Hermes Hourly Sweep",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/hourly-sweep",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "a9b5c03d-d625-4e53-84d0-e74686d3c4fd",
+      "name": "Transitions > 10?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b82daea8-61dc-4eda-806f-0a7f00a756ac",
+              "leftValue": "={{ ($json.transitions || 0) }}",
+              "rightValue": 10,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "137b8a72-9d67-4199-bf07-346c489ad993",
+      "name": "Send Sweep Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        220
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": \"\ud83e\ude9e hourly sweep: \" + ($json.transitions || 0) + \" label transitions (scanned \" + ($json.scanned || 0) + \", elapsed \" + ($json.elapsed_ms || 0) + \"ms)\" }",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule (Hourly)": {
+      "main": [
+        [
+          {
+            "node": "Hermes Hourly Sweep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Hourly Sweep": {
+      "main": [
+        [
+          {
+            "node": "Transitions > 10?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transitions > 10?": {
+      "main": [
+        [
+          {
+            "node": "Send Sweep Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
