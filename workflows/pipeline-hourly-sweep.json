@@ -119,6 +119,214 @@
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": \"\ud83e\ude9e hourly sweep: \" + ($json.transitions || 0) + \" label transitions (scanned \" + ($json.scanned || 0) + \", elapsed \" + ($json.elapsed_ms || 0) + \"ms)\" }",
         "options": {}
       }
+    },
+    {
+      "id": "867b78fb-8b83-46ad-929a-0b0c62c7a021",
+      "name": "Split Followups",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        680,
+        600
+      ],
+      "parameters": {
+        "fieldToSplitOut": "eligible_followups",
+        "options": {}
+      }
+    },
+    {
+      "id": "0b2f2357-15f8-4683-8519-4a484c34ed4b",
+      "name": "Hermes Draft Followup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/draft-followup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_id) }}, \"customer_name\": {{ JSON.stringify($json.name) }}, \"silence_window\": {{ JSON.stringify($json.silence_window) }}, \"silence_hours\": {{ $json.silence_hours }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "b6a52f46-5490-4e05-8d7c-64791ef3286a",
+      "name": "Build Followup Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build a follow-up draft card from /draft-followup output + the split item.\n// Generates a draft_id like Queue & Format does, formats the Telegram text\n// with the \u23f0 FOLLOW-UP SUGGESTION header, builds the inline keyboard with\n// the existing send:/skip:/edit: callback prefixes (Parse Callback handles\n// them via Redis fallback per the Phase 2-3 pendingQueue migration).\n\nconst fu  = $('Hermes Draft Followup').item.json || {};\nconst src = $('Split Followups').item.json    || {};\n\nconst cid    = src.customer_id;\nconst name   = src.name || '';\nconst label  = src.label || 'WARM';\nconst win    = src.silence_window || '';\nconst shrs   = (src.silence_hours == null) ? null : Number(src.silence_hours);\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\n// Format silent-X for the header \u2014 minutes if <2h, hours otherwise.\nlet sLabel = '\u2014';\nif (typeof shrs === 'number' && isFinite(shrs)) {\n  sLabel = (shrs < 2) ? Math.round(shrs * 60) + 'm' :\n           (shrs < 36) ? Math.round(shrs) + 'h' :\n           Math.round(shrs / 24) + 'd';\n}\n\nconst header = '\u23f0 FOLLOW-UP SUGGESTION \u2014 '\n             + (name || cid)\n             + ' \u00b7 ' + label\n             + ' \u00b7 silent ' + sLabel;\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft text \u2014 skip recommended.');\nconst text   = header + body;\n\n// Same Redis draft shape as customer-message drafts so Parse Callback's\n// Redis fallback finds it. is_followup distinguishes for logging.\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: name,\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Proactive follow-up \u2014 window: ' + win + (shrs == null ? '' : (' \u00b7 ' + shrs + 'h')),\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: win,\n  followup_silence_hours: shrs,\n  followup_label: label,\n};\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\u274c Skip', callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    has_draft: !!draft,\n    // Surface key fields for downstream nodes\n    customer_id: cid,\n    label: label,\n    silence_window: win,\n    silence_hours: shrs,\n    draft_text: draft,\n  }\n};"
+      }
+    },
+    {
+      "id": "2d0034d8-5a90-4979-8990-ce4b70a3bfb9",
+      "name": "Persist Followup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"save\", \"draft\": {{ JSON.stringify($json.draft) }} }",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "9fad8383-946f-4849-8674-e2646e37e0aa",
+      "name": "Send Followup Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1640,
+        600
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($('Build Followup Card').item.json.telegram_payload.text) }}, \"reply_markup\": {{ JSON.stringify($('Build Followup Card').item.json.telegram_payload.reply_markup) }} }",
+        "options": {}
+      }
+    },
+    {
+      "id": "80bbe39f-0807-4b58-aa3a-3fcfcf849a27",
+      "name": "Save Followup MsgID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1880,
+        600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"update\", \"draft_id\": {{ JSON.stringify($('Build Followup Card').item.json.draft_id) }}, \"fields\": { \"telegram_message_id\": {{ ($json.result && $json.result.message_id) || null }} } }",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "a0a662e5-0fdb-4ab7-ac3f-80ee93014ebc",
+      "name": "Log Followup Drafted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2120,
+        600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/followup-action",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"drafted\", \"customer_id\": {{ JSON.stringify($('Build Followup Card').item.json.customer_id) }}, \"label\": {{ JSON.stringify($('Build Followup Card').item.json.label) }}, \"silence_window\": {{ JSON.stringify($('Build Followup Card').item.json.silence_window) }}, \"silence_hours\": {{ $('Build Followup Card').item.json.silence_hours }}, \"draft_text\": {{ JSON.stringify($('Build Followup Card').item.json.draft_text) }} }",
+        "options": {
+          "timeout": 10000
+        }
+      }
     }
   ],
   "connections": {
@@ -140,6 +348,11 @@
             "node": "Transitions > 10?",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Split Followups",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -155,9 +368,79 @@
         ],
         []
       ]
+    },
+    "Split Followups": {
+      "main": [
+        [
+          {
+            "node": "Hermes Draft Followup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Draft Followup": {
+      "main": [
+        [
+          {
+            "node": "Build Followup Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Followup Card": {
+      "main": [
+        [
+          {
+            "node": "Persist Followup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Followup": {
+      "main": [
+        [
+          {
+            "node": "Send Followup Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Followup Card": {
+      "main": [
+        [
+          {
+            "node": "Save Followup MsgID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Followup MsgID": {
+      "main": [
+        [
+          {
+            "node": "Log Followup Drafted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
+  "pinData": null,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
-  }
+  },
+  "meta": null,
+  "tags": []
 }

@@ -4343,6 +4343,150 @@
           "timeout": 12000
         }
       }
+    },
+    {
+      "id": "6eb32698-98b8-4ae7-aee1-73330bc747f2",
+      "name": "Followup Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5536,
+        1184
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7f7706eb-9eaa-450e-951a-07b9faa7e21c",
+              "leftValue": "={{ $('Parse Callback').item.json.draft.is_followup }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9fa46706-2e91-40da-aac2-0cf8e1c1169c",
+      "name": "Log Followup Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5776,
+        1184
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/followup-action",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"sent\", \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft.customer_phone) }}, \"label\": {{ JSON.stringify($('Parse Callback').item.json.draft.followup_label) }}, \"silence_window\": {{ JSON.stringify($('Parse Callback').item.json.draft.followup_silence_window) }}, \"silence_hours\": {{ $('Parse Callback').item.json.draft.followup_silence_hours }}, \"draft_text\": {{ JSON.stringify($('Parse Callback').item.json.draft.draft_text) }} }",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "85c77573-e5aa-44a4-a6f4-0f0dc9f28da9",
+      "name": "Followup Skipped?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5536,
+        1360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5396443d-774a-4be5-af03-5243ca21d63b",
+              "leftValue": "={{ $('Parse Callback').item.json.draft.is_followup }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0c1cd27f-24e0-441b-9099-f314b3ff7d43",
+      "name": "Log Followup Skipped",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5776,
+        1360
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/followup-action",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"skipped\", \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft.customer_phone) }}, \"label\": {{ JSON.stringify($('Parse Callback').item.json.draft.followup_label) }}, \"silence_window\": {{ JSON.stringify($('Parse Callback').item.json.draft.followup_silence_window) }}, \"silence_hours\": {{ $('Parse Callback').item.json.draft.followup_silence_hours }}, \"draft_text\": {{ JSON.stringify($('Parse Callback').item.json.draft.draft_text) }} }",
+        "options": {
+          "timeout": 10000
+        }
+      }
     }
   ],
   "connections": {
@@ -4615,6 +4759,11 @@
             "node": "Mark Skipped",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Followup Skipped?",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -4848,6 +4997,11 @@
           },
           {
             "node": "Mark Op Reply (Approved)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Followup Sent?",
             "type": "main",
             "index": 0
           }
@@ -5821,6 +5975,30 @@
             "index": 0
           }
         ]
+      ]
+    },
+    "Followup Sent?": {
+      "main": [
+        [
+          {
+            "node": "Log Followup Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Followup Skipped?": {
+      "main": [
+        [
+          {
+            "node": "Log Followup Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
       ]
     }
   },

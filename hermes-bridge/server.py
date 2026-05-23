@@ -1123,6 +1123,11 @@ SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
 HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200"))
 HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 
+# Proactive follow-up engine — see docs/cowork-targeted-integration-plan.md
+# (follow-up engine section). Default ON; operator can flip to disable.
+FOLLOWUP_ENGINE_ENABLED = _envflag("FOLLOWUP_ENGINE_ENABLED", "true")
+FOLLOWUP_BATCH_LIMIT = int(os.environ.get("FOLLOWUP_BATCH_LIMIT", "10"))
+
 # /review report rendering caps (Telegram 4096-char limit safe).
 REVIEW_CAP_HOT = int(os.environ.get("REVIEW_CAP_HOT", "10"))
 REVIEW_CAP_NEEDS_ATTENTION = int(os.environ.get("REVIEW_CAP_NEEDS_ATTENTION", "10"))
@@ -1308,6 +1313,102 @@ def upsert_conversation_state(customer_id, event):
     else:
         return ("", f"unknown event: {event}")
     return _psql(sql)
+
+
+def _silence_window_for(label, silent_hrs):
+    """Map (label, silence-hours) to a ghost-recovery window key, or None.
+    Mirrors the trigger table in the proactive-follow-up engine spec."""
+    if label in ("HOT", "NEEDS_ATTENTION"):
+        if 0.5 <= silent_hrs <= 2.0:
+            return "hot_30m_2h"
+        if 2.0 < silent_hrs <= 24.0:
+            return "hot_2h_24h"
+    if label == "WARM":
+        if 24.0 <= silent_hrs <= 72.0:
+            return "warm_24h_72h"
+    if label == "COLD":
+        if 72.0 <= silent_hrs <= 168.0:  # 3-7 days
+            return "cold_lastshot"
+    return None
+
+
+def scan_followup_eligibility():
+    """Return up to FOLLOWUP_BATCH_LIMIT customers eligible for a proactive
+    follow-up this sweep. Each item: {customer_id, name, label,
+    silence_hours, silence_window}. Skip-gates checked in SQL where possible,
+    in Python where atomicity matters (Redis draft:posted)."""
+    if not FOLLOWUP_ENGINE_ENABLED:
+        return []
+    # Single SELECT pulls everything we need; LATERAL pick of latest mode.
+    sql = (
+        "SELECT cs.customer_id, "
+        "COALESCE(cf.name, ''), "
+        "cf.label, "
+        "EXTRACT(EPOCH FROM (now() - cs.last_customer_message_at))/3600, "
+        "(cs.last_operator_reply_at > cs.last_customer_message_at) AS we_replied, "
+        "(cf.label_locked_until > now()) AS locked, "
+        "COALESCE(cm.mode, 'approval'), "
+        "(cs.last_nudge_drafted_at > cs.last_customer_message_at) AS already_drafted "
+        "FROM conversation_state cs "
+        "LEFT JOIN customer_facts cf USING (customer_id) "
+        "LEFT JOIN LATERAL ("
+        "  SELECT mode FROM conversation_modes "
+        "  WHERE customer_id = cs.customer_id "
+        "  ORDER BY id DESC LIMIT 1"
+        ") cm ON TRUE "
+        "WHERE cs.last_customer_message_at IS NOT NULL "
+        "  AND (cs.last_operator_reply_at IS NULL "
+        "       OR cs.last_operator_reply_at < cs.last_customer_message_at) "
+        "  AND now() - cs.last_customer_message_at > interval '30 minutes' "
+        "  AND now() - cs.last_customer_message_at < interval '7 days' "
+        "ORDER BY cs.last_customer_message_at ASC "
+        "LIMIT 80"
+    )
+    out, err = _psql(sql, timeout=15)
+    if err:
+        log("followup_scan err:", err)
+        return []
+    candidates = []
+    for line in (out or "").strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 8:
+            continue
+        cid = parts[0].strip()
+        if not cid:
+            continue
+        try:
+            silent_hrs = float(parts[3].strip())
+        except (ValueError, IndexError):
+            continue
+        label = parts[2].strip() or "NEW"
+        locked = parts[5].strip().lower() == "t"
+        mode = parts[6].strip()
+        already_drafted = parts[7].strip().lower() == "t"
+        # Skip-gates (Python-side; SQL already filtered the timing band)
+        if locked:
+            continue
+        if mode == "autonomous":
+            continue
+        if already_drafted:
+            continue
+        # Skip if a normal customer-message draft is still pending operator
+        # action (Redis flag set by Send Draft to Telegram).
+        red_out, _ = _redis(["GET", f"draft:posted:{cid}"])
+        if (red_out or "").strip():
+            continue
+        window = _silence_window_for(label, silent_hrs)
+        if not window:
+            continue
+        candidates.append({
+            "customer_id": cid,
+            "name": parts[1].strip(),
+            "label": label,
+            "silence_hours": round(silent_hrs, 2),
+            "silence_window": window,
+        })
+        if len(candidates) >= FOLLOWUP_BATCH_LIMIT:
+            break
+    return candidates
 
 
 def score_lead(row, now_dt):
@@ -1731,7 +1832,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/hourly-sweep",
                              "/review", "/draft-followup",
                              "/info", "/label", "/snooze",
-                             "/queue"):
+                             "/queue",
+                             "/followup-action"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1785,6 +1887,8 @@ class Handler(BaseHTTPRequestHandler):
             self._snooze(payload)
         elif self.path == "/queue":
             self._queue(payload)
+        elif self.path == "/followup-action":
+            self._followup_action(payload)
         else:
             self._draft(payload)
 
@@ -2700,20 +2804,70 @@ class Handler(BaseHTTPRequestHandler):
                 skipped = int((skipped_out or "0").strip().splitlines()[0])
             except (ValueError, IndexError):
                 skipped = 0
+            # Proactive follow-up engine — runs AFTER label-eval so
+            # newly-transitioned labels (e.g. WARM→COLD via cold-decay)
+            # are considered. Fail-safe: empty list on any error.
+            try:
+                eligible_followups = scan_followup_eligibility()
+            except Exception as _fe:
+                log("followup_scan EXC:", repr(_fe))
+                eligible_followups = []
             elapsed_ms = int((_time.time() - t0) * 1000)
             log(f"hourly-sweep scanned={scanned} transitions={transitions} "
+                f"followups_eligible={len(eligible_followups)} "
                 f"skipped={skipped} elapsed_ms={elapsed_ms}")
             self._send(200, {
                 "ok": True, "scanned": scanned, "transitions": transitions,
                 "hermes_calls": 0,  # v1: no Hermes-driven disambiguation
                 "skipped_unchanged": skipped, "elapsed_ms": elapsed_ms,
+                "eligible_followups": eligible_followups,
             })
         except Exception as e:
             log("hourly_sweep ERROR:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
                              "scanned": 0, "transitions": 0,
                              "hermes_calls": 0, "skipped_unchanged": 0,
+                             "eligible_followups": [],
                              "elapsed_ms": int((_time.time() - t0) * 1000)})
+
+    def _followup_action(self, payload):
+        """POST /followup-action — log a proactive-follow-up event to
+        autonomous_sends.notes. Body: {customer_id, action, label?,
+        silence_window?, silence_hours?, draft_text?}.
+        action ∈ {drafted, sent, skipped, edited}.
+        Fail-safe: always returns 200; logs but never raises."""
+        cid = (payload.get("customer_id") or "").strip()
+        action = (payload.get("action") or "").strip().lower()
+        if not cid or action not in ("drafted", "sent", "skipped", "edited"):
+            self._send(200, {"ok": False,
+                             "error": "customer_id + action(drafted|sent|skipped|edited) required"})
+            return
+        try:
+            kind = "proactive_followup_" + action
+            notes = {
+                "label": payload.get("label"),
+                "silence_window": payload.get("silence_window"),
+                "silence_hours": payload.get("silence_hours"),
+                "draft_text": payload.get("draft_text"),
+            }
+            notes = {k: v for k, v in notes.items() if v is not None}
+            sql = (
+                "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+                f"VALUES ({_lit(cid)}, {_lit(kind)}, "
+                f"{_lit(json.dumps(notes))}::jsonb)"
+            )
+            _, err = _psql(sql)
+            if err:
+                log("followup_action insert err:", err)
+                self._send(200, {"ok": False, "degraded": True,
+                                 "error": err[:200]})
+                return
+            log(f"followup-action cid={cid!r} action={action} "
+                f"window={notes.get('silence_window')!r}")
+            self._send(200, {"ok": True, "customer_id": cid, "action": action})
+        except Exception as e:
+            log("followup_action EXC:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e)})
 
     def _review(self, payload):
         """POST /review — read v_lead_summary, score, render Telegram report
