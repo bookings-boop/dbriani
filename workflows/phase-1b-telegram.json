@@ -193,7 +193,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage   // Nomod: skip the FR-5 improver\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  lines = ['\ud83d\udce9 from ' + pending.customer_phone];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id } };"
+        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage   // Nomod: skip the FR-5 improver\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  lines = ['\ud83d\udce9 from ' + pending.customer_phone];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending } };"
       },
       "id": "0353eee2-a420-41e4-9ae9-2e3f4d547b33",
       "name": "Queue & Format",
@@ -344,7 +344,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft.\n// Extended in Step 5 (pipeline-review) to handle nudge/snz/inf prefixes\n// which carry a customer_id (not a pendingQueue draft id).\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\n// pipeline-review callbacks: nudge:<cid>, snz:<cid>:<dur>, inf:<cid>.\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = pipeline ? null : queue.find(d => d.id === second);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_id : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    // feedback + pipeline callbacks aren't about a pendingQueue draft \u2014\n    // let the existing Draft Exists? IF pass them through.\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback \u2014 runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    const r = $('Redis Draft Lookup').item.json;\n    if (r && r.found && r.draft) redisDraft = r.draft;\n  } catch (e) { redisDraft = null; }\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -4267,6 +4267,82 @@
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboard || []) }) }} }",
         "options": {}
       }
+    },
+    {
+      "id": "41c5af0a-fa4a-455d-b31e-36b9aeaf90dd",
+      "name": "Persist Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5776,
+        1032
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"save\", \"draft\": {{ JSON.stringify($json.draft) }} }",
+        "options": {
+          "timeout": 12000
+        }
+      }
+    },
+    {
+      "id": "149c66c0-2076-4037-9ad3-498d8dec0215",
+      "name": "Redis Draft Lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4624,
+        1020
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"get\", \"draft_id\": {{ JSON.stringify((($json.callback_query && $json.callback_query.data) || '').split(':')[1] || '') }} }",
+        "options": {
+          "timeout": 12000
+        }
+      }
     }
   ],
   "connections": {
@@ -4339,6 +4415,11 @@
             "node": "Send Draft to Telegram",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Persist Draft",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -4392,7 +4473,7 @@
       "main": [
         [
           {
-            "node": "Parse Callback",
+            "node": "Redis Draft Lookup",
             "type": "main",
             "index": 0
           }
@@ -5725,6 +5806,17 @@
         [
           {
             "node": "Send Lead Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redis Draft Lookup": {
+      "main": [
+        [
+          {
+            "node": "Parse Callback",
             "type": "main",
             "index": 0
           }
