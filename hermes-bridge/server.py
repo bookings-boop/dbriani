@@ -1766,6 +1766,48 @@ def render_review(scored, totals, mode="ondemand"):
     }
 
 
+def sanitize_draft_messages(messages):
+    """Strip any hallucinated payment URLs / placeholders from LLM-written
+    drafts. The system prompt forbids the LLM from pasting `pay.nomodapp.com`
+    (the real Nomod URL gets appended deterministically by Build Payment
+    Message when should_send_payment is true). But the LLM still occasionally
+    writes it — operator-visible regression. This deterministic post-pass
+    guarantees the draft never carries a bare/invented URL.
+
+    Returns (sanitized_messages_list, did_strip: bool)."""
+    if not isinstance(messages, list):
+        return messages, False
+    bad_patterns = [
+        re.compile(r"pay\.nomodapp\.com[/\w?=&%-]*", re.IGNORECASE),
+        re.compile(r"https?://pay\.nomodapp\.com[/\w?=&%-]*", re.IGNORECASE),
+        re.compile(r"\[link\]", re.IGNORECASE),
+        re.compile(r"\[payment\s*link\]", re.IGNORECASE),
+        re.compile(r"\[insert\s*link\]", re.IGNORECASE),
+    ]
+    cleaned = []
+    stripped = False
+    for m in messages:
+        if not isinstance(m, str):
+            cleaned.append(m)
+            continue
+        out = m
+        for pat in bad_patterns:
+            if pat.search(out):
+                stripped = True
+                out = pat.sub("", out)
+        # Tidy double spaces / stray colons left over after substring removal
+        out = re.sub(r"(here'?s the (payment )?link[^:]*:\s*)$",
+                     "want me to send the payment link to lock it in?",
+                     out, flags=re.IGNORECASE)
+        out = re.sub(r"\s+:\s*[.!?]", ".", out)  # ": ." -> "."
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        # If the message became empty or weird-trailing, default fall-back
+        if not out or len(out) < 6:
+            out = "want me to send the payment link to lock it in?"
+        cleaned.append(out)
+    return cleaned, stripped
+
+
 def _name_fallback(customer_id):
     """Build a recognisable label from customer_id when the customer's name
     is missing. Shows the last 4 digits prefixed with '…'. No country-code
@@ -3246,9 +3288,27 @@ class Handler(BaseHTTPRequestHandler):
                             parts.append(m.strip())
                         elif isinstance(m, dict):
                             parts.append((m.get("text") or "").strip())
+                    # Deterministic guard against hallucinated payment URLs —
+                    # the system prompt forbids the LLM from pasting
+                    # `pay.nomodapp.com`, but it still occasionally does it,
+                    # and that text is operator-visible if the customer-msg
+                    # path or autosend ever picks it up. Strip here so the
+                    # nudge draft is always clean.
+                    parts, payment_stripped = sanitize_draft_messages(parts)
+                    if payment_stripped:
+                        log(f"draft_followup payment-url scrubbed "
+                            f"cid={cid!r}")
                     draft_text = "\n".join(p for p in parts if p).strip()
                 if not draft_text:
                     draft_text = (parsed.get("text") or "").strip()
+                    # Same guard for the single-string `text` shape.
+                    if draft_text:
+                        cleaned_one, stripped_one = sanitize_draft_messages(
+                            [draft_text])
+                        if stripped_one:
+                            log(f"draft_followup payment-url scrubbed "
+                                f"(text-shape) cid={cid!r}")
+                        draft_text = cleaned_one[0] if cleaned_one else ""
             if not draft_text:
                 log(f"draft_followup empty draft — parsed_keys="
                     f"{list(parsed.keys()) if isinstance(parsed, dict) else None}"
