@@ -59,3 +59,15 @@ f0e206f fix(autosend): cancel armed timers when customer sends a new message
 
 ## Not pushed to origin
 Default-branch push remains blocked by the auto-mode classifier. The commits are local; the live EC2 deploys (bridge + n8n workflow) are independent and current.
+
+---
+
+## 5. Telegram webhook 404 after workflow re-import — operational fix
+
+**Bug:** After `docker exec n8n-n8n-1 n8n import:workflow --input=…`, the Telegram webhook started returning 404. All buttons (Edit/Feedback/Manual) and slash commands silently dropped. `getWebhookInfo` showed `pending_update_count: 5` and `"Wrong response from the webhook: 404 Not Found"`. New customer-message webhooks still worked because they use a different webhook id; only the `telegram` callback path was affected.
+
+**Root cause:** n8n's CLI prints `"Note: Changes will not take effect if n8n is running. Please restart n8n for changes to take effect."` — easy to miss. The in-memory webhook registration doesn't refresh on import, only on container start. Even `n8n update:workflow --active=true` doesn't re-register.
+
+**Fix:** `docker restart n8n-n8n-1`, then `setWebhook` with `drop_pending_updates=true` so old stale retries don't fire against current state.
+
+**Runbook rule:** Any future `n8n import:workflow` on the Phase 1B workflow MUST be followed by `docker restart n8n-n8n-1`. Use `getWebhookInfo` to verify `pending_update_count == 0` and `last_error_message` is absent before considering the deploy live.
