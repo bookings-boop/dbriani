@@ -997,6 +997,12 @@ SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
 HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200"))
 HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 
+# /review report rendering caps (Telegram 4096-char limit safe).
+REVIEW_CAP_HOT = int(os.environ.get("REVIEW_CAP_HOT", "10"))
+REVIEW_CAP_NEEDS_ATTENTION = int(os.environ.get("REVIEW_CAP_NEEDS_ATTENTION", "10"))
+REVIEW_CAP_WARM = int(os.environ.get("REVIEW_CAP_WARM", "8"))
+REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
+
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 
@@ -1178,6 +1184,305 @@ def upsert_conversation_state(customer_id, event):
     return _psql(sql)
 
 
+def score_lead(row, now_dt):
+    """Compute priority score per docs/pipeline-review-plan.md §2e step 3.
+    Pure function; deterministic. row is the dict shape from _read_lead_summary.
+    Negative scores → PAUSED/snoozed tail."""
+    score = 0
+    label = row.get("label") or "NEW"
+    if label == "NEEDS_ATTENTION":
+        score += 1000
+    elif label == "HOT":
+        score += 800
+    elif label == "WARM":
+        score += 500
+    elif label == "NEW":
+        score += 300
+    elif label == "COLD":
+        # "almost-bought" cold = had booking intent but no payment
+        if row.get("last_booking_intent_at"):
+            score += 100
+        kind = row.get("last_rejection_kind")
+        lra = row.get("last_rejection_at_seconds")  # seconds since rejection
+        if kind == "rejected_price" and lra is not None and lra > 30 * 86400:
+            score += 50
+        if kind == "rejected_timing":
+            score += 50  # always surfaceable if cold + rejected_timing
+    if label.startswith("PAUSED_"):
+        score -= 10000
+    if row.get("label_locked_active"):
+        score -= 500
+
+    # urgency boosts
+    cmsg = row.get("last_customer_message_at_seconds")  # silent secs
+    orep = row.get("last_operator_reply_at_seconds")
+    we_owe = (cmsg is not None and orep is not None and cmsg < orep and cmsg < 99999999)
+    # "we owe a reply" really means: customer msg is more recent than our reply
+    # AND it's been >30min since they spoke.
+    if (cmsg is not None and cmsg < 99999999  # not epoch-fallback
+            and (orep is None or orep > cmsg)
+            and cmsg > 30 * 60):
+        score += 300
+    if label == "HOT" and cmsg is not None and cmsg > 2 * 3600:
+        score += 200
+    dates = (row.get("dates") or "").lower()
+    sameday = ("today" in dates or "tonight" in dates)
+    if sameday and (orep is None or (cmsg is not None and (orep > cmsg))):
+        score += 400
+    plink = row.get("last_payment_link_at_seconds")
+    ppromised = row.get("last_payment_promised_at_seconds")
+    if (plink is not None and ppromised is None and plink > 24 * 3600):
+        score += 150
+
+    # damping
+    nudge = row.get("last_nudge_drafted_at_seconds")
+    if nudge is not None and nudge < 24 * 3600:
+        score -= 100
+    seen = row.get("last_review_seen_at_seconds")
+    if seen is not None and seen < 6 * 3600:
+        score -= 200
+
+    return score
+
+
+def _seconds_since(ts_str):
+    """Parse 'YYYY-MM-DD HH:MI:SS+TZ' to seconds-ago. None if blank/error."""
+    s = (ts_str or "").strip()
+    if not s:
+        return None
+    try:
+        import datetime as _dt
+        # Postgres uses '+00' or '+0000'; normalise to ISO
+        s2 = s.replace(" ", "T")
+        if s2.endswith("+00"):
+            s2 = s2[:-3] + "+0000"
+        if "+" not in s2[-6:] and "-" not in s2[-6:]:
+            s2 += "+0000"
+        dt = _dt.datetime.fromisoformat(s2[:19]).replace(
+            tzinfo=_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        return max(0, int((now - dt).total_seconds()))
+    except Exception:
+        return None
+
+
+def read_lead_summary(filter_label=None):
+    """Return list of dicts (one per customer) ready for scoring.
+    filter_label ∈ {None, 'hot', 'warm', 'cold', 'all'} (None == all)."""
+    where = ""
+    fl = (filter_label or "").lower()
+    if fl == "hot":
+        where = "WHERE label IN ('HOT','NEEDS_ATTENTION')"
+    elif fl == "warm":
+        where = "WHERE label = 'WARM'"
+    elif fl == "cold":
+        where = "WHERE label = 'COLD'"
+    sql = (
+        "SELECT customer_id, COALESCE(name,''), label, "
+        "COALESCE(to_char(label_updated_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(label_locked_until,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "(label_locked_until > now()) AS lock_active, "
+        "COALESCE(message_count,0), COALESCE(yachts,''), COALESCE(dates,''), "
+        "COALESCE(party_size,''), "
+        "COALESCE(to_char(last_customer_message_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_operator_reply_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_review_seen_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_nudge_drafted_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_payment_link_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_payment_promised_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_booking_intent_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(last_rejection_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE(last_rejection_kind,''), "
+        "COALESCE(recent_notes,'') "
+        f"FROM v_lead_summary {where}"
+    )
+    out, err = _psql(sql, timeout=20)
+    if err:
+        log("read_lead_summary err:", err)
+        return []
+    rows = []
+    for line in (out or "").strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 20:
+            continue
+        try:
+            mc = int((parts[6].strip() or "0"))
+        except ValueError:
+            mc = 0
+        row = {
+            "customer_id": parts[0].strip(),
+            "name": parts[1].strip(),
+            "label": parts[2].strip(),
+            "label_updated_at": parts[3].strip(),
+            "label_locked_until": parts[4].strip(),
+            "label_locked_active": parts[5].strip().startswith("t"),
+            "message_count": mc,
+            "yachts": parts[7].strip(),
+            "dates": parts[8].strip(),
+            "party_size": parts[9].strip(),
+            "last_customer_message_at": parts[10].strip(),
+            "last_customer_message_at_seconds": _seconds_since(parts[10]),
+            "last_operator_reply_at_seconds": _seconds_since(parts[11]),
+            "last_review_seen_at_seconds": _seconds_since(parts[12]),
+            "last_nudge_drafted_at_seconds": _seconds_since(parts[13]),
+            "last_payment_link_at_seconds": _seconds_since(parts[14]),
+            "last_payment_promised_at_seconds": _seconds_since(parts[15]),
+            "last_booking_intent_at": parts[16].strip(),
+            "last_rejection_at_seconds": _seconds_since(parts[17]),
+            "last_rejection_kind": parts[18].strip(),
+            "recent_notes": parts[19].strip(),
+        }
+        rows.append(row)
+    return rows
+
+
+def _fmt_dur(secs):
+    """Human-readable '9h', '24m', '3d' etc. None → '—'."""
+    if secs is None:
+        return "—"
+    if secs < 90:
+        return f"{int(secs)}s"
+    if secs < 90 * 60:
+        return f"{int(secs / 60)}m"
+    if secs < 36 * 3600:
+        return f"{int(secs / 3600)}h"
+    return f"{int(secs / 86400)}d"
+
+
+def render_review(scored, totals, mode="ondemand"):
+    """Return a dict {telegram_text, inline_keyboards, mark_seen_ids, totals}.
+    scored = list of (score, row) sorted desc."""
+    sections = {
+        "HOT":             {"items": [], "cap": REVIEW_CAP_HOT,
+                            "header": "🔥 HOT — ready to close"},
+        "NEEDS_ATTENTION": {"items": [], "cap": REVIEW_CAP_NEEDS_ATTENTION,
+                            "header": "⚠️ NEEDS ATTENTION"},
+        "WARM":            {"items": [], "cap": REVIEW_CAP_WARM,
+                            "header": "♨️ WARM — worth nudging"},
+        "NEW":             {"items": [], "cap": 5,
+                            "header": "🌱 NEW — early conversations"},
+        "COLD":            {"items": [], "cap": REVIEW_CAP_COLD,
+                            "header": "❄️ COLD — re-engage candidates"},
+    }
+    pause_tail = []
+    seen_ids = []
+    for score, row in scored:
+        label = row.get("label") or "NEW"
+        if label.startswith("PAUSED_") or score < 0:
+            pause_tail.append(row)
+            continue
+        if label not in sections:
+            continue
+        sections[label]["items"].append((score, row))
+        seen_ids.append(row["customer_id"])
+
+    # Build text + inline rows.
+    when = ("Scheduled review" if mode == "scheduled"
+            else "On-demand review")
+    lines = [f"📋 *Pipeline Review* — {when}",
+             (f"{totals.get('total', 0)} active · "
+              f"{totals.get('HOT', 0)} hot · "
+              f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
+              f"{totals.get('COLD', 0)} cold"),
+             ""]
+    keyboards = []
+
+    def _short_id(cid):
+        # Telegram callback_data is 64 bytes max; full @lid customer_ids are
+        # ~21 chars so prefix:cid fits. Keep the full id (no Redis lookup).
+        return cid
+
+    for label_key in ("HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD"):
+        sect = sections[label_key]
+        items = sect["items"]
+        if not items:
+            continue
+        cap = sect["cap"]
+        shown = items[:cap]
+        overflow = len(items) - len(shown)
+        lines.append(f"*{sect['header']}* ({len(items)})")
+        for i, (score, row) in enumerate(shown, 1):
+            why = _why_line(row, label_key)
+            lines.append(
+                f"{i}. *{row.get('name') or 'Unknown'}* — "
+                f"{(row.get('yachts') or 'no yacht set')} · "
+                f"{(row.get('dates') or 'no date')} · "
+                f"msg #{row.get('message_count')}\n"
+                f"   ⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
+                f"  ·  {why}"
+            )
+            sid = _short_id(row["customer_id"])
+            keyboards.append([
+                {"text": "💬 Draft nudge",
+                 "callback_data": f"nudge:{sid}"},
+                {"text": "💤 Snooze 4h",
+                 "callback_data": f"snz:{sid}:4h"},
+                {"text": "ℹ️ Info",
+                 "callback_data": f"inf:{sid}"},
+            ])
+        if overflow > 0:
+            lines.append(
+                f"   _+{overflow} more — `/review {label_key.lower()}` to see all_"
+            )
+        lines.append("")
+
+    if pause_tail:
+        lines.append(f"⏸ Paused/snoozed: {len(pause_tail)} — `/info` to see.")
+
+    telegram_text = "\n".join(lines).strip()
+    # Telegram parse_mode Markdown is fussy; let the workflow toggle as needed.
+    return {
+        "telegram_text": telegram_text,
+        "inline_keyboards": keyboards,
+        "mark_seen_ids": seen_ids,
+    }
+
+
+def _why_line(row, label_key):
+    """Heuristic one-liner. v1: deterministic. Hermes-driven 'why' is a
+    follow-up enhancement."""
+    notes = []
+    if row.get("last_payment_link_at_seconds") is not None:
+        plink_h = int(row["last_payment_link_at_seconds"] / 3600)
+        if row.get("last_payment_promised_at_seconds") is None and plink_h > 24:
+            notes.append(f"payment link sent {plink_h}h ago, no commitment")
+    if row.get("last_booking_intent_at") and label_key == "COLD":
+        notes.append("almost-bought (hit booking intent before going cold)")
+    if (row.get("last_rejection_kind") == "rejected_price"
+            and label_key == "COLD"):
+        notes.append("lost on price — try different angle")
+    if (row.get("last_rejection_kind") == "rejected_timing"
+            and label_key == "COLD"):
+        notes.append("lost on timing — date may be relevant now")
+    if not notes:
+        if label_key == "HOT":
+            notes.append("hot signals — push toward booking")
+        elif label_key == "NEEDS_ATTENTION":
+            notes.append("we owe a reply")
+        elif label_key == "WARM":
+            notes.append("engaged — value-add nudge could move it")
+        elif label_key == "COLD":
+            notes.append("worth a soft re-engagement message")
+        else:
+            notes.append("new conversation")
+    return " · ".join(notes)
+
+
+def mark_review_seen(customer_ids):
+    """UPDATE conversation_state.last_review_seen_at = now() for the listed
+    customers. Batched into one UPDATE for efficiency."""
+    if not customer_ids:
+        return None, None
+    quoted = ",".join("'" + cid.replace("'", "''") + "'" for cid in customer_ids)
+    sql = (
+        "INSERT INTO conversation_state (customer_id, last_review_seen_at, updated_at) "
+        f"SELECT cid, now(), now() FROM unnest(ARRAY[{quoted}]) AS cid "
+        "ON CONFLICT (customer_id) DO UPDATE "
+        "SET last_review_seen_at = now(), updated_at = now()"
+    )
+    return _psql(sql)
+
+
 def sameday_interrupt_check(customer_id, name, dates):
     """(interrupt_required, alert_text). Blocks if a draft has been posted
     (Redis key draft:posted:<cid>) or if we've already alerted in the last
@@ -1226,7 +1531,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/caps", "/autosend-state", "/customer-facts",
                              "/debounce", "/payment-link", "/feedback",
                              "/label-eval", "/conversation-state",
-                             "/hourly-sweep"):
+                             "/hourly-sweep",
+                             "/review", "/draft-followup"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1268,6 +1574,10 @@ class Handler(BaseHTTPRequestHandler):
             self._conversation_state(payload)
         elif self.path == "/hourly-sweep":
             self._hourly_sweep(payload)
+        elif self.path == "/review":
+            self._review(payload)
+        elif self.path == "/draft-followup":
+            self._draft_followup(payload)
         else:
             self._draft(payload)
 
@@ -2197,6 +2507,120 @@ class Handler(BaseHTTPRequestHandler):
                              "scanned": 0, "transitions": 0,
                              "hermes_calls": 0, "skipped_unchanged": 0,
                              "elapsed_ms": int((_time.time() - t0) * 1000)})
+
+    def _review(self, payload):
+        """POST /review — read v_lead_summary, score, render Telegram report
+        + inline keyboards. Always returns 200; fail-open."""
+        mode = (payload.get("mode") or "ondemand").strip()
+        filter_label = (payload.get("filter") or "all").strip().lower()
+        try:
+            rows = read_lead_summary(
+                filter_label if filter_label in ("hot", "warm", "cold") else None)
+            scored = sorted(((score_lead(r, None), r) for r in rows),
+                            key=lambda t: t[0], reverse=True)
+            totals = {"total": len(rows), "HOT": 0, "WARM": 0, "COLD": 0,
+                      "NEW": 0, "NEEDS_ATTENTION": 0, "PAUSED": 0}
+            for r in rows:
+                lab = r.get("label") or "NEW"
+                if lab.startswith("PAUSED_"):
+                    totals["PAUSED"] += 1
+                elif lab in totals:
+                    totals[lab] += 1
+            rendered = render_review(scored, totals, mode=mode)
+            # Mark seen so the damping picks them up on the next /review.
+            mark_review_seen(rendered.get("mark_seen_ids") or [])
+            self._send(200, {
+                "ok": True,
+                "totals": totals,
+                "telegram_text": rendered["telegram_text"],
+                "inline_keyboards": rendered["inline_keyboards"],
+            })
+        except Exception as e:
+            log("review ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "telegram_text": "⚠️ Review failed — bridge error.",
+                             "inline_keyboards": []})
+
+    def _draft_followup(self, payload):
+        """POST /draft-followup — generate a follow-up draft via Hermes.
+        Body: {customer_id, history, customer_name?}. Reuses build_query
+        scaffold but injects a label-specific directive."""
+        cid = (payload.get("customer_id") or "").strip()
+        history = payload.get("history") or ""
+        if not cid:
+            self._send(200, {"ok": False, "error": "customer_id required"})
+            return
+        try:
+            row = get_current_label_row(cid)
+            label = (row or {}).get("label", "WARM") if row else "WARM"
+            name = (row or {}).get("name", "") if row else ""
+            # Label-specific directive — short, append to incoming_message slot
+            # so the existing build_query picks it up.
+            directive_map = {
+                "HOT":  ("Send a single message that picks up where they left "
+                         "off, references the specific yacht/date, and reduces "
+                         "friction toward booking. ≤ 2 sentences."),
+                "WARM": ("Send one helpful follow-up that adds value — answer "
+                         "a likely next question, suggest a date alternative, "
+                         "or share a relevant detail. Not 'just checking in'. "
+                         "≤ 2 sentences."),
+                "COLD": ("This lead went cold ~7+ days ago. One soft "
+                         "re-engagement — reference what they were originally "
+                         "interested in, mention something genuinely new. "
+                         "≤ 2 sentences."),
+                "NEEDS_ATTENTION": ("Same-day or hot lead with no reply yet. "
+                                    "Confirm availability or ask the one "
+                                    "specific detail needed to lock it in. "
+                                    "≤ 2 sentences."),
+            }
+            directive = directive_map.get(label, directive_map["WARM"])
+            # Build the prompt — mirrors _draft() but with the directive
+            # injected as the incoming_message context.
+            inner = {
+                "customer_id": cid,
+                "customer_name": payload.get("customer_name") or name,
+                "incoming_message": (
+                    f"[PROACTIVE FOLLOW-UP — label={label}] {directive}"),
+                "history": history,
+                "session_id": payload.get("session_id"),
+            }
+            query = build_query(inner)
+            rc, out, err, elapsed = run_hermes(query)
+            if rc != 0:
+                log(f"draft_followup hermes rc={rc} err={err[:200]!r}")
+                self._send(200, {"ok": False, "degraded": True,
+                                 "error": f"hermes rc={rc}",
+                                 "draft_text": "", "label": label})
+                return
+            data = extract_json(out)
+            draft_text = ""
+            if isinstance(data, dict):
+                # Same shape as _draft(): {messages:[...]} or {text:"..."}
+                msgs = data.get("messages") or []
+                if msgs and isinstance(msgs, list):
+                    draft_text = "\n".join(
+                        m.get("text", "") for m in msgs
+                        if isinstance(m, dict)).strip()
+                if not draft_text:
+                    draft_text = (data.get("text") or "").strip()
+            # Mark the nudge so the report damps + reengage_attempts increments.
+            try:
+                upsert_conversation_state(cid, "nudge_drafted")
+            except Exception as _e:
+                log("draft_followup nudge_drafted err:", repr(_e))
+            log(f"draft-followup cid={cid!r} label={label} "
+                f"draft_len={len(draft_text)} elapsed={elapsed}s")
+            self._send(200, {
+                "ok": True, "customer_id": cid, "label": label,
+                "draft_text": draft_text,
+                "approval_card_header": (
+                    f"🔔 PROACTIVE FOLLOW-UP — {label.lower()}"),
+                "session_id": extract_session(out, err),
+            })
+        except Exception as e:
+            log("draft_followup ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "draft_text": "", "label": "WARM"})
 
     def _conversation_state(self, payload):
         """POST /conversation-state — silent timestamp updater."""
