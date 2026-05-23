@@ -157,7 +157,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1024,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": {{ JSON.stringify($json.systemPrompt) }},\n      \"cache_control\": {\"type\": \"ephemeral\"}\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"CONVERSATION HISTORY (oldest first):\\n\" + $json.conversationHistory + \"\\n\\nCustomer: \" + ($json.customerName || \"unknown\") + \" (\" + $json.customerPhone + \")\\n\\nTHEIR NEWEST MESSAGE:\\n\" + $json.userMessage + ($json.regenHint ? \"\\n\\nIMPORTANT: \" + $json.regenHint : \"\") + \"\\n\\nReturn ONLY the JSON object specified in the system prompt - no preamble, no code fences.\") }}\n    }\n  ]\n}",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1024,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": {{ JSON.stringify($json.systemPrompt + ($('Fetch Behavioral Context').item.json.formatted ? \"\\n\\n\" + $('Fetch Behavioral Context').item.json.formatted : \"\")) }},\n      \"cache_control\": {\"type\": \"ephemeral\"}\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"CONVERSATION HISTORY (oldest first):\\n\" + $json.conversationHistory + \"\\n\\nCustomer: \" + ($json.customerName || \"unknown\") + \" (\" + $json.customerPhone + \")\\n\\nTHEIR NEWEST MESSAGE:\\n\" + $json.userMessage + ($json.regenHint ? \"\\n\\nIMPORTANT: \" + $json.regenHint : \"\") + \"\\n\\nReturn ONLY the JSON object specified in the system prompt - no preamble, no code fences.\") }}\n    }\n  ]\n}",
         "options": {}
       },
       "id": "f6db800a-44b3-47a1-a0f1-b99e7032ca64",
@@ -344,7 +344,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst [action, draftId] = data.split(':');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = queue.find(d => d.id === draftId);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: draftId,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    draft_found: !!draft\n  }\n};"
+        "jsCode": "// Parse callback_data and look up the draft\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst [action, draftId] = data.split(':');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = queue.find(d => d.id === draftId);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: draftId,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    // feedback callbacks aren't about a pendingQueue draft — let the\n    // existing Draft Exists? IF pass them through.\n    draft_found: !!draft || (action || '').indexOf('feedback_') === 0\n  }\n};"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -530,6 +530,78 @@
               },
               "renameOutput": true,
               "outputKey": "takeover"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "1af60442-73f2-489b-bb7e-3f9a62750e82",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_yes",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_yes"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "f36559a8-2c1e-4c70-84f4-7387b3e38d59",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_modify",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_modify"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "0124d0ef-ec05-4129-b7c1-dca45fc056b9",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_no",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_no"
             }
           ]
         },
@@ -866,7 +938,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"⚠️ Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual — switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '⚠️ reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps — report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> — rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card — DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive — send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE — refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '⚠️ Nothing sent. Reply to a draft card, use  /send <chatId> <message>, or start a lead with  /lead <name> <phone> <details>' } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"⚠️ Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual — switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '⚠️ reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps — report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (G) /feedback <text> — operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> — rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card — DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive — send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE — refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '⚠️ Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -1048,6 +1120,30 @@
               },
               "renameOutput": true,
               "outputKey": "caps_cmd"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "a4f39056-815d-4408-aca8-960be2099d6c",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "feedback_cmd",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "feedback_cmd"
             }
           ]
         },
@@ -2956,6 +3052,307 @@
         5680,
         892
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"classify\", \"text\": {{ JSON.stringify($json.feedback_text) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "0c387803-072c-4bea-b174-77041da903b5",
+      "name": "Hermes Feedback Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5340,
+        2160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// /feedback step 2 — assemble the confirmation card text + Yes/Modify/\n// No inline keyboard from the classifier's response.\nconst cls = $json || {};\nconst raw = $('Process Text Reply').item.json.feedback_text || '';\nconst chatId = $('Process Text Reply').item.json.admin_chat_id;\nif (cls.ok !== true) {\n  return [{ json: {\n    chat_id: chatId,\n    text: '⚠️ Couldn\\'t classify that feedback: '\n      + (cls.error || 'unknown error') + '\\n\\n\"' + raw + '\"',\n    reply_markup: { inline_keyboard: [] }\n  } }];\n}\nconst pid = cls.proposal_id;\nconst lines = ['📋 Feedback received:',\n               '\"' + raw + '\"', ''];\nconst tag = (cls.classification === 'CUSTOMER_NOTE') ? '👤 CUSTOMER NOTE'\n          : (cls.classification === 'GLOBAL_RULE')   ? '🌍 GLOBAL RULE'\n          : (cls.classification === 'SCENARIO_RULE') ? '🎯 SCENARIO RULE'\n          : cls.classification;\nlines.push('Classified: ' + tag);\nif (cls.classification === 'CUSTOMER_NOTE') {\n  if (cls.customer_id) {\n    lines.push('For: ' + (cls.customer_name || '(name)')\n               + '  (' + cls.customer_id + ')');\n  } else if (cls.matches && cls.matches.length > 1) {\n    lines.push('⚠️ Multiple customers match \"'\n               + cls.customer_name + '\":');\n    for (const m of cls.matches) {\n      lines.push('  • ' + m.name + ' — ' + m.customer_id);\n    }\n    lines.push('Tap Modify and re-type with the explicit phone.');\n  } else {\n    lines.push('⚠️ No customer record matches \"'\n               + cls.customer_name + '\". Tap Modify to specify.');\n  }\n} else if (cls.classification === 'SCENARIO_RULE') {\n  lines.push('Scenario: ' + (cls.scenario || '(unspecified)'));\n}\nlines.push('', '→ ' + (cls.summary || cls.text || ''));\nconst reply_markup = { inline_keyboard: [[\n  { text: '✅ Yes',    callback_data: 'feedback_yes:' + pid },\n  { text: '✏️ Modify', callback_data: 'feedback_modify:' + pid },\n  { text: '❌ No',     callback_data: 'feedback_no:' + pid }\n]] };\nreturn [{ json: { chat_id: chatId, text: lines.join('\\n'),\n                  reply_markup: reply_markup } }];\n"
+      },
+      "id": "237cd5eb-2d8d-4f24-ac03-5e6e2da6c16a",
+      "name": "Build Feedback Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5560,
+        2160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $json.chat_id }}, \"text\": {{ JSON.stringify($json.text) }}, \"reply_markup\": {{ JSON.stringify($json.reply_markup) }} }",
+        "options": {}
+      },
+      "id": "c5e4cc4c-2318-4584-99b3-828bd19896a1",
+      "name": "Send Feedback Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5780,
+        2160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"save\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "57deb761-8ebd-4eea-82e0-80ffbedf50c3",
+      "name": "Feedback Save",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(($json.ok === true) ? (\"✅ Saved as \" + ($json.classification || \"rule\") + \":\\n→ \" + ($json.summary || \"\")) : (\"⚠️ Save failed: \" + ($json.error || \"unknown error\"))) }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "787a6bb3-5218-408d-82d2-33588f7e29d3",
+      "name": "Edit Feedback Saved",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"discard\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "0ac79a56-045d-4a2a-898a-cf5b3c31b4e5",
+      "name": "Feedback Modify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2540
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"✏️ Discarded. Re-type with /feedback <updated text> when ready.\") }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "e7f3d140-e1f4-4ab9-9a0c-44f345bc74c0",
+      "name": "Edit Feedback Modify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"discard\", \"proposal_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "1463f85d-13ae-41e0-a711-fc657e550d68",
+      "name": "Feedback Discard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6240,
+        2680
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"❌ Discarded.\") }}, \"reply_markup\": { \"inline_keyboard\": [] } }",
+        "options": {}
+      },
+      "id": "8611f964-a504-4a73-8cff-322f6fc3733f",
+      "name": "Edit Feedback Discarded",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6500,
+        2680
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"behavioral-context\", \"customer_id\": {{ JSON.stringify($json.customerChatId) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "8bd21978-a438-4160-b618-70013e0377bd",
+      "name": "Fetch Behavioral Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4800,
+        812
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -3155,6 +3552,27 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Feedback Save",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feedback Modify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feedback Discard",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -3303,6 +3721,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Hermes Feedback Classify",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -3413,7 +3838,7 @@
       "main": [
         [
           {
-            "node": "Build Prompt",
+            "node": "Fetch Behavioral Context",
             "type": "main",
             "index": 0
           }
@@ -4099,6 +4524,72 @@
         [
           {
             "node": "Queue & Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Feedback Classify": {
+      "main": [
+        [
+          {
+            "node": "Build Feedback Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Feedback Card": {
+      "main": [
+        [
+          {
+            "node": "Send Feedback Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Save": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Modify": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Modify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Discard": {
+      "main": [
+        [
+          {
+            "node": "Edit Feedback Discarded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Behavioral Context": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
             "type": "main",
             "index": 0
           }

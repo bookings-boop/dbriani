@@ -29,6 +29,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
@@ -46,6 +47,12 @@ PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
 REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
 AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
 DEBOUNCE_TTL = int(os.environ.get("BRIDGE_DEBOUNCE_TTL", "120"))
+
+# --- /feedback (operator behavioural-feedback command) ---------------------
+FEEDBACK_TTL = int(os.environ.get("BRIDGE_FEEDBACK_TTL", "600"))
+FEEDBACK_MAX_GLOBAL = int(os.environ.get("FEEDBACK_MAX_GLOBAL", "20"))
+FEEDBACK_MAX_SCENARIO = int(os.environ.get("FEEDBACK_MAX_SCENARIO", "5"))
+FEEDBACK_MAX_PER_CUSTOMER = int(os.environ.get("FEEDBACK_MAX_PER_CUSTOMER", "5"))
 
 
 def _envflag(key, default):
@@ -174,6 +181,146 @@ def nomod_create_link(amount, summary, customer_name):
         return None, None, "Nomod %s: %s" % (e.code, msg)
     except Exception as e:
         return None, None, "Nomod request failed: %r" % e
+
+
+# --- /feedback helpers -----------------------------------------------------
+
+FEEDBACK_CLASSIFIER_PROMPT = (
+    "Classify this operator feedback into ONE of:\n"
+    "  CUSTOMER_NOTE — a fact about a specific named customer to remember.\n"
+    "  GLOBAL_RULE — applies to ALL future drafts (no specific customer/scenario).\n"
+    "  SCENARIO_RULE — applies in a specific scenario only "
+    "(proposal, birthday, family group, corporate, B2B, etc.).\n"
+    "Return ONLY valid JSON (no prose, no markdown fences):\n"
+    "  {\"classification\":\"CUSTOMER_NOTE|GLOBAL_RULE|SCENARIO_RULE\","
+    "\"customer_name\":\"<name or empty>\","
+    "\"scenario\":\"<scenario name or empty>\","
+    "\"text\":\"<the rule/note text, cleaned, imperative voice>\","
+    "\"summary\":\"<one short sentence for operator confirmation>\"}\n"
+    "Operator feedback: "
+)
+
+
+def classify_feedback(text):
+    """Hermes classifier call. Returns the parsed dict or None on failure."""
+    if not text or not text.strip():
+        return None
+    try:
+        rc, out, _, _ = run_hermes(FEEDBACK_CLASSIFIER_PROMPT + text.strip(),
+                                   timeout=15)
+    except Exception as e:
+        log("feedback classify hermes error:", repr(e))
+        return None
+    if rc != 0:
+        log("feedback classify rc=", rc)
+        return None
+    parsed, _ = extract_json(out)
+    if not isinstance(parsed, dict):
+        return None
+    cls = (parsed.get("classification") or "").upper().strip()
+    if cls not in ("CUSTOMER_NOTE", "GLOBAL_RULE", "SCENARIO_RULE"):
+        return None
+    return {
+        "classification": cls,
+        "customer_name": (parsed.get("customer_name") or "").strip(),
+        "scenario": (parsed.get("scenario") or "").strip(),
+        "text": (parsed.get("text") or "").strip(),
+        "summary": (parsed.get("summary") or "").strip(),
+    }
+
+
+def resolve_customer_by_name(name):
+    """Find customer_id in customer_facts by case-insensitive name LIKE.
+    Returns (customer_id_or_None, top_3_matches[])."""
+    if not name or not name.strip():
+        return None, []
+    n = name.strip().replace("'", "''").lower()
+    sql = ("SELECT customer_id || E'\\t' || name FROM customer_facts "
+           f"WHERE lower(name) LIKE '%{n}%' "
+           "ORDER BY updated_at DESC LIMIT 3")
+    out, err = _psql(sql)
+    if err:
+        return None, []
+    matches = []
+    for ln in (out or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 2:
+            matches.append({"customer_id": parts[0].strip(),
+                            "name": parts[1].strip()})
+    if len(matches) == 1:
+        return matches[0]["customer_id"], matches
+    return None, matches
+
+
+def behavioral_context(customer_id):
+    """Active behavioural rules + notes for a customer. Used by drafts.
+    Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
+    cid = (customer_id or "").replace("'", "''")
+    out, _ = _psql("SELECT rule_text FROM behavior_rules "
+                   "WHERE scope='global' AND active=true "
+                   f"ORDER BY id DESC LIMIT {FEEDBACK_MAX_GLOBAL}")
+    glb = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    out, _ = _psql("SELECT scope_value || E'\\t' || rule_text "
+                   "FROM behavior_rules WHERE scope='scenario' AND active=true "
+                   "ORDER BY id DESC LIMIT 50")
+    sc = []
+    for ln in (out or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 2:
+            sc.append({"scenario": parts[0].strip(),
+                       "rule": parts[1].strip()})
+    notes = []
+    if cid:
+        out, _ = _psql(f"SELECT note_text FROM customer_notes "
+                       f"WHERE customer_id='{cid}' AND active=true "
+                       f"ORDER BY id DESC LIMIT {FEEDBACK_MAX_PER_CUSTOMER}")
+        notes = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    # Pre-formatted block for drop-in at the end of Build Prompt's system
+    # prompt. Empty string when no context exists — safe to concatenate.
+    blocks = []
+    if glb:
+        blocks.append("### Global rules (always apply)")
+        blocks.extend(["- " + r for r in glb])
+    if sc:
+        if blocks:
+            blocks.append("")
+        blocks.append("### Scenario rules")
+        blocks.extend(["- [%s] %s" % (s["scenario"], s["rule"]) for s in sc])
+    if notes:
+        if blocks:
+            blocks.append("")
+        blocks.append("### Notes for THIS customer")
+        blocks.extend(["- " + n for n in notes])
+    formatted = ("## Behavioral context (live — operator feedback)\n"
+                 + "\n".join(blocks)) if blocks else ""
+    return {"global": glb, "scenario": sc, "customer_notes": notes,
+            "formatted": formatted}
+
+
+def feedback_apply_cap(table, cap, scope=None, scope_value=None, customer_id=None):
+    """Keep at most `cap` rows active in a scope/scenario/customer slot;
+    deactivate the oldest (lowest id) beyond the cap."""
+    if cap is None or cap <= 0:
+        return
+    if table == "behavior_rules" and scope == "global":
+        sql = ("UPDATE behavior_rules SET active=false WHERE id IN ("
+               "SELECT id FROM behavior_rules WHERE scope='global' "
+               "AND active=true ORDER BY id DESC OFFSET " + str(cap) + ")")
+    elif table == "behavior_rules" and scope == "scenario" and scope_value:
+        sv = scope_value.replace("'", "''")
+        sql = ("UPDATE behavior_rules SET active=false WHERE id IN ("
+               "SELECT id FROM behavior_rules WHERE scope='scenario' "
+               f"AND scope_value='{sv}' AND active=true "
+               "ORDER BY id DESC OFFSET " + str(cap) + ")")
+    elif table == "customer_notes" and customer_id:
+        cid = customer_id.replace("'", "''")
+        sql = ("UPDATE customer_notes SET active=false WHERE id IN ("
+               "SELECT id FROM customer_notes "
+               f"WHERE customer_id='{cid}' AND active=true "
+               "ORDER BY id DESC OFFSET " + str(cap) + ")")
+    else:
+        return
+    _psql(sql)
 
 
 def fetch_behavior_rules(customer_id):
@@ -829,7 +976,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
-                             "/debounce", "/payment-link"):
+                             "/debounce", "/payment-link", "/feedback"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -863,6 +1010,8 @@ class Handler(BaseHTTPRequestHandler):
             self._debounce(payload)
         elif self.path == "/payment-link":
             self._payment_link(payload)
+        elif self.path == "/feedback":
+            self._feedback(payload)
         else:
             self._draft(payload)
 
@@ -1388,6 +1537,165 @@ class Handler(BaseHTTPRequestHandler):
             % (cid, amount, lid))
         self._send(200, {"ok": True, "link_url": url, "link_id": lid,
                          "amount": amount})
+
+    def _feedback(self, payload):
+        """Operator /feedback command — classify, save, behavioural-context.
+
+        Actions:
+          classify             — Hermes classifies the free-form feedback;
+                                 proposal staged in Redis (TTL FEEDBACK_TTL).
+          save                 — operator confirmed Yes; writes to
+                                 customer_notes / behavior_rules and applies
+                                 the active-rule cap.
+          discard              — operator hit No; deletes the Redis proposal.
+          behavioral-context   — drafts read this on every customer message;
+                                 returns {global, scenario, customer_notes}.
+
+        Fail-safe — always returns 200 with an `ok` flag so a classifier or
+        DB error never breaks the operator-confirmation card."""
+        action = (payload.get("action") or "").strip().lower()
+        if action == "classify":
+            text = (payload.get("text") or "").strip()
+            if not text:
+                self._send(200, {"ok": False, "error": "text is required"})
+                return
+            result = classify_feedback(text)
+            if not result:
+                log("feedback classify failed for:", text[:80])
+                self._send(200, {"ok": False,
+                                 "error": "classifier did not return valid JSON"})
+                return
+            if result["classification"] == "CUSTOMER_NOTE":
+                cid, matches = resolve_customer_by_name(result["customer_name"])
+                result["customer_id"] = cid or ""
+                result["matches"] = matches
+                result["needs_disambiguation"] = (cid is None
+                                                  and len(matches) != 1)
+            pid = str(uuid.uuid4())
+            stored = dict(result)
+            stored["raw"] = text
+            _, err = _redis(["SET", "feedback:" + pid, json.dumps(stored),
+                             "EX", str(FEEDBACK_TTL)])
+            if err:
+                log("feedback classify redis error:", err)
+                self._send(200, {"ok": False, "error": "redis: " + err})
+                return
+            log("feedback classify -> %s proposal=%s"
+                % (result["classification"], pid))
+            self._send(200, {"ok": True, "proposal_id": pid, **result})
+            return
+        if action == "save":
+            pid = (payload.get("proposal_id") or "").strip()
+            if not pid:
+                self._send(400, {"ok": False, "error": "proposal_id required"})
+                return
+            out, err = _redis(["GET", "feedback:" + pid])
+            if err:
+                self._send(502, {"ok": False, "error": "redis: " + err})
+                return
+            raw = (out or "").strip()
+            if not raw:
+                self._send(200, {"ok": False,
+                                 "error": "proposal not found or expired"})
+                return
+            try:
+                p = json.loads(raw)
+            except Exception:
+                self._send(200, {"ok": False, "error": "bad proposal data"})
+                return
+            cls = p.get("classification")
+            if cls == "CUSTOMER_NOTE":
+                cid = (p.get("customer_id") or "").strip()
+                if not cid:
+                    self._send(200, {"ok": False,
+                                     "error": "no customer_id resolved",
+                                     "matches": p.get("matches", [])})
+                    return
+                note = (p.get("text") or "").strip()
+                sql = ("INSERT INTO customer_notes (customer_id, note_text) "
+                       "VALUES (" + _lit(cid) + ", " + _lit(note)
+                       + ") RETURNING id")
+                rid_out, err2 = _psql(sql)
+                if err2:
+                    self._send(502, {"ok": False, "error": "db: " + err2})
+                    return
+                rid = ((rid_out or "").strip().splitlines() or [""])[0]
+                feedback_apply_cap("customer_notes",
+                                   FEEDBACK_MAX_PER_CUSTOMER,
+                                   customer_id=cid)
+                _redis(["DEL", "feedback:" + pid])
+                log("feedback SAVED CUSTOMER_NOTE id=%s cid=%s" % (rid, cid))
+                self._send(200, {"ok": True, "table": "customer_notes",
+                                 "row_id": rid, "customer_id": cid,
+                                 "classification": cls,
+                                 "summary": p.get("summary", "")})
+                return
+            if cls == "GLOBAL_RULE":
+                rule = (p.get("text") or "").strip()
+                sql = ("INSERT INTO behavior_rules "
+                       "(scope, rule_text, created_via, active) VALUES ("
+                       + _lit("global") + ", " + _lit(rule) + ", "
+                       + _lit("feedback") + ", true) RETURNING id")
+                rid_out, err2 = _psql(sql)
+                if err2:
+                    self._send(502, {"ok": False, "error": "db: " + err2})
+                    return
+                rid = ((rid_out or "").strip().splitlines() or [""])[0]
+                feedback_apply_cap("behavior_rules", FEEDBACK_MAX_GLOBAL,
+                                   scope="global")
+                _redis(["DEL", "feedback:" + pid])
+                log("feedback SAVED GLOBAL_RULE id=%s" % rid)
+                self._send(200, {"ok": True, "table": "behavior_rules",
+                                 "row_id": rid, "classification": cls,
+                                 "summary": p.get("summary", "")})
+                return
+            if cls == "SCENARIO_RULE":
+                scenario = (p.get("scenario") or "").strip()
+                if not scenario:
+                    self._send(200, {"ok": False,
+                                     "error": "no scenario in proposal"})
+                    return
+                rule = (p.get("text") or "").strip()
+                sql = ("INSERT INTO behavior_rules "
+                       "(scope, scope_value, rule_text, created_via, active) "
+                       "VALUES (" + _lit("scenario") + ", " + _lit(scenario)
+                       + ", " + _lit(rule) + ", " + _lit("feedback")
+                       + ", true) RETURNING id")
+                rid_out, err2 = _psql(sql)
+                if err2:
+                    self._send(502, {"ok": False, "error": "db: " + err2})
+                    return
+                rid = ((rid_out or "").strip().splitlines() or [""])[0]
+                feedback_apply_cap("behavior_rules", FEEDBACK_MAX_SCENARIO,
+                                   scope="scenario", scope_value=scenario)
+                _redis(["DEL", "feedback:" + pid])
+                log("feedback SAVED SCENARIO_RULE id=%s scenario=%s"
+                    % (rid, scenario))
+                self._send(200, {"ok": True, "table": "behavior_rules",
+                                 "row_id": rid, "scenario": scenario,
+                                 "classification": cls,
+                                 "summary": p.get("summary", "")})
+                return
+            self._send(200, {"ok": False,
+                             "error": "unknown classification: " + str(cls)})
+            return
+        if action == "discard":
+            pid = (payload.get("proposal_id") or "").strip()
+            if not pid:
+                self._send(400, {"ok": False, "error": "proposal_id required"})
+                return
+            _redis(["DEL", "feedback:" + pid])
+            log("feedback discarded %s" % pid)
+            self._send(200, {"ok": True})
+            return
+        if action == "behavioral-context":
+            cid = (payload.get("customer_id") or "").strip()
+            ctx = behavioral_context(cid)
+            self._send(200, {"ok": True, **ctx})
+            return
+        self._send(400, {"ok": False,
+                         "error": "action must be "
+                                  "classify|save|discard|behavioral-context"})
 
 
 def main():
