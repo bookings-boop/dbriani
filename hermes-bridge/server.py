@@ -147,6 +147,22 @@ def _lit(v):
 
 DRAFTS_ACTIVE = "drafts:active"
 
+# Ghost-recovery — verified phrasings per silence window. See the
+# ghost-recovery table in hermes-bridge/system-prompt.md (shipped in 6cc3940).
+# Used by _draft_followup when called with a silence_window field by the
+# proactive follow-up engine. Legacy callers (the [Draft nudge] button)
+# don't pass silence_window and fall back to the label-aware directive.
+GHOST_RECOVERY_PHRASES = {
+    "hot_30m_2h":    "Have you given up on booking a private yacht?",
+    "hot_2h_24h":    "[Name], are you still there? "
+                     "OR: Hi! May I know the hourly rate you are considering?",
+    "warm_24h_72h":  ("Just checking in if you have any update for us, "
+                     "are you still considering to book a yacht or has "
+                     "there been any change in the plan perhaps?"),
+    "cold_lastshot": "Have you given up on booking a private yacht?",
+}
+GHOST_RECOVERY_WINDOWS = frozenset(GHOST_RECOVERY_PHRASES.keys())
+
 
 def _draft_key(did):
     return "draft:" + str(did)
@@ -2751,24 +2767,47 @@ class Handler(BaseHTTPRequestHandler):
             name = (row or {}).get("name", "") if row else ""
             # Label-specific directive — short, append to incoming_message slot
             # so the existing build_query picks it up.
-            directive_map = {
-                "HOT":  ("Send a single message that picks up where they left "
-                         "off, references the specific yacht/date, and reduces "
-                         "friction toward booking. ≤ 2 sentences."),
-                "WARM": ("Send one helpful follow-up that adds value — answer "
-                         "a likely next question, suggest a date alternative, "
-                         "or share a relevant detail. Not 'just checking in'. "
-                         "≤ 2 sentences."),
-                "COLD": ("This lead went cold ~7+ days ago. One soft "
-                         "re-engagement — reference what they were originally "
-                         "interested in, mention something genuinely new. "
-                         "≤ 2 sentences."),
-                "NEEDS_ATTENTION": ("Same-day or hot lead with no reply yet. "
-                                    "Confirm availability or ask the one "
-                                    "specific detail needed to lock it in. "
-                                    "≤ 2 sentences."),
-            }
-            directive = directive_map.get(label, directive_map["WARM"])
+            silence_window = (payload.get("silence_window") or "").strip().lower()
+            silence_hours = payload.get("silence_hours")
+            if silence_window in GHOST_RECOVERY_WINDOWS:
+                # Proactive engine path — anchor to the verified ghost-recovery
+                # phrasing for this exact window. Suppress upsells.
+                phrase = GHOST_RECOVERY_PHRASES[silence_window]
+                shrs = (f"{silence_hours:.1f}"
+                        if isinstance(silence_hours, (int, float)) else "a while")
+                directive = (
+                    f"This is a PROACTIVE GHOST-RECOVERY follow-up — NOT a "
+                    f"fresh sale. The customer has been silent for {shrs} "
+                    f"hours (window: {silence_window}). Use the verified "
+                    f"ghost-recovery phrasing for THIS window from your "
+                    f"system prompt — specifically use: \"{phrase}\" (you may "
+                    f"light-touch personalize but keep the phrase intact). "
+                    f"DO NOT pitch add-ons, upsells, perks, or new options. "
+                    f"DO NOT apologize for the silence. Send ONE short "
+                    f"message, max 1 sentence."
+                )
+            else:
+                # Legacy fallback — generic label-aware follow-up, used by
+                # the existing [Draft nudge] button in /review (no window).
+                directive_map = {
+                    "HOT":  ("Send a single message that picks up where "
+                             "they left off, references the specific "
+                             "yacht/date, and reduces friction toward "
+                             "booking. ≤ 2 sentences."),
+                    "WARM": ("Send one helpful follow-up that adds value — "
+                             "answer a likely next question, suggest a date "
+                             "alternative, or share a relevant detail. Not "
+                             "'just checking in'. ≤ 2 sentences."),
+                    "COLD": ("This lead went cold ~7+ days ago. One soft "
+                             "re-engagement — reference what they were "
+                             "originally interested in, mention something "
+                             "genuinely new. ≤ 2 sentences."),
+                    "NEEDS_ATTENTION": ("Same-day or hot lead with no reply "
+                                        "yet. Confirm availability or ask "
+                                        "the one specific detail needed to "
+                                        "lock it in. ≤ 2 sentences."),
+                }
+                directive = directive_map.get(label, directive_map["WARM"])
             # Build the prompt — mirrors _draft() but with the directive
             # injected as the incoming_message context.
             inner = {
