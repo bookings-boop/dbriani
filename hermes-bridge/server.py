@@ -950,6 +950,245 @@ def extract_session(*streams):
     return m.group(1) if m else None
 
 
+# ============================================================================
+# Pipeline Review — labels, signals, confidence dampening, sameday interrupt
+# (see docs/pipeline-review-plan.md §1, §2a–§2c)
+# ============================================================================
+
+LABELS = frozenset({
+    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
+    "PAUSED_SPAM", "PAUSED_B2B", "PAUSED_PERSONAL",
+})
+
+# Signal regexes (compiled module-level).
+MONEY_RE = re.compile(
+    r"\b(AED|aed|price|budget|cost|how\s*much|cheap|expensive)\b"
+    r"|\$\d|\b\d{4,}\b",
+    re.IGNORECASE,
+)
+LETS_DO_IT_RE = re.compile(
+    r"(let'?s\s+(do\s+it|book|lock)|i'?ll\s+take\s+it|"
+    r"sounds\s+(good|great)[,\s]+book|book\s+it)",
+    re.IGNORECASE,
+)
+SAME_DAY_RE = re.compile(
+    r"\b(today|tonight|right\s*now|now|asap|immediately|this\s+(afternoon|evening|night))\b",
+    re.IGNORECASE,
+)
+PRICING_INQUIRED_RE = re.compile(
+    r"\b(price|cost|how\s*much|rate|rates|charge|fee)\b",
+    re.IGNORECASE,
+)
+YACHT_KEYWORD_RE = re.compile(
+    r"\b(yacht|boat|satoshi|pershing|sunseeker|thunder|catamaran|cruise|charter)\b",
+    re.IGNORECASE,
+)
+
+# Confidence dampening — see plan §2a step 4.
+CORRECTION_WINDOW_DAYS = 90
+CORRECTION_DAMPENING_DIVISOR = 5.0
+CONFIDENCE_FLOOR = 0.2
+CONFIDENCE_DEMOTE_THRESHOLD = 0.4
+
+# Sameday-interrupt cooldown — one ping per customer per 4 h.
+SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
+
+# Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
+_TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
+
+
+def get_correction_count(auto_signal, window_days=CORRECTION_WINDOW_DAYS):
+    """Count label_corrections rows for this signal in the last N days.
+    Returns 0 on DB error — fail-open (don't dampen if we can't read)."""
+    sig = (auto_signal or "").replace("'", "''")
+    out, err = _psql(
+        f"SELECT count(*) FROM label_corrections WHERE auto_signal = '{sig}' "
+        f"AND created_at > now() - interval '{int(window_days)} days'"
+    )
+    if err:
+        return 0
+    try:
+        return int((out or "0").strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def compute_confidence(auto_signal):
+    """Confidence ∈ [CONFIDENCE_FLOOR, 1.0] from recent corrections."""
+    n = get_correction_count(auto_signal)
+    raw = 1.0 - (n / CORRECTION_DAMPENING_DIVISOR)
+    return max(CONFIDENCE_FLOOR, min(1.0, raw))
+
+
+def _has_recent_payment_intent(customer_id, hours=24):
+    """True if customer_triggers has payment_* or booking_intent in last N h."""
+    cid = (customer_id or "").replace("'", "''")
+    out, err = _psql(
+        f"SELECT count(*) FROM customer_triggers WHERE customer_id = '{cid}' "
+        "AND type IN ('payment_promised','payment_link_sent','booking_intent') "
+        f"AND created_at > now() - interval '{int(hours)} hours'"
+    )
+    if err:
+        return False
+    try:
+        return int((out or "0").strip().splitlines()[0]) > 0
+    except (ValueError, IndexError):
+        return False
+
+
+def compute_label(latest_message, facts):
+    """Match signal heuristics against latest message + cached facts.
+    Returns (target_label, signal, evidence). NO DB writes. NO dampening
+    (caller applies that)."""
+    msg = latest_message or ""
+    customer_id = (facts or {}).get("customer_id", "")
+    mc = (facts or {}).get("message_count", 0) or 0
+    yachts = ((facts or {}).get("yachts") or "").strip()
+    dates = ((facts or {}).get("dates") or "").strip()
+
+    if customer_id and _has_recent_payment_intent(customer_id):
+        return ("HOT", "payment_intent", "trigger in last 24h")
+
+    m = MONEY_RE.search(msg)
+    if m:
+        snippet = msg[max(0, m.start() - 10):m.end() + 30].strip()
+        return ("HOT", "money_mentioned", snippet[:200])
+
+    m = LETS_DO_IT_RE.search(msg)
+    if m:
+        return ("HOT", "lets_do_it", m.group(0)[:200])
+
+    if SAME_DAY_RE.search(msg) and (YACHT_KEYWORD_RE.search(msg) or yachts):
+        return ("HOT", "same_day_booking", msg[:200])
+
+    if yachts and "," in yachts and mc >= 4 and "?" not in msg:
+        return ("HOT", "multi_yacht_engaged", yachts[:200])
+
+    if PRICING_INQUIRED_RE.search(msg):
+        return ("WARM", "pricing_inquired", msg[:200])
+
+    if dates:
+        return ("WARM", "date_asked_no_commit", dates[:200])
+
+    if mc >= 5:
+        return ("WARM", "engaged_5plus", f"msg_count={mc}")
+
+    return ("NEW", "new_window", f"msg_count={mc}")
+
+
+def get_current_label_row(customer_id):
+    """Read label state + a few denorm fields. Returns dict or None."""
+    cid = (customer_id or "").replace("'", "''")
+    sql = (
+        "SELECT label, "
+        "COALESCE(to_char(label_updated_at,'YYYY-MM-DD\"T\"HH24:MI:SSOF'),''), "
+        "COALESCE(to_char(label_locked_until,'YYYY-MM-DD\"T\"HH24:MI:SSOF'),''), "
+        "COALESCE(message_count,0), COALESCE(name,''), "
+        "COALESCE(yachts,''), COALESCE(dates,'') "
+        f"FROM customer_facts WHERE customer_id = '{cid}'"
+    )
+    out, err = _psql(sql)
+    if err or not (out or "").strip():
+        return None
+    parts = (out.splitlines() or [""])[0].split("|")
+    if len(parts) < 7:
+        return None
+    try:
+        mc = int((parts[3].strip() or "0"))
+    except ValueError:
+        mc = 0
+    return {
+        "customer_id": customer_id,
+        "label": parts[0].strip(),
+        "label_updated_at": parts[1].strip(),
+        "label_locked_until": parts[2].strip(),
+        "message_count": mc,
+        "name": parts[4].strip(),
+        "yachts": parts[5].strip(),
+        "dates": parts[6].strip(),
+    }
+
+
+def apply_label_transition(customer_id, from_label, to_label, signal,
+                           evidence, message_count, created_by="system"):
+    """UPDATE customer_facts.label + INSERT customer_label_history."""
+    cid = (customer_id or "").replace("'", "''")
+    upd = (
+        f"UPDATE customer_facts SET label = {_lit(to_label)}, "
+        f"label_updated_at = now() WHERE customer_id = '{cid}'; "
+    )
+    fl = _lit(from_label) if from_label else "NULL"
+    ins = (
+        "INSERT INTO customer_label_history "
+        "(customer_id, from_label, to_label, signal, evidence, "
+        "message_count, created_by) VALUES "
+        f"('{cid}', {fl}, {_lit(to_label)}, {_lit(signal or '')}, "
+        f"{_lit(evidence or '')}, {int(message_count or 0)}, "
+        f"{_lit(created_by)})"
+    )
+    return _psql(upd + ins)
+
+
+def upsert_conversation_state(customer_id, event):
+    """Per-event timestamp updater. event ∈ {customer_message, operator_reply,
+    nudge_drafted}. Atomic UPSERT via ON CONFLICT."""
+    cid = (customer_id or "").replace("'", "''")
+    if event == "customer_message":
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_customer_message_at, updated_at) "
+            f"VALUES ('{cid}', now(), now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_customer_message_at = now(), updated_at = now()"
+        )
+    elif event == "operator_reply":
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_operator_reply_at, reengage_attempts, updated_at) "
+            f"VALUES ('{cid}', now(), 0, now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_operator_reply_at = now(), reengage_attempts = 0, "
+            "    updated_at = now()"
+        )
+    elif event == "nudge_drafted":
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_nudge_drafted_at, updated_at) "
+            f"VALUES ('{cid}', now(), now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_nudge_drafted_at = now(), "
+            "    reengage_attempts = conversation_state.reengage_attempts + "
+            "      CASE WHEN conversation_state.last_customer_message_at IS NOT NULL "
+            "            AND conversation_state.last_customer_message_at "
+            "                < now() - interval '24 hours' "
+            "           THEN 1 ELSE 0 END, "
+            "    updated_at = now()"
+        )
+    else:
+        return ("", f"unknown event: {event}")
+    return _psql(sql)
+
+
+def sameday_interrupt_check(customer_id, name, dates):
+    """(interrupt_required, alert_text). Blocks if a draft has been posted
+    (Redis key draft:posted:<cid>) or if we've already alerted in the last
+    4 h (interrupt:fired:<cid>). Arms the cooldown on a fresh fire."""
+    cid = (customer_id or "").strip()
+    if not cid:
+        return (False, None)
+    out, _err = _redis(["GET", f"draft:posted:{cid}"])
+    if (out or "").strip():
+        return (False, None)
+    out, _err = _redis(["GET", f"interrupt:fired:{cid}"])
+    if (out or "").strip():
+        return (False, None)
+    _redis(["SET", f"interrupt:fired:{cid}", "1",
+            "EX", str(SAMEDAY_INTERRUPT_TTL)])
+    n = (name or "").strip() or cid[:14]
+    d = (dates or "").strip() or "today/tonight"
+    return (True, f"⚡ SAME-DAY ASK — {n} · {d} · we haven't drafted yet")
+
+
 # --- HTTP ------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -976,7 +1215,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
-                             "/debounce", "/payment-link", "/feedback"):
+                             "/debounce", "/payment-link", "/feedback",
+                             "/label-eval", "/conversation-state"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1012,6 +1252,10 @@ class Handler(BaseHTTPRequestHandler):
             self._payment_link(payload)
         elif self.path == "/feedback":
             self._feedback(payload)
+        elif self.path == "/label-eval":
+            self._label_eval(payload)
+        elif self.path == "/conversation-state":
+            self._conversation_state(payload)
         else:
             self._draft(payload)
 
@@ -1696,6 +1940,142 @@ class Handler(BaseHTTPRequestHandler):
         self._send(400, {"ok": False,
                          "error": "action must be "
                                   "classify|save|discard|behavioral-context"})
+
+    # --- Pipeline Review handlers ------------------------------------------
+    # See docs/pipeline-review-plan.md §2a, §2b. Both fail-open (always 200).
+
+    def _update_last_analysis(self, customer_id, signal, confidence):
+        """UPSERT conversation_state.last_analysis_{signal,confidence}.
+        Idempotent. Called by _label_eval on every evaluation regardless of
+        whether the label actually changed — keeps the analysis bookkeeping
+        fresh for the hourly sweep's skip-if-unchanged logic."""
+        cid = (customer_id or "").replace("'", "''")
+        sig = _lit(signal or "")
+        conf = float(confidence)
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_analysis_signal, last_analysis_confidence, "
+            " last_analyzed_at, updated_at) "
+            f"VALUES ('{cid}', {sig}, {conf:.4f}, now(), now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            f"SET last_analysis_signal = {sig}, "
+            f"    last_analysis_confidence = {conf:.4f}, "
+            "    last_analyzed_at = now(), updated_at = now()"
+        )
+        _psql(sql)
+
+    def _label_eval(self, payload):
+        """POST /label-eval — silent per-message label updater + sameday
+        interrupt detection. Always returns 200; fail-open."""
+        cid = (payload.get("customer_id") or "").strip()
+        msg = (payload.get("latest_message") or "").strip()
+        skip_if_locked = bool(payload.get("skip_if_locked", True))
+        if not cid:
+            self._send(200, {"ok": False, "error": "customer_id required"})
+            return
+        try:
+            row = get_current_label_row(cid)
+            if row is None:
+                # No customer_facts row yet — surface NEW without writing.
+                # customer_facts upsert happens in _customer_facts on this
+                # same message; we don't race it here.
+                self._send(200, {
+                    "ok": True, "customer_id": cid,
+                    "label": "NEW", "previous_label": None,
+                    "changed": False, "signal": "no_facts_row",
+                    "confidence": 1.0, "evidence": "",
+                    "interrupt_required": False, "alert_text": None,
+                })
+                return
+            previous_label = row.get("label")
+
+            # If locked (PAUSED via /label or /snooze), short-circuit.
+            if skip_if_locked and row.get("label_locked_until"):
+                cid_esc = cid.replace("'", "''")
+                lock_out, _err = _psql(
+                    "SELECT label_locked_until > now() FROM customer_facts "
+                    f"WHERE customer_id = '{cid_esc}'"
+                )
+                if (lock_out or "").strip().startswith("t"):
+                    self._send(200, {
+                        "ok": True, "customer_id": cid,
+                        "label": previous_label,
+                        "previous_label": previous_label,
+                        "changed": False, "signal": "locked",
+                        "confidence": 1.0,
+                        "evidence": "label_locked_until in future",
+                        "interrupt_required": False, "alert_text": None,
+                    })
+                    return
+
+            # Compute target + confidence dampening.
+            target, sig, ev = compute_label(msg, row)
+            confidence = compute_confidence(sig)
+            applied = target
+            if confidence < CONFIDENCE_DEMOTE_THRESHOLD:
+                applied = _TIER_BELOW.get(target, target)
+
+            # Sameday interrupt — only on same_day_booking signal.
+            interrupt_required = False
+            alert_text = None
+            if sig == "same_day_booking":
+                interrupt_required, alert_text = sameday_interrupt_check(
+                    cid, row.get("name", ""), row.get("dates", ""))
+
+            changed = (applied != previous_label)
+            if changed:
+                _out, err = apply_label_transition(
+                    cid, previous_label, applied,
+                    f"auto:{sig}", ev, row.get("message_count", 0))
+                if err:
+                    log("label_eval transition err:", err)
+
+            # Bookkeep analysis state (fresh regardless of label change).
+            self._update_last_analysis(cid, sig, confidence)
+
+            log(f"label-eval cid={cid!r} {previous_label}→{applied} "
+                f"signal={sig} conf={confidence:.2f} changed={changed} "
+                f"interrupt={interrupt_required}")
+            self._send(200, {
+                "ok": True, "customer_id": cid,
+                "label": applied,
+                "previous_label": previous_label,
+                "changed": changed,
+                "signal": sig,
+                "confidence": round(confidence, 3),
+                "evidence": ev,
+                "interrupt_required": interrupt_required,
+                "alert_text": alert_text,
+            })
+        except Exception as e:
+            log("label_eval ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "label": None, "interrupt_required": False,
+                             "alert_text": None})
+
+    def _conversation_state(self, payload):
+        """POST /conversation-state — silent timestamp updater."""
+        cid = (payload.get("customer_id") or "").strip()
+        event = (payload.get("event") or "").strip()
+        if not cid:
+            self._send(200, {"ok": False, "error": "customer_id required"})
+            return
+        if event not in ("customer_message", "operator_reply", "nudge_drafted"):
+            self._send(200, {"ok": False,
+                             "error": "event must be customer_message|"
+                                      "operator_reply|nudge_drafted"})
+            return
+        try:
+            _out, err = upsert_conversation_state(cid, event)
+            if err:
+                log("conversation_state err:", err)
+                self._send(200, {"ok": False, "degraded": True,
+                                 "error": err[:200]})
+                return
+            self._send(200, {"ok": True, "customer_id": cid, "event": event})
+        except Exception as e:
+            log("conversation_state EXC:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e)})
 
 
 def main():
