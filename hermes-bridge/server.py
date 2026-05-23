@@ -375,6 +375,45 @@ def _waha_get(path, timeout=12):
         return None, f"WAHA req failed: {e!r}"
 
 
+# In-process cache for WAHA pushName lookups — keyed by cid, value is
+# (push_name, expires_at_ts). 5-minute TTL is plenty; WAHA's chat list
+# rarely changes mid-conversation and a restart purges. Prevents hammering
+# WAHA on every inbound message (Customer Facts fires per-msg).
+_WAHA_PUSHNAME_CACHE = {}
+_WAHA_PUSHNAME_TTL = 300  # seconds
+
+
+def waha_lookup_push_name(customer_id):
+    """Return a useful display name for the given customer_id by querying
+    WAHA's /api/default/chats. Returns '' if WAHA is unconfigured / chat
+    not found / name is just a phone number / name is a system label.
+    Cached in-process for 5 minutes per cid."""
+    cid = (customer_id or "").strip()
+    if not cid:
+        return ""
+    now_ts = time.time()
+    hit = _WAHA_PUSHNAME_CACHE.get(cid)
+    if hit and hit[1] > now_ts:
+        return hit[0]
+    chats, err = _waha_get("/api/default/chats?limit=200")
+    if err or not isinstance(chats, list):
+        # Don't poison the cache on transient failure
+        return ""
+    push_name = ""
+    for c in chats:
+        sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
+        if sid == cid:
+            pn = (c.get("name") or "").strip()
+            # Same filter as waha_fetch_history — skip raw phone-string
+            # display names and system labels.
+            if pn and not pn.startswith("+") and pn not in (
+                    "WhatsApp Business", "Dubriani admin chat"):
+                push_name = pn
+            break
+    _WAHA_PUSHNAME_CACHE[cid] = (push_name, now_ts + _WAHA_PUSHNAME_TTL)
+    return push_name
+
+
 def waha_fetch_history(customer_id, limit=30):
     """Pull last N messages from WAHA + pushName. Returns dict:
     {history: '...', last_message: '...', push_name: '...', count: N, err: None|str}."""
@@ -2484,6 +2523,21 @@ class Handler(BaseHTTPRequestHandler):
                 merged = _merge_facts(cached, None)
             if not (merged.get("name") or "").strip():
                 merged["name"] = cname
+            # WAHA pushName fallback — the WAHA webhook payload doesn't carry
+            # notifyName/pushName, so the workflow-supplied cname is empty for
+            # virtually every customer. Result: /review cards showed "Unknown"
+            # for 10 of 11 customers (operator-visible confusion). When neither
+            # the LLM extraction nor the workflow gave us a name, look it up
+            # in WAHA's chat list. Cached in-process for 5 minutes.
+            if not (merged.get("name") or "").strip():
+                try:
+                    pn = waha_lookup_push_name(cid)
+                    if pn:
+                        merged["name"] = pn
+                        log(f"customer_facts WAHA pushName fallback cid={cid!r} "
+                            f"name={pn!r}")
+                except Exception as _e:
+                    log("customer_facts WAHA pushName lookup err:", repr(_e))
             new_count, err = upsert_customer_facts(cid, merged["name"], merged)
             if err:
                 log("customer_facts upsert failed:", err)
