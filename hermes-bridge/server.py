@@ -1536,7 +1536,10 @@ def _humanize_signal(signal, evidence, created_by):
         "hourly_noop":             "(no change on sweep)",
         # manual signal types
         "/label":                  "You manually set the label",
-        "/snooze":                 ("Snoozed: " + ev) if ev else "Snoozed",
+        "/snooze":                 (
+            "You snoozed " + ev.replace("snoozed ", "").strip()
+            if ev else "You snoozed this lead"
+        ),
         "/feedback":               "Operator feedback applied",
     }
     desc = descriptions.get(key)
