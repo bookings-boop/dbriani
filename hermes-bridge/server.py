@@ -2310,6 +2310,75 @@ class Handler(BaseHTTPRequestHandler):
         Auto Wait countdown."""
         action = (payload.get("action") or "").strip().lower()
         did = (payload.get("draft_id") or "").strip()
+
+        # NEW: disarm_by_customer — used when a new customer message arrives
+        # to cancel any in-flight Auto Wait timers for that customer. Without
+        # this, the original execution wakes up from Auto Wait, reads
+        # armed=true, and sends the (now-stale) draft AFTER the customer has
+        # already moved on with a new message. Operator-visible bug:
+        # "draft was created and AUTO was enabled to send to customer a
+        # response, then customer sent another message, now another draft
+        # was created, planning a second response. which would be ugly."
+        if action == "disarm_by_customer":
+            cid = (payload.get("customer_id") or "").strip()
+            if not cid:
+                self._send(400, {"ok": False,
+                                 "error": "customer_id is required"})
+                return
+            # SCAN autosend:* keys, GET each, match by customer_phone,
+            # DEL matches. The pendingQueue→Redis migration only landed
+            # Phases 1-3 (drafts:bycustomer is partial), so the autosend
+            # state is the canonical source of truth for in-flight Auto
+            # Wait timers. SCAN is O(N) but at typical load there are
+            # 0-5 armed autosends.
+            cursor = "0"
+            scanned = 0
+            disarmed = []
+            iterations = 0
+            while True:
+                iterations += 1
+                if iterations > 64:  # safety cap
+                    break
+                scan_out, err = _redis(["SCAN", cursor, "MATCH",
+                                        "autosend:*", "COUNT", "100"])
+                if err:
+                    log("disarm_by_customer SCAN failed:", err)
+                    break
+                lines = [l for l in (scan_out or "").splitlines()
+                         if l.strip()]
+                if not lines:
+                    break
+                cursor = lines[0].strip()
+                keys = lines[1:]
+                for k in keys:
+                    scanned += 1
+                    v_out, _e = _redis(["GET", k])
+                    raw = (v_out or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    if str(data.get("customer_phone", "")) != cid:
+                        continue
+                    _redis(["DEL", k])
+                    d_id = k.split(":", 1)[1] if ":" in k else k
+                    disarmed.append(d_id)
+                if cursor == "0":
+                    break
+            log(f"autosend-state DISARM_BY_CUSTOMER cid={cid} "
+                f"scanned={scanned} disarmed={len(disarmed)} "
+                f"ids={disarmed}")
+            self._send(200, {"ok": True, "action": "disarm_by_customer",
+                             "customer_id": cid,
+                             "scanned": scanned,
+                             "disarmed": disarmed,
+                             "count": len(disarmed)})
+            return
+
         if not did:
             self._send(400, {"ok": False, "error": "draft_id is required"})
             return
