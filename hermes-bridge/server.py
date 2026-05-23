@@ -3553,7 +3553,11 @@ class Handler(BaseHTTPRequestHandler):
                 "NEW": "🌱", "COLD": "❄️", "PAUSED_SPAM": "🚫",
                 "PAUSED_B2B": "💼", "PAUSED_PERSONAL": "👤",
             }.get(label, "•")
-            name = row.get("name") or "Unknown"
+            # Use the last-4-digits fallback ("…4557") for unnamed customers
+            # instead of "Unknown" — the operator can match the digits to the
+            # WhatsApp display number when no real name has been captured.
+            name = (row.get("name") or "").strip() \
+                or _name_fallback(row.get("customer_id"))
 
             lines = [f"🔎 *{name}*"]
             # status line
