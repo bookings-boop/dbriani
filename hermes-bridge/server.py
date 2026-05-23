@@ -1234,13 +1234,14 @@ def score_lead(row, now_dt):
     if (plink is not None and ppromised is None and plink > 24 * 3600):
         score += 150
 
-    # damping
+    # damping — keep nudge damping (don't keep re-pushing the same nudge
+    # for 24h after operator already drafted one), but DROP review-seen
+    # damping (that suppressed the only WARM lead just because the operator
+    # looked at the report a moment ago — the report should be consistent
+    # across consecutive /review calls).
     nudge = row.get("last_nudge_drafted_at_seconds")
     if nudge is not None and nudge < 24 * 3600:
         score -= 100
-    seen = row.get("last_review_seen_at_seconds")
-    if seen is not None and seen < 6 * 3600:
-        score -= 200
 
     return score
 
