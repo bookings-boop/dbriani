@@ -1836,11 +1836,13 @@ def render_review(scored, totals, mode="ondemand"):
             )
             lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))
             sid = row["customer_id"]
-            # CONFIRMED: payment done, no nudges needed — show Info + Unmark only.
+            # CONFIRMED keeps Draft nudge (post-confirm messaging: boarding
+            # details, thank-yous, upsells, re-engagement) but drops Snooze
+            # (no auto-nudges to suppress on a confirmed booking).
             if label_key == "CONFIRMED":
                 kb = [[
-                    {"text": "ℹ️ Info", "callback_data": f"inf:{sid}"},
-                    {"text": "↩️ Unmark", "callback_data": f"inf:{sid}"},
+                    {"text": "💬 Draft message", "callback_data": f"nudge:{sid}"},
+                    {"text": "ℹ️ Info",          "callback_data": f"inf:{sid}"},
                 ]]
             else:
                 kb = [[
