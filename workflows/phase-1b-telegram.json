@@ -542,7 +542,7 @@
                 "conditions": [
                   {
                     "id": "1af60442-73f2-489b-bb7e-3f9a62750e82",
-                    "leftValue": "={{ $json.action }}",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
                     "rightValue": "feedback_yes",
                     "operator": {
                       "type": "string",
@@ -566,7 +566,7 @@
                 "conditions": [
                   {
                     "id": "f36559a8-2c1e-4c70-84f4-7387b3e38d59",
-                    "leftValue": "={{ $json.action }}",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
                     "rightValue": "feedback_modify",
                     "operator": {
                       "type": "string",
@@ -590,7 +590,7 @@
                 "conditions": [
                   {
                     "id": "0124d0ef-ec05-4129-b7c1-dca45fc056b9",
-                    "leftValue": "={{ $json.action }}",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
                     "rightValue": "feedback_no",
                     "operator": {
                       "type": "string",
