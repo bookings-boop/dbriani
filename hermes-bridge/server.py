@@ -1131,8 +1131,13 @@ def apply_label_transition(customer_id, from_label, to_label, signal,
 
 def upsert_conversation_state(customer_id, event):
     """Per-event timestamp updater. event ∈ {customer_message, operator_reply,
-    nudge_drafted}. Atomic UPSERT via ON CONFLICT."""
+    nudge_drafted, draft_posted}. Atomic UPSERT via ON CONFLICT.
+    draft_posted is Redis-only (sets the draft:posted:<id> flag the
+    sameday-interrupt check reads — no DB row needed)."""
     cid = (customer_id or "").replace("'", "''")
+    if event == "draft_posted":
+        _redis(["SET", f"draft:posted:{customer_id}", "1", "EX", "86400"])
+        return ("ok", None)
     if event == "customer_message":
         sql = (
             "INSERT INTO conversation_state "
@@ -2060,10 +2065,12 @@ class Handler(BaseHTTPRequestHandler):
         if not cid:
             self._send(200, {"ok": False, "error": "customer_id required"})
             return
-        if event not in ("customer_message", "operator_reply", "nudge_drafted"):
+        if event not in ("customer_message", "operator_reply",
+                         "nudge_drafted", "draft_posted"):
             self._send(200, {"ok": False,
                              "error": "event must be customer_message|"
-                                      "operator_reply|nudge_drafted"})
+                                      "operator_reply|nudge_drafted|"
+                                      "draft_posted"})
             return
         try:
             _out, err = upsert_conversation_state(cid, event)
