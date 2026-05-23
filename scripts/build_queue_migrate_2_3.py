@@ -58,8 +58,11 @@ NEW_PARSE_CALLBACK_JS = """// Parse callback_data and look up the draft.
 // Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline
 // callbacks. Phase 2-3 of the pendingQueue migration added a Redis
 // fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).
-const cq = $json.callback_query;
-const data = cq.data || '';
+// NOTE: this node now sits downstream of 'Redis Draft Lookup', so
+// $json is the lookup result, NOT the original Telegram payload —
+// the original lives at $('Route Update Type').item.json.
+const cq = $('Route Update Type').item.json.callback_query;
+const data = (cq && cq.data) || '';
 const parts = data.split(':');
 const action = parts[0] || '';
 const second = parts[1] || '';
@@ -73,11 +76,11 @@ const sdDraft = pipeline ? null : queue.find(d => d.id === second);
 
 // Redis fallback — runs upstream as 'Redis Draft Lookup'. If staticData
 // missed the draft (the documented race), Redis usually has it.
+// $json on THIS node is the lookup result.
 let redisDraft = null;
 if (!pipeline) {
   try {
-    const r = $('Redis Draft Lookup').item.json;
-    if (r && r.found && r.draft) redisDraft = r.draft;
+    if ($json && $json.found && $json.draft) redisDraft = $json.draft;
   } catch (e) { redisDraft = null; }
 }
 
@@ -89,9 +92,9 @@ return {
     draft_id: pipeline ? null : second,
     customer_id: pipeline ? second : (draft ? draft.customer_phone : null),
     snooze_duration: (action === 'snz') ? third : null,
-    callback_query_id: cq.id,
-    chat_id: cq.message.chat.id,
-    message_id: cq.message.message_id,
+    callback_query_id: cq && cq.id,
+    chat_id: cq && cq.message && cq.message.chat.id,
+    message_id: cq && cq.message && cq.message.message_id,
     draft: draft,
     draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),
     draft_found: !!draft
