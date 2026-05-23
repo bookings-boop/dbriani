@@ -47,6 +47,7 @@ PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
 REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
 AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
 DEBOUNCE_TTL = int(os.environ.get("BRIDGE_DEBOUNCE_TTL", "120"))
+QUEUE_TTL = int(os.environ.get("BRIDGE_QUEUE_TTL", "86400"))  # 24h — drafts auto-expire
 
 # --- /feedback (operator behavioural-feedback command) ---------------------
 FEEDBACK_TTL = int(os.environ.get("BRIDGE_FEEDBACK_TTL", "600"))
@@ -138,6 +139,115 @@ def _lit(v):
     if v is None or v == "":
         return "NULL"
     return "'" + str(v).replace("'", "''") + "'"
+
+
+# ============================================================================
+# Redis-backed pendingQueue — see docs/pendingqueue-redis-migration-plan.md
+# ============================================================================
+
+DRAFTS_ACTIVE = "drafts:active"
+
+
+def _draft_key(did):
+    return "draft:" + str(did)
+
+
+def _byc_key(cid):
+    return "drafts:bycustomer:" + str(cid)
+
+
+def _draft_save(draft):
+    """Write draft JSON, set TTL, update active set + per-customer ZSET.
+    Returns (ok, err)."""
+    if not isinstance(draft, dict):
+        return False, "draft must be an object"
+    did = (draft.get("id") or "").strip()
+    cid = (draft.get("customer_phone") or "").strip()
+    if not did or not cid:
+        return False, "id + customer_phone required"
+    ts = int(time.time() * 1000)
+    _, err = _redis(["SET", _draft_key(did), json.dumps(draft),
+                     "EX", str(QUEUE_TTL)])
+    if err:
+        return False, err
+    status = (draft.get("status") or "pending")
+    if status == "pending":
+        _redis(["SADD", DRAFTS_ACTIVE, did])
+    else:
+        _redis(["SREM", DRAFTS_ACTIVE, did])
+    _redis(["ZADD", _byc_key(cid), str(ts), did])
+    _redis(["EXPIRE", _byc_key(cid), str(QUEUE_TTL)])
+    return True, None
+
+
+def _draft_get(did):
+    """Return (draft|None, err|None)."""
+    if not did:
+        return None, None
+    out, err = _redis(["GET", _draft_key(did)])
+    if err:
+        return None, err
+    raw = (out or "").strip()
+    if not raw:
+        return None, None
+    try:
+        return json.loads(raw), None
+    except Exception as e:
+        return None, repr(e)
+
+
+def _draft_update(did, fields):
+    """Read-modify-write. Returns (draft|None, err|None).
+    Single-threaded Redis makes this atomic-enough for our load."""
+    if not did:
+        return None, "draft_id required"
+    d, err = _draft_get(did)
+    if err:
+        return None, err
+    if not d:
+        return None, "draft not found"
+    d.update(fields or {})
+    # status side-effect on the active set
+    if "status" in (fields or {}):
+        if (fields["status"] or "") == "pending":
+            _redis(["SADD", DRAFTS_ACTIVE, did])
+        else:
+            _redis(["SREM", DRAFTS_ACTIVE, did])
+    _, err = _redis(["SET", _draft_key(did), json.dumps(d),
+                     "EX", str(QUEUE_TTL)])
+    if err:
+        return None, err
+    return d, None
+
+
+def _draft_drop(did):
+    """Cleanup. Returns (ok, err)."""
+    if not did:
+        return False, "draft_id required"
+    _redis(["DEL", _draft_key(did)])
+    _redis(["SREM", DRAFTS_ACTIVE, did])
+    return True, None
+
+
+def _draft_latest_for_customer(customer_id, want_status=None):
+    """Return the newest draft for a customer, optionally filtered by status.
+    Returns (draft|None, err|None)."""
+    if not customer_id:
+        return None, "customer_id required"
+    out, err = _redis(["ZREVRANGE", _byc_key(customer_id), "0", "20"])
+    if err:
+        return None, err
+    for line in (out or "").splitlines():
+        did = line.strip()
+        if not did:
+            continue
+        d, _ = _draft_get(did)
+        if not d:
+            continue
+        if want_status and (d.get("status") or "") != want_status:
+            continue
+        return d, None
+    return None, None
 
 
 def nomod_create_link(amount, summary, customer_name):
@@ -1604,7 +1714,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/label-eval", "/conversation-state",
                              "/hourly-sweep",
                              "/review", "/draft-followup",
-                             "/info", "/label", "/snooze"):
+                             "/info", "/label", "/snooze",
+                             "/queue"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1656,6 +1767,8 @@ class Handler(BaseHTTPRequestHandler):
             self._label(payload)
         elif self.path == "/snooze":
             self._snooze(payload)
+        elif self.path == "/queue":
+            self._queue(payload)
         else:
             self._draft(payload)
 
@@ -3002,6 +3115,66 @@ class Handler(BaseHTTPRequestHandler):
             log("snooze ERROR:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
                              "telegram_text": "⚠️ Snooze failed."})
+
+    def _queue(self, payload):
+        """POST /queue — Redis-backed pendingQueue.
+        See docs/pendingqueue-redis-migration-plan.md §3.
+        Actions: save | get | update | mark | latest-for-customer | drop.
+        Always 200; ok flag carries the outcome."""
+        action = (payload.get("action") or "").strip().lower()
+
+        if action == "save":
+            draft = payload.get("draft") or {}
+            ok, err = _draft_save(draft)
+            self._send(200, {"ok": ok, "error": err,
+                             "draft_id": (draft.get("id") if isinstance(draft, dict) else None)})
+            return
+
+        if action == "get":
+            did = (payload.get("draft_id") or "").strip()
+            if not did:
+                self._send(200, {"ok": False, "error": "draft_id required",
+                                 "draft": None, "found": False})
+                return
+            d, err = _draft_get(did)
+            self._send(200, {"ok": True, "draft": d,
+                             "found": d is not None, "error": err})
+            return
+
+        if action == "update":
+            did = (payload.get("draft_id") or "").strip()
+            d, err = _draft_update(did, payload.get("fields") or {})
+            self._send(200, {"ok": d is not None, "draft": d, "error": err})
+            return
+
+        if action == "mark":
+            did = (payload.get("draft_id") or "").strip()
+            status = (payload.get("status") or "").strip()
+            if not status:
+                self._send(200, {"ok": False, "error": "status required",
+                                 "draft": None})
+                return
+            d, err = _draft_update(did, {"status": status})
+            self._send(200, {"ok": d is not None, "draft": d, "error": err})
+            return
+
+        if action == "latest-for-customer":
+            cid = (payload.get("customer_id") or "").strip()
+            want_status = (payload.get("status") or "").strip() or None
+            d, err = _draft_latest_for_customer(cid, want_status)
+            self._send(200, {"ok": True, "draft": d,
+                             "found": d is not None, "error": err})
+            return
+
+        if action == "drop":
+            did = (payload.get("draft_id") or "").strip()
+            ok, err = _draft_drop(did)
+            self._send(200, {"ok": ok, "error": err})
+            return
+
+        self._send(200, {"ok": False,
+                         "error": ("action must be save|get|update|mark|"
+                                   "latest-for-customer|drop")})
 
     def _conversation_state(self, payload):
         """POST /conversation-state — silent timestamp updater."""
