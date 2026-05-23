@@ -344,7 +344,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst [action, draftId] = data.split(':');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = queue.find(d => d.id === draftId);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: draftId,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    // feedback callbacks aren't about a pendingQueue draft \u2014 let the\n    // existing Draft Exists? IF pass them through.\n    draft_found: !!draft || (action || '').indexOf('feedback_') === 0\n  }\n};"
+        "jsCode": "// Parse callback_data and look up the draft.\n// Extended in Step 5 (pipeline-review) to handle nudge/snz/inf prefixes\n// which carry a customer_id (not a pendingQueue draft id).\nconst cq = $json.callback_query;\nconst data = cq.data || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\n// pipeline-review callbacks: nudge:<cid>, snz:<cid>:<dur>, inf:<cid>.\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst draft = pipeline ? null : queue.find(d => d.id === second);\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_id : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq.id,\n    chat_id: cq.message.chat.id,\n    message_id: cq.message.message_id,\n    draft: draft || null,\n    // feedback + pipeline callbacks aren't about a pendingQueue draft \u2014\n    // let the existing Draft Exists? IF pass them through.\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -602,6 +602,78 @@
               },
               "renameOutput": true,
               "outputKey": "feedback_no"
+            },
+            {
+              "outputKey": "nudge",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "56e0c9c1-6ae1-4650-b8f4-28a94c1fd5ad",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "nudge",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "snz",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "0b9a1ef5-81e6-47b9-910e-28f7c6d05184",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "snz",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "inf",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "63896f19-c76f-42c0-b249-d65f5ce8f3e5",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "inf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
             }
           ]
         },
@@ -938,7 +1010,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '\u26a0\ufe0f Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '\u26a0\ufe0f Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -1144,6 +1216,102 @@
               },
               "renameOutput": true,
               "outputKey": "feedback_cmd"
+            },
+            {
+              "outputKey": "review_cmd",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5b271401-fa1d-43ff-a888-28cc73fb2fc0",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "review_cmd",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "info_cmd",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5eb73fc5-56f4-47e6-9dac-0f0ef2886272",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "info_cmd",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "label_cmd",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "6e0c476e-9161-409e-850c-e49835ba60ce",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "label_cmd",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "snooze_cmd",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "629036bb-aeba-43ce-8332-7a6cb8865c00",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "snooze_cmd",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
             }
           ]
         },
@@ -3595,6 +3763,468 @@
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Customer Facts').item.json.customer_id || $json.customer_phone) }}, \"event\": \"draft_posted\" }",
         "options": {}
       }
+    },
+    {
+      "id": "f57fc9d1-674e-4147-900e-561c273f701e",
+      "name": "Hermes Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5620,
+        2200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/review",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"mode\": \"ondemand\", \"filter\": {{ JSON.stringify($json.filter || 'all') }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "82ddf78c-6df2-47e9-bfd7-4f9e8328ec6e",
+      "name": "Send Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5860,
+        2200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\", \"reply_markup\": JSON.stringify({ inline_keyboard: ($json.inline_keyboards || []) }) }",
+        "options": {}
+      }
+    },
+    {
+      "id": "64d91aab-9b85-4780-8c36-f3820b25619a",
+      "name": "Hermes Info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5620,
+        2400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/info",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ $json.info_query_kind === 'customer_id' ? JSON.stringify($json.info_query) : '\"\"' }}, \"name\": {{ $json.info_query_kind === 'name' ? JSON.stringify($json.info_query) : '\"\"' }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "a7658618-4021-44d1-b580-d04d6ae886f3",
+      "name": "Send Info Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5860,
+        2400
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
+      "id": "e1de349f-0890-4555-94cd-0166ef05e45a",
+      "name": "Hermes Label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5620,
+        2600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/label",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ $json.label_query_kind === 'customer_id' ? JSON.stringify($json.label_query) : '\"\"' }}, \"name\": {{ $json.label_query_kind === 'name' ? JSON.stringify($json.label_query) : '\"\"' }}, \"label\": {{ JSON.stringify($json.label_value) }}, \"reason\": \"operator /label cmd\" }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "1afa6aa7-5402-4d03-9f0f-9bcd9b4c1d37",
+      "name": "Send Label Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5860,
+        2600
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
+      "id": "0d336adf-621f-4716-bd62-23f675a28456",
+      "name": "Hermes Snooze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5620,
+        2800
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/snooze",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ $json.snooze_query_kind === 'customer_id' ? JSON.stringify($json.snooze_query) : '\"\"' }}, \"name\": {{ $json.snooze_query_kind === 'name' ? JSON.stringify($json.snooze_query) : '\"\"' }}, \"duration\": {{ JSON.stringify($json.snooze_duration) }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "df7a41f8-29c6-4973-a303-b437cec92eeb",
+      "name": "Send Snooze Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5860,
+        2800
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text) }",
+        "options": {}
+      }
+    },
+    {
+      "id": "4265c41a-042d-4ab5-bd96-870dd0280a32",
+      "name": "Hermes Draft Followup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        2200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/draft-followup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "7537d13c-0938-4557-a165-eafbdc1d0269",
+      "name": "Send Nudge Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6340,
+        2200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify('\ud83d\udca1 *NUDGE DRAFT* for `' + $('Parse Callback').item.json.customer_id + '`  (' + ($json.label || '?') + ')\\n\\n' + ($json.draft_text || '\u26a0\ufe0f no draft generated')), \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
+      "id": "1a0f25ed-d82e-4374-ab24-5bb4e1a1f4e6",
+      "name": "Hermes Snooze Btn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        2600
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/snooze",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }}, \"duration\": {{ JSON.stringify($('Parse Callback').item.json.snooze_duration || '4h') }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "3e2242eb-d9a9-4f0d-a2e7-f6cb59021068",
+      "name": "Answer Snooze Btn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6340,
+        2600
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"callback_query_id\": $('Parse Callback').item.json.callback_query_id, \"text\": JSON.stringify($json.telegram_text || '\ud83d\udca4 snoozed') }",
+        "options": {}
+      }
+    },
+    {
+      "id": "af4b0c69-6d69-4351-aae8-95425c406e92",
+      "name": "Hermes Info Btn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        2800
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/info",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "8cf5faa3-3022-4956-b9f5-b5af55f63240",
+      "name": "Send Info Btn Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6340,
+        2800
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -3820,6 +4450,27 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Hermes Draft Followup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Snooze Btn",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Info Btn",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -3972,6 +4623,34 @@
         [
           {
             "node": "Hermes Feedback Classify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Info",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Snooze",
             "type": "main",
             "index": 0
           }
@@ -4910,6 +5589,83 @@
     "Mark Draft Posted": {
       "main": [
         []
+      ]
+    },
+    "Hermes Review": {
+      "main": [
+        [
+          {
+            "node": "Send Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Info": {
+      "main": [
+        [
+          {
+            "node": "Send Info Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Label": {
+      "main": [
+        [
+          {
+            "node": "Send Label Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Snooze": {
+      "main": [
+        [
+          {
+            "node": "Send Snooze Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Draft Followup": {
+      "main": [
+        [
+          {
+            "node": "Send Nudge Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Snooze Btn": {
+      "main": [
+        [
+          {
+            "node": "Answer Snooze Btn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Info Btn": {
+      "main": [
+        [
+          {
+            "node": "Send Info Btn Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

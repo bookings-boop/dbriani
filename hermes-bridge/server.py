@@ -1532,7 +1532,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/debounce", "/payment-link", "/feedback",
                              "/label-eval", "/conversation-state",
                              "/hourly-sweep",
-                             "/review", "/draft-followup"):
+                             "/review", "/draft-followup",
+                             "/info", "/label", "/snooze"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1578,6 +1579,12 @@ class Handler(BaseHTTPRequestHandler):
             self._review(payload)
         elif self.path == "/draft-followup":
             self._draft_followup(payload)
+        elif self.path == "/info":
+            self._info(payload)
+        elif self.path == "/label":
+            self._label(payload)
+        elif self.path == "/snooze":
+            self._snooze(payload)
         else:
             self._draft(payload)
 
@@ -2621,6 +2628,203 @@ class Handler(BaseHTTPRequestHandler):
             log("draft_followup ERROR:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
                              "draft_text": "", "label": "WARM"})
+
+    def _info(self, payload):
+        """POST /info — single-lead context dump. Returns markdown text ready
+        for Telegram sendMessage."""
+        cid = (payload.get("customer_id") or "").strip()
+        name_query = (payload.get("name") or "").strip()
+        if not cid and name_query:
+            cid = resolve_customer_by_name(name_query) or ""
+        if not cid:
+            self._send(200, {"ok": False,
+                             "error": "customer_id or name required",
+                             "telegram_text": "⚠️ Customer not found."})
+            return
+        try:
+            row = get_current_label_row(cid)
+            if row is None:
+                self._send(200, {
+                    "ok": True, "customer_id": cid,
+                    "telegram_text": f"🔎 *{cid}* — no facts on record yet.",
+                })
+                return
+            # last history transition + last 3 corrections + last 3 notes
+            cid_e = cid.replace("'", "''")
+            out, _err = _psql(
+                "SELECT signal, evidence, "
+                "to_char(created_at,'YYYY-MM-DD HH24:MI') "
+                "FROM customer_label_history "
+                f"WHERE customer_id = '{cid_e}' "
+                "ORDER BY id DESC LIMIT 3"
+            )
+            history = []
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    history.append((parts[0].strip(), parts[1].strip(),
+                                    parts[2].strip()))
+            out, _err = _psql(
+                "SELECT note_text, to_char(created_at,'YYYY-MM-DD') "
+                "FROM customer_notes "
+                f"WHERE customer_id = '{cid_e}' AND active = true "
+                "ORDER BY id DESC LIMIT 3"
+            )
+            notes = []
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    notes.append((parts[0].strip(), parts[1].strip()))
+            label = row.get("label") or "NEW"
+            name = row.get("name") or "(no name)"
+            lines = [
+                f"🔎 *{name}*  `{cid}`",
+                f"   Label: *{label}* "
+                + (f"(locked → {row.get('label_locked_until')})"
+                   if row.get("label_locked_until") else ""),
+                f"   Facts: {row.get('yachts') or '—'} · "
+                f"{row.get('dates') or '—'} · "
+                f"msg #{row.get('message_count')}",
+            ]
+            if notes:
+                lines.append("   Notes:")
+                for note_text, dt in notes:
+                    lines.append(f"      • {note_text}  ({dt})")
+            if history:
+                lines.append("   Recent label transitions:")
+                for sig, ev, dt in history:
+                    lines.append(f"      • {sig} — {ev[:60]}  ({dt})")
+            self._send(200, {
+                "ok": True, "customer_id": cid,
+                "telegram_text": "\n".join(lines),
+            })
+        except Exception as e:
+            log("info ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "telegram_text": "⚠️ Info failed — bridge error."})
+
+    def _label(self, payload):
+        """POST /label — manual label override + record into label_corrections
+        for self-improvement dampening."""
+        cid = (payload.get("customer_id") or "").strip()
+        new_label = (payload.get("label") or "").strip().upper()
+        reason = (payload.get("reason") or "").strip()
+        if not cid or new_label not in LABELS:
+            self._send(200, {"ok": False,
+                             "error": "customer_id + label (one of {LABELS}) required",
+                             "telegram_text": f"⚠️ Bad request: {new_label!r}."})
+            return
+        try:
+            row = get_current_label_row(cid)
+            if row is None:
+                self._send(200, {"ok": False,
+                                 "error": "customer not found",
+                                 "telegram_text": "⚠️ Customer not found."})
+                return
+            prev = row.get("label")
+            cid_e = cid.replace("'", "''")
+            # Read previous auto-signal + confidence for the correction row.
+            out, _err = _psql(
+                "SELECT COALESCE(last_analysis_signal,''), "
+                "COALESCE(last_analysis_confidence::text,'') "
+                "FROM conversation_state "
+                f"WHERE customer_id = '{cid_e}'"
+            )
+            sig, conf_s = "manual_only", ""
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    sig = parts[0].strip() or "manual_only"
+                    conf_s = parts[1].strip()
+                break
+            conf = None
+            if conf_s:
+                try:
+                    conf = float(conf_s)
+                except ValueError:
+                    pass
+            # Record the correction (drives self-improvement dampening).
+            if prev and prev != new_label:
+                lc_sql = (
+                    "INSERT INTO label_corrections "
+                    "(customer_id, auto_label, auto_signal, auto_confidence, "
+                    " manual_label, message_count) VALUES "
+                    f"('{cid_e}', {_lit(prev)}, {_lit(sig)}, "
+                    f"{'NULL' if conf is None else f'{conf:.4f}'}, "
+                    f"{_lit(new_label)}, {int(row.get('message_count') or 0)})"
+                )
+                _o, err = _psql(lc_sql)
+                if err:
+                    log("label_corrections insert err:", err)
+            # Apply transition.
+            apply_label_transition(
+                cid, prev, new_label, "manual:/label", reason or "operator override",
+                row.get("message_count") or 0, created_by="operator")
+            # Lock window for PAUSED_*.
+            if new_label.startswith("PAUSED_"):
+                # PAUSED_SPAM permanent; others 90 days.
+                lock_expr = ("'9999-12-31'::timestamptz"
+                             if new_label == "PAUSED_SPAM"
+                             else "now() + interval '90 days'")
+                _psql(
+                    f"UPDATE customer_facts SET label_locked_until = {lock_expr}, "
+                    f"label_locked_reason = 'manual:/label PAUSED' "
+                    f"WHERE customer_id = '{cid_e}'"
+                )
+            name = row.get("name") or cid
+            self._send(200, {
+                "ok": True, "customer_id": cid,
+                "previous_label": prev,
+                "label": new_label,
+                "telegram_text": f"✅ {name} → *{new_label}* (manual)",
+            })
+        except Exception as e:
+            log("label ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "telegram_text": "⚠️ Label update failed."})
+
+    def _snooze(self, payload):
+        """POST /snooze — set label_locked_until for a customer; don't change
+        the label. Duration like '4h', '2d', '30m'."""
+        cid = (payload.get("customer_id") or "").strip()
+        duration = (payload.get("duration") or "").strip().lower()
+        m = re.match(r"^(\d+)([mhd])$", duration)
+        if not cid or not m:
+            self._send(200, {"ok": False,
+                             "error": "customer_id + duration (e.g. 4h, 2d) required",
+                             "telegram_text": "⚠️ Bad duration."})
+            return
+        try:
+            n_val = int(m.group(1))
+            unit = m.group(2)
+            interval = {"m": "minutes", "h": "hours", "d": "days"}[unit]
+            cid_e = cid.replace("'", "''")
+            row = get_current_label_row(cid)
+            if row is None:
+                self._send(200, {"ok": False,
+                                 "telegram_text": "⚠️ Customer not found."})
+                return
+            _psql(
+                f"UPDATE customer_facts "
+                f"SET label_locked_until = now() + interval '{n_val} {interval}', "
+                f"    label_locked_reason = 'manual:/snooze' "
+                f"WHERE customer_id = '{cid_e}'"
+            )
+            # Log a history row too so operator can see the snooze.
+            apply_label_transition(
+                cid, row.get("label"), row.get("label"),
+                "manual:/snooze", f"snoozed {duration}",
+                row.get("message_count") or 0, created_by="operator")
+            name = row.get("name") or cid
+            self._send(200, {
+                "ok": True, "customer_id": cid,
+                "duration": duration,
+                "telegram_text": f"💤 {name} snoozed for {duration}.",
+            })
+        except Exception as e:
+            log("snooze ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "telegram_text": "⚠️ Snooze failed."})
 
     def _conversation_state(self, payload):
         """POST /conversation-state — silent timestamp updater."""
