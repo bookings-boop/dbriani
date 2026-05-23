@@ -247,6 +247,44 @@
       ]
     },
     {
+      "id": "ad5e7c92-2026-05-23-synccust",
+      "name": "Sync Customer MsgID To Redis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6192,
+        832
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"update\", \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"fields\": { \"telegram_message_id\": {{ $json.telegram_message_id || null }} } }",
+        "options": {
+          "timeout": 8000
+        }
+      }
+    },
+    {
       "parameters": {
         "httpMethod": "POST",
         "path": "telegram",
@@ -344,7 +382,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload —\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nif (!Array.isArray(wfData.pendingQueue)) wfData.pendingQueue = [];\nconst queue = wfData.pendingQueue;\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback — runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\n// BUG-FIX 2026-05-23: write-through cache — when Redis is the source\n// (hourly-sweep nudge cards live in a different workflow's staticData;\n// phase-1b's queue never had them), hydrate phase-1b's queue so Set\n// Awaiting Edit, Mark Sent, Mark Skipped, and Route Text Action's\n// awaiting_edit lookup all find the draft via queue.find(). Without\n// this, Edit on a hourly-sweep follow-up + text reply produces\n// '⚠️ Nothing sent'.\nif (redisDraft && !sdDraft && redisDraft.id) {\n  queue.push(redisDraft);\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload —\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nif (!Array.isArray(wfData.pendingQueue)) wfData.pendingQueue = [];\nconst queue = wfData.pendingQueue;\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback — runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\n// BUG-FIX 2026-05-23: write-through cache + reconciliation.\n//\n// Case A — staticData missing (hourly-sweep follow-ups live in a\n// different workflow's staticData; phase-1b's queue never had them).\n// Hydrate phase-1b's queue so Set Awaiting Edit, Mark Sent, Mark\n// Skipped, and Process Text Reply's awaiting_edit lookup find the\n// draft via queue.find().\n//\n// Case B — staticData entry is STALE. Build Nudge Card pushes draftObj\n// with telegram_message_id: null; Save Nudge MsgID only updates Redis.\n// So the in-memory staticData entry has null msg_id even though Redis\n// has the real value (set after Telegram returns the post's message_id).\n// Without reconciliation, Prep Refine reads draft.telegram_message_id\n// from staticData -> null -> Edit Telegram (Refine) builds invalid JSON\n// 'message_id: ,' -> n8n NodeOperationError, refine path fails.\n//\n// Fix: always reconcile from Redis when it has fresher fields. Mutations\n// persist via the same staticData reference, so the next execution's\n// Prep Refine sees the reconciled values.\nif (redisDraft) {\n  if (!sdDraft && redisDraft.id) {\n    queue.push(redisDraft);\n  } else if (sdDraft) {\n    if (!sdDraft.telegram_message_id && redisDraft.telegram_message_id) {\n      sdDraft.telegram_message_id = redisDraft.telegram_message_id;\n    }\n    if (!sdDraft.telegram_chat_id && redisDraft.telegram_chat_id) {\n      sdDraft.telegram_chat_id = redisDraft.telegram_chat_id;\n    }\n  }\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -4603,6 +4641,20 @@
       }
     },
     {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Dual-write: Save Nudge MsgID updates Redis; this node mirrors the\n// telegram_message_id into staticData.pendingQueue so Prep Refine sees\n// the real msg_id on the next operator action. Without this, the\n// nudge-Edit → text-reply → refine path builds editMessageText JSON\n// with `message_id: null`, n8n raises NodeOperationError, and the\n// refine silently fails.\nconst tg = $('Send Nudge Draft').item.json || {};\nconst msgId = (tg.result && tg.result.message_id) || null;\nconst draftId = (($('Build Nudge Card').item.json) || {}).draft_id;\nif (msgId && draftId) {\n  const data = $getWorkflowStaticData('global');\n  if (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n  const entry = data.pendingQueue.find(d => d && d.id === draftId);\n  if (entry) entry.telegram_message_id = msgId;\n}\nreturn { json: { ok: true, draft_id: draftId, telegram_message_id: msgId } };"
+      },
+      "id": "c5e1a4b9-2026-05-23-syncnudge",
+      "name": "Sync Nudge MsgID To Static",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7060,
+        2360
+      ]
+    },
+    {
       "id": "b16c467a-654d-40ce-87f0-3ce03d95c652",
       "name": "Save Nudge MsgID",
       "type": "n8n-nodes-base.httpRequest",
@@ -5749,7 +5801,18 @@
             "node": "Find Break",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Sync Customer MsgID To Redis",
+            "type": "main",
+            "index": 0
           }
+        ]
+      ]
+    },
+    "Sync Customer MsgID To Redis": {
+      "main": [
+        [
         ]
       ]
     },
@@ -6561,7 +6624,18 @@
             "node": "Save Nudge MsgID",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Sync Nudge MsgID To Static",
+            "type": "main",
+            "index": 0
           }
+        ]
+      ]
+    },
+    "Sync Nudge MsgID To Static": {
+      "main": [
+        [
         ]
       ]
     },
