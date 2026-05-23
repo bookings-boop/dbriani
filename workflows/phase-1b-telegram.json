@@ -157,7 +157,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1024,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": {{ JSON.stringify($json.systemPrompt) }},\n      \"cache_control\": {\"type\": \"ephemeral\"}\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"CONVERSATION HISTORY (oldest first):\\n\" + $json.conversationHistory + \"\\n\\nCustomer: \" + ($json.customerName || \"unknown\") + \" (\" + $json.customerPhone + \")\\n\\nTHEIR NEWEST MESSAGE:\\n\" + $json.userMessage + ($json.regenHint ? \"\\n\\nIMPORTANT: \" + $json.regenHint : \"\") + \"\\n\\nReturn ONLY the JSON object specified in the system prompt - no preamble, no code fences.\") }}\n    }\n  ]\n}",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1024,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": {{ JSON.stringify($json.systemPrompt + ($('Fetch Behavioral Context').item.json.formatted ? \"\\n\\n\" + $('Fetch Behavioral Context').item.json.formatted : \"\")) }},\n      \"cache_control\": {\"type\": \"ephemeral\"}\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"CONVERSATION HISTORY (oldest first):\\n\" + $json.conversationHistory + \"\\n\\nCustomer: \" + ($json.customerName || \"unknown\") + \" (\" + $json.customerPhone + \")\\n\\nTHEIR NEWEST MESSAGE:\\n\" + $json.userMessage + ($json.regenHint ? \"\\n\\nIMPORTANT: \" + $json.regenHint : \"\") + \"\\n\\nReturn ONLY the JSON object specified in the system prompt - no preamble, no code fences.\") }}\n    }\n  ]\n}",
         "options": {}
       },
       "id": "f6db800a-44b3-47a1-a0f1-b99e7032ca64",
@@ -3317,6 +3317,42 @@
         6500,
         2680
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/feedback",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"behavioral-context\", \"customer_id\": {{ JSON.stringify($json.customerChatId) }} }",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "id": "8bd21978-a438-4160-b618-70013e0377bd",
+      "name": "Fetch Behavioral Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4800,
+        812
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -3802,7 +3838,7 @@
       "main": [
         [
           {
-            "node": "Build Prompt",
+            "node": "Fetch Behavioral Context",
             "type": "main",
             "index": 0
           }
@@ -4543,6 +4579,17 @@
         [
           {
             "node": "Edit Feedback Discarded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Behavioral Context": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
             "type": "main",
             "index": 0
           }

@@ -275,7 +275,26 @@ def behavioral_context(customer_id):
                        f"WHERE customer_id='{cid}' AND active=true "
                        f"ORDER BY id DESC LIMIT {FEEDBACK_MAX_PER_CUSTOMER}")
         notes = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
-    return {"global": glb, "scenario": sc, "customer_notes": notes}
+    # Pre-formatted block for drop-in at the end of Build Prompt's system
+    # prompt. Empty string when no context exists — safe to concatenate.
+    blocks = []
+    if glb:
+        blocks.append("### Global rules (always apply)")
+        blocks.extend(["- " + r for r in glb])
+    if sc:
+        if blocks:
+            blocks.append("")
+        blocks.append("### Scenario rules")
+        blocks.extend(["- [%s] %s" % (s["scenario"], s["rule"]) for s in sc])
+    if notes:
+        if blocks:
+            blocks.append("")
+        blocks.append("### Notes for THIS customer")
+        blocks.extend(["- " + n for n in notes])
+    formatted = ("## Behavioral context (live — operator feedback)\n"
+                 + "\n".join(blocks)) if blocks else ""
+    return {"global": glb, "scenario": sc, "customer_notes": notes,
+            "formatted": formatted}
 
 
 def feedback_apply_cap(table, cap, scope=None, scope_value=None, customer_id=None):
