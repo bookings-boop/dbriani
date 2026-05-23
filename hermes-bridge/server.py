@@ -1350,19 +1350,39 @@ def _fmt_dur(secs):
 
 
 def render_review(scored, totals, mode="ondemand"):
-    """Return a dict {telegram_text, inline_keyboards, mark_seen_ids, totals}.
-    scored = list of (score, row) sorted desc."""
+    """Return a dict with both the single-message rendering (kept for backward
+    compat) AND a per-lead-cards rendering so the workflow can post one message
+    per lead — each lead's 3-button inline keyboard then sits with that lead's
+    text, instead of stacking 6× at the bottom of one big report.
+
+    Returns:
+      {
+        telegram_text: <full single-message render — backward-compat header>,
+        inline_keyboards: <all rows stacked, backward-compat>,
+        per_lead_messages: [
+          {text: '...', inline_keyboard: [[{text:'Draft nudge',...}, ...]]},
+          ...
+        ],
+        header_text: <just the summary header, no lead lines>,
+        mark_seen_ids: [...],
+      }
+    """
     sections = {
         "HOT":             {"items": [], "cap": REVIEW_CAP_HOT,
-                            "header": "🔥 HOT — ready to close"},
+                            "header": "🔥 HOT — ready to close",
+                            "emoji": "🔥"},
         "NEEDS_ATTENTION": {"items": [], "cap": REVIEW_CAP_NEEDS_ATTENTION,
-                            "header": "⚠️ NEEDS ATTENTION"},
+                            "header": "⚠️ NEEDS ATTENTION",
+                            "emoji": "⚠️"},
         "WARM":            {"items": [], "cap": REVIEW_CAP_WARM,
-                            "header": "♨️ WARM — worth nudging"},
+                            "header": "♨️ WARM — worth nudging",
+                            "emoji": "♨️"},
         "NEW":             {"items": [], "cap": 5,
-                            "header": "🌱 NEW — early conversations"},
+                            "header": "🌱 NEW — early conversations",
+                            "emoji": "🌱"},
         "COLD":            {"items": [], "cap": REVIEW_CAP_COLD,
-                            "header": "❄️ COLD — re-engage candidates"},
+                            "header": "❄️ COLD — re-engage candidates",
+                            "emoji": "❄️"},
     }
     pause_tail = []
     seen_ids = []
@@ -1376,21 +1396,17 @@ def render_review(scored, totals, mode="ondemand"):
         sections[label]["items"].append((score, row))
         seen_ids.append(row["customer_id"])
 
-    # Build text + inline rows.
+    # ---- Single-message render (backward compat) ----------------------------
     when = ("Scheduled review" if mode == "scheduled"
             else "On-demand review")
-    lines = [f"📋 *Pipeline Review* — {when}",
-             (f"{totals.get('total', 0)} active · "
-              f"{totals.get('HOT', 0)} hot · "
-              f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
-              f"{totals.get('COLD', 0)} cold"),
-             ""]
+    header_lines = [f"📋 *Pipeline Review* — {when}",
+                    (f"{totals.get('total', 0)} active · "
+                     f"{totals.get('HOT', 0)} hot · "
+                     f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
+                     f"{totals.get('COLD', 0)} cold")]
+    lines = list(header_lines) + [""]
     keyboards = []
-
-    def _short_id(cid):
-        # Telegram callback_data is 64 bytes max; full @lid customer_ids are
-        # ~21 chars so prefix:cid fits. Keep the full id (no Redis lookup).
-        return cid
+    per_lead_messages = []
 
     for label_key in ("HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD"):
         sect = sections[label_key]
@@ -1403,23 +1419,28 @@ def render_review(scored, totals, mode="ondemand"):
         lines.append(f"*{sect['header']}* ({len(items)})")
         for i, (score, row) in enumerate(shown, 1):
             why = _why_line(row, label_key)
-            lines.append(
-                f"{i}. *{row.get('name') or 'Unknown'}* — "
+            lead_body = (
+                f"*{row.get('name') or 'Unknown'}* — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
                 f"{(row.get('dates') or 'no date')} · "
                 f"msg #{row.get('message_count')}\n"
-                f"   ⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
+                f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
                 f"  ·  {why}"
             )
-            sid = _short_id(row["customer_id"])
-            keyboards.append([
-                {"text": "💬 Draft nudge",
-                 "callback_data": f"nudge:{sid}"},
-                {"text": "💤 Snooze 4h",
-                 "callback_data": f"snz:{sid}:4h"},
-                {"text": "ℹ️ Info",
-                 "callback_data": f"inf:{sid}"},
-            ])
+            lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))
+            sid = row["customer_id"]
+            kb = [[
+                {"text": "💬 Draft nudge", "callback_data": f"nudge:{sid}"},
+                {"text": "💤 Snooze 4h",   "callback_data": f"snz:{sid}:4h"},
+                {"text": "ℹ️ Info",        "callback_data": f"inf:{sid}"},
+            ]]
+            keyboards.append(kb[0])
+            # Per-lead card: section emoji prefix + lead body, plus its own kb.
+            per_lead_messages.append({
+                "text": f"{sect['emoji']} *{label_key}*\n{lead_body}",
+                "inline_keyboard": kb,
+                "customer_id": sid,
+            })
         if overflow > 0:
             lines.append(
                 f"   _+{overflow} more — `/review {label_key.lower()}` to see all_"
@@ -1430,10 +1451,12 @@ def render_review(scored, totals, mode="ondemand"):
         lines.append(f"⏸ Paused/snoozed: {len(pause_tail)} — `/info` to see.")
 
     telegram_text = "\n".join(lines).strip()
-    # Telegram parse_mode Markdown is fussy; let the workflow toggle as needed.
+    header_text = "\n".join(header_lines).strip()
     return {
         "telegram_text": telegram_text,
         "inline_keyboards": keyboards,
+        "header_text": header_text,
+        "per_lead_messages": per_lead_messages,
         "mark_seen_ids": seen_ids,
     }
 
@@ -1481,6 +1504,50 @@ def mark_review_seen(customer_ids):
         "SET last_review_seen_at = now(), updated_at = now()"
     )
     return _psql(sql)
+
+
+def _humanize_signal(signal, evidence, created_by):
+    """Translate a raw label-history signal string into operator English.
+
+    Inputs like 'auto:money_mentioned' / 'hourly_sweep:cold_decay' /
+    'manual:/label' / 'manual:/snooze' / 'manual:/feedback' →
+    'They mentioned money/budget' / 'No activity for 7+ days — went cold'
+    / 'You manually set the label' etc.
+    """
+    sig = (signal or "").strip()
+    ev = (evidence or "").strip()
+    is_manual = sig.startswith("manual:") or created_by == "operator"
+    key = sig.split(":", 1)[-1]  # strip auto:/hourly_sweep:/manual: prefix
+
+    descriptions = {
+        # auto + hourly_sweep signal types
+        "payment_intent":          "Strong booking intent detected",
+        "money_mentioned":         "Mentioned money/budget",
+        "lets_do_it":              "Indicated they want to book",
+        "same_day_booking":        "Asked about same-day booking",
+        "multi_yacht_engaged":     "Engaged on multiple yachts",
+        "pricing_inquired":        "Asked about pricing",
+        "date_asked_no_commit":    "Discussed dates, no commitment yet",
+        "engaged_5plus":           "5+ messages exchanged — engaged",
+        "new_window":              "Early conversation",
+        "cold_decay":              "Went cold (7+ days silent)",
+        "no_facts_row":            "(no customer facts on file)",
+        "locked":                  "Label currently locked",
+        "hourly_noop":             "(no change on sweep)",
+        # manual signal types
+        "/label":                  "You manually set the label",
+        "/snooze":                 ("Snoozed: " + ev) if ev else "Snoozed",
+        "/feedback":               "Operator feedback applied",
+    }
+    desc = descriptions.get(key)
+    if desc is None:
+        # Unknown signal — fall back to a clean form.
+        if is_manual:
+            return f"Manual update ({key})"
+        return f"Signal: {key}"
+    if is_manual and not desc.startswith("You "):
+        return f"You: {desc}"
+    return desc
 
 
 def sameday_interrupt_check(customer_id, name, dates):
@@ -2539,8 +2606,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {
                 "ok": True,
                 "totals": totals,
+                # Backward-compat: full single-message render + stacked kb.
                 "telegram_text": rendered["telegram_text"],
                 "inline_keyboards": rendered["inline_keyboards"],
+                # Preferred: post header first, then loop per_lead_messages.
+                "header_text": rendered.get("header_text", ""),
+                "per_lead_messages": rendered.get("per_lead_messages", []),
             })
         except Exception as e:
             log("review ERROR:", repr(e))
@@ -2630,8 +2701,9 @@ class Handler(BaseHTTPRequestHandler):
                              "draft_text": "", "label": "WARM"})
 
     def _info(self, payload):
-        """POST /info — single-lead context dump. Returns markdown text ready
-        for Telegram sendMessage."""
+        """POST /info — operator-readable single-lead summary. Returns
+        markdown text shaped for human reading (no raw signal names, no
+        internal IDs unless useful). Fail-open, always 200."""
         cid = (payload.get("customer_id") or "").strip()
         name_query = (payload.get("name") or "").strip()
         if not cid and name_query:
@@ -2646,24 +2718,11 @@ class Handler(BaseHTTPRequestHandler):
             if row is None:
                 self._send(200, {
                     "ok": True, "customer_id": cid,
-                    "telegram_text": f"🔎 *{cid}* — no facts on record yet.",
+                    "telegram_text": f"🔎 No record for that customer yet.",
                 })
                 return
-            # last history transition + last 3 corrections + last 3 notes
             cid_e = cid.replace("'", "''")
-            out, _err = _psql(
-                "SELECT signal, evidence, "
-                "to_char(created_at,'YYYY-MM-DD HH24:MI') "
-                "FROM customer_label_history "
-                f"WHERE customer_id = '{cid_e}' "
-                "ORDER BY id DESC LIMIT 3"
-            )
-            history = []
-            for line in (out or "").strip().splitlines():
-                parts = line.split("|")
-                if len(parts) >= 3:
-                    history.append((parts[0].strip(), parts[1].strip(),
-                                    parts[2].strip()))
+            # Notes — keep as-is, they're already human-authored.
             out, _err = _psql(
                 "SELECT note_text, to_char(created_at,'YYYY-MM-DD') "
                 "FROM customer_notes "
@@ -2675,25 +2734,99 @@ class Handler(BaseHTTPRequestHandler):
                 parts = line.split("|")
                 if len(parts) >= 2:
                     notes.append((parts[0].strip(), parts[1].strip()))
+            # History — translate signals into human sentences.
+            out, _err = _psql(
+                "SELECT signal, COALESCE(evidence,''), "
+                "to_char(created_at,'YYYY-MM-DD HH24:MI'), "
+                "COALESCE(created_by,'system') "
+                "FROM customer_label_history "
+                f"WHERE customer_id = '{cid_e}' "
+                "ORDER BY id DESC LIMIT 5"
+            )
+            timeline = []
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 4:
+                    timeline.append((parts[0].strip(), parts[1].strip(),
+                                     parts[2].strip(), parts[3].strip()))
+            # Conversation timing.
+            out, _err = _psql(
+                "SELECT "
+                "COALESCE(to_char(last_customer_message_at,'YYYY-MM-DD HH24:MI'),''), "
+                "COALESCE(to_char(last_operator_reply_at,'YYYY-MM-DD HH24:MI'),''), "
+                "EXTRACT(EPOCH FROM (now() - last_customer_message_at)) "
+                "FROM conversation_state "
+                f"WHERE customer_id = '{cid_e}'"
+            )
+            silent_secs = None
+            last_cust_dt = ""
+            last_op_dt = ""
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    last_cust_dt = parts[0].strip()
+                    last_op_dt = parts[1].strip()
+                    try:
+                        silent_secs = int(float(parts[2].strip()))
+                    except (ValueError, IndexError):
+                        silent_secs = None
+                break
+
             label = row.get("label") or "NEW"
-            name = row.get("name") or "(no name)"
-            lines = [
-                f"🔎 *{name}*  `{cid}`",
-                f"   Label: *{label}* "
-                + (f"(locked → {row.get('label_locked_until')})"
-                   if row.get("label_locked_until") else ""),
-                f"   Facts: {row.get('yachts') or '—'} · "
-                f"{row.get('dates') or '—'} · "
-                f"msg #{row.get('message_count')}",
-            ]
+            label_emoji = {
+                "HOT": "🔥", "NEEDS_ATTENTION": "⚠️", "WARM": "♨️",
+                "NEW": "🌱", "COLD": "❄️", "PAUSED_SPAM": "🚫",
+                "PAUSED_B2B": "💼", "PAUSED_PERSONAL": "👤",
+            }.get(label, "•")
+            name = row.get("name") or "Unknown"
+
+            lines = [f"🔎 *{name}*"]
+            # status line
+            status_bits = [f"{label_emoji} *{label}*"]
+            if row.get("label_locked_until"):
+                lock_iso = row["label_locked_until"]
+                if "9999" in lock_iso:
+                    status_bits.append("_locked permanently_")
+                else:
+                    # parse to short form
+                    short = lock_iso[:16].replace("T", " ")
+                    status_bits.append(f"_locked until {short}_")
+            lines.append("   " + " · ".join(status_bits))
+
+            # facts
+            facts_bits = []
+            if row.get("yachts"):
+                facts_bits.append(f"Looking at: *{row['yachts']}*")
+            if row.get("dates"):
+                facts_bits.append(f"Date: *{row['dates']}*")
+            if row.get("party_size"):
+                facts_bits.append(f"Party: *{row['party_size']}*")
+            if facts_bits:
+                lines.append("   " + " · ".join(facts_bits))
+            lines.append(f"   {row.get('message_count', 0)} message(s) in this conversation")
+
+            # silence + last reply
+            if silent_secs is not None:
+                lines.append(
+                    f"   ⏱ Last customer message: {_fmt_dur(silent_secs)} ago "
+                    f"({last_cust_dt})")
+            if last_op_dt:
+                lines.append(f"   ↳ Last operator reply: {last_op_dt}")
+
+            # notes
             if notes:
-                lines.append("   Notes:")
+                lines.append("\n   📝 *Notes:*")
                 for note_text, dt in notes:
-                    lines.append(f"      • {note_text}  ({dt})")
-            if history:
-                lines.append("   Recent label transitions:")
-                for sig, ev, dt in history:
-                    lines.append(f"      • {sig} — {ev[:60]}  ({dt})")
+                    lines.append(f"      • {note_text}  _({dt})_")
+
+            # human-readable timeline
+            if timeline:
+                lines.append("\n   📅 *Recent activity:*")
+                for sig, ev, dt, by in timeline:
+                    pretty = _humanize_signal(sig, ev, by)
+                    if pretty:
+                        lines.append(f"      • {pretty}  _({dt})_")
+
             self._send(200, {
                 "ok": True, "customer_id": cid,
                 "telegram_text": "\n".join(lines),

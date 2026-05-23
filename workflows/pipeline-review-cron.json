@@ -103,7 +103,49 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboards || []) }) }} }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.header_text || $json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
+      "id": "3751eb91-2d5a-44f5-99cf-d99c83e6e889",
+      "name": "Split Lead Cards",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "fieldToSplitOut": "per_lead_messages",
+        "options": {}
+      }
+    },
+    {
+      "id": "07d7947f-8466-4d3c-8260-cc771ebd8661",
+      "name": "Send Lead Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboard || []) }) }} }",
         "options": {}
       }
     }
@@ -141,9 +183,35 @@
           }
         ]
       ]
+    },
+    "Send Review": {
+      "main": [
+        [
+          {
+            "node": "Split Lead Cards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Lead Cards": {
+      "main": [
+        [
+          {
+            "node": "Send Lead Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
+  "pinData": null,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
-  }
+  },
+  "meta": null,
+  "tags": []
 }

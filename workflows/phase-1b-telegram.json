@@ -3826,7 +3826,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboards || []) }) }} }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.header_text || $json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
     },
@@ -4223,6 +4223,48 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
+      "id": "515afd13-7a00-4b91-8a00-411cff7f02cd",
+      "name": "Split Lead Cards",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        6100,
+        2200
+      ],
+      "parameters": {
+        "fieldToSplitOut": "per_lead_messages",
+        "options": {}
+      }
+    },
+    {
+      "id": "9032fe25-4885-40c6-a757-dc1a698f0ded",
+      "name": "Send Lead Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6340,
+        2200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboard || []) }) }} }",
         "options": {}
       }
     }
@@ -5662,6 +5704,28 @@
         [
           {
             "node": "Send Info Btn Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Review": {
+      "main": [
+        [
+          {
+            "node": "Split Lead Cards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Lead Cards": {
+      "main": [
+        [
+          {
+            "node": "Send Lead Card",
             "type": "main",
             "index": 0
           }
