@@ -4667,6 +4667,106 @@
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
+    },
+    {
+      "id": "4a427259-95ad-40c7-a1fc-7d2fe7eaea73",
+      "name": "Check Freshness",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5056,
+        912
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/draft-freshness",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"draft_id\": {{ JSON.stringify($('Parse Callback').item.json.draft.id || $('Parse Callback').item.json.draft_id) }} }",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "6accb025-1eaa-4451-aad7-c1eb09707171",
+      "name": "Stale Followup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5296,
+        912
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "16d377c0-0e54-4c22-bc28-2ff8e3559a39",
+              "leftValue": "={{ $json.stale }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "94344fa3-6043-42a8-aa67-ade6ff6a3d1d",
+      "name": "Send Aborted Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5476,
+        712
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify('\u26a0\ufe0f STALE FOLLOW-UP \u2014 Send aborted.\\n\\n' + 'Customer ' + ($json.customer_name || $json.customer_id || '?') + ' replied AFTER this draft was generated (' + (($json.lag_seconds || 0) > 60 ? Math.round(($json.lag_seconds||0)/60) + ' min later' : ($json.lag_seconds||0) + ' sec later') + ').\\n\\n' + 'Their last message:\\n\"' + ($json.last_msg_preview || '(no preview)') + '\"\\n\\n' + 'Tap [\ud83d\udcac Draft nudge] on /review to generate a fresh draft that addresses what they actually said.') }}, \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -4837,7 +4937,7 @@
       "main": [
         [
           {
-            "node": "Prepare Send",
+            "node": "Check Freshness",
             "type": "main",
             "index": 0
           }
@@ -6235,6 +6335,40 @@
             "index": 0
           }
         ]
+      ]
+    },
+    "Check Freshness": {
+      "main": [
+        [
+          {
+            "node": "Stale Followup?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stale Followup?": {
+      "main": [
+        [
+          {
+            "node": "Send Aborted Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Aborted Alert": {
+      "main": [
+        []
       ]
     }
   },

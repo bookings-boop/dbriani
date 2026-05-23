@@ -1923,7 +1923,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/info", "/label", "/snooze",
                              "/queue",
                              "/followup-action",
-                             "/refresh-facts"):
+                             "/refresh-facts",
+                             "/draft-freshness"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1981,6 +1982,8 @@ class Handler(BaseHTTPRequestHandler):
             self._followup_action(payload)
         elif self.path == "/refresh-facts":
             self._refresh_facts(payload)
+        elif self.path == "/draft-freshness":
+            self._draft_freshness(payload)
         else:
             self._draft(payload)
 
@@ -2921,6 +2924,83 @@ class Handler(BaseHTTPRequestHandler):
                              "hermes_calls": 0, "skipped_unchanged": 0,
                              "eligible_followups": [],
                              "elapsed_ms": int((_time.time() - t0) * 1000)})
+
+    def _draft_freshness(self, payload):
+        """POST /draft-freshness — check if a follow-up draft has gone stale
+        (customer replied after the draft was generated). Returns
+        {ok, stale: bool, is_followup, draft_ts, last_msg_ts, customer_id,
+         draft_id, last_msg_preview, customer_name}. Fail-safe: returns
+        stale=false on any error so Send chain isn't blocked by bridge issues."""
+        did = (payload.get("draft_id") or "").strip()
+        if not did:
+            self._send(200, {"ok": False, "stale": False,
+                             "error": "draft_id required"})
+            return
+        try:
+            d, err = _draft_get(did)
+            if err or not d:
+                self._send(200, {"ok": False, "stale": False,
+                                 "error": err or "draft not found"})
+                return
+            # Only enforce freshness for follow-up drafts. Normal customer-
+            # message drafts were already generated FROM the latest history.
+            if not d.get("is_followup"):
+                self._send(200, {"ok": True, "stale": False,
+                                 "is_followup": False, "draft_id": did})
+                return
+            cid = d.get("customer_phone", "")
+            draft_ts = d.get("timestamp", "")
+            cid_e = (cid or "").replace("'", "''")
+            # Get customer's last_customer_message_at as epoch seconds
+            out, _err = _psql(
+                "SELECT EXTRACT(EPOCH FROM last_customer_message_at), "
+                "to_char(last_customer_message_at, 'YYYY-MM-DD HH24:MI:SS') "
+                f"FROM conversation_state WHERE customer_id = '{cid_e}'"
+            )
+            last_msg_epoch = 0.0
+            last_msg_str = ""
+            for line in (out or "").strip().splitlines():
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    try:
+                        last_msg_epoch = float(parts[0].strip())
+                    except ValueError:
+                        last_msg_epoch = 0.0
+                    last_msg_str = parts[1].strip()
+                break
+            # Parse draft.timestamp (ISO string) → epoch seconds
+            from datetime import datetime as _dt
+            draft_epoch = 0.0
+            if draft_ts:
+                try:
+                    draft_epoch = _dt.fromisoformat(
+                        draft_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    draft_epoch = 0.0
+            stale = (last_msg_epoch > 0 and draft_epoch > 0
+                     and last_msg_epoch > draft_epoch)
+            # If stale, also fetch the customer's last message body via WAHA
+            # so the alert can show what was said.
+            last_preview = ""
+            cust_name = d.get("customer_name", "")
+            if stale:
+                waha = waha_fetch_history(cid, limit=3)
+                if not waha.get("err"):
+                    last_preview = (waha.get("last_message") or "")[:200]
+                    if waha.get("push_name") and not cust_name:
+                        cust_name = waha["push_name"]
+            self._send(200, {
+                "ok": True, "stale": stale, "is_followup": True,
+                "draft_id": did, "customer_id": cid,
+                "customer_name": cust_name,
+                "draft_ts": draft_ts, "last_msg_ts": last_msg_str,
+                "last_msg_preview": last_preview,
+                "lag_seconds": int(last_msg_epoch - draft_epoch)
+                               if (last_msg_epoch and draft_epoch) else 0,
+            })
+        except Exception as e:
+            log("draft_freshness EXC:", repr(e))
+            self._send(200, {"ok": True, "stale": False, "error": str(e)})
 
     def _refresh_facts(self, payload):
         """POST /refresh-facts — pull a customer's WAHA history and re-run
