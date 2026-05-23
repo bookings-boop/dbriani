@@ -2673,17 +2673,27 @@ class Handler(BaseHTTPRequestHandler):
                                  "error": f"hermes rc={rc}",
                                  "draft_text": "", "label": label})
                 return
-            data = extract_json(out)
+            # extract_json returns (parsed_dict, raw_blob_str) — unpack both.
+            parsed, _blob = extract_json(out)
             draft_text = ""
-            if isinstance(data, dict):
-                # Same shape as _draft(): {messages:[...]} or {text:"..."}
-                msgs = data.get("messages") or []
+            if isinstance(parsed, dict):
+                # Hermes shape: {messages: ["hey Mark...", "..."]} —
+                # strings, not dicts. Be tolerant of both.
+                msgs = parsed.get("messages") or []
                 if msgs and isinstance(msgs, list):
-                    draft_text = "\n".join(
-                        m.get("text", "") for m in msgs
-                        if isinstance(m, dict)).strip()
+                    parts = []
+                    for m in msgs:
+                        if isinstance(m, str):
+                            parts.append(m.strip())
+                        elif isinstance(m, dict):
+                            parts.append((m.get("text") or "").strip())
+                    draft_text = "\n".join(p for p in parts if p).strip()
                 if not draft_text:
-                    draft_text = (data.get("text") or "").strip()
+                    draft_text = (parsed.get("text") or "").strip()
+            if not draft_text:
+                log(f"draft_followup empty draft — parsed_keys="
+                    f"{list(parsed.keys()) if isinstance(parsed, dict) else None}"
+                    f"  raw[:200]={(out or '')[:200]!r}")
             # Mark the nudge so the report damps + reengage_attempts increments.
             try:
                 upsert_conversation_state(cid, "nudge_drafted")
@@ -2703,18 +2713,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
                              "draft_text": "", "label": "WARM"})
 
+    def _resolve_target(self, payload):
+        """Return (customer_id, error_text). On success: ('cid…@lid', None).
+        On any miss: ('', '⚠️ ...'). Handles either:
+          - {customer_id: '…@lid'}   — direct
+          - {name: 'Mark'}           — name lookup via resolve_customer_by_name
+        Note: resolve_customer_by_name returns (cid_or_None, matches[]) — we
+        unpack the tuple correctly here so callers don't have to."""
+        cid = (payload.get("customer_id") or "").strip()
+        if cid:
+            return cid, None
+        name_query = (payload.get("name") or "").strip()
+        if not name_query:
+            return "", "⚠️ Provide a name or customer id."
+        resolved, matches = resolve_customer_by_name(name_query)
+        if resolved:
+            return resolved, None
+        if matches:
+            lines = [f"⚠️ Multiple matches for {name_query!r}. Try one of:"]
+            for m in matches[:5]:
+                lines.append(f"  • {m['name']} — `{m['customer_id']}`")
+            return "", "\n".join(lines)
+        return "", f"⚠️ No customer found for {name_query!r}."
+
     def _info(self, payload):
         """POST /info — operator-readable single-lead summary. Returns
         markdown text shaped for human reading (no raw signal names, no
         internal IDs unless useful). Fail-open, always 200."""
-        cid = (payload.get("customer_id") or "").strip()
-        name_query = (payload.get("name") or "").strip()
-        if not cid and name_query:
-            cid = resolve_customer_by_name(name_query) or ""
+        cid, err = self._resolve_target(payload)
         if not cid:
-            self._send(200, {"ok": False,
-                             "error": "customer_id or name required",
-                             "telegram_text": "⚠️ Customer not found."})
+            self._send(200, {"ok": False, "error": err,
+                             "telegram_text": err})
             return
         try:
             row = get_current_label_row(cid)
@@ -2842,13 +2871,19 @@ class Handler(BaseHTTPRequestHandler):
     def _label(self, payload):
         """POST /label — manual label override + record into label_corrections
         for self-improvement dampening."""
-        cid = (payload.get("customer_id") or "").strip()
         new_label = (payload.get("label") or "").strip().upper()
         reason = (payload.get("reason") or "").strip()
-        if not cid or new_label not in LABELS:
+        if new_label not in LABELS:
             self._send(200, {"ok": False,
-                             "error": "customer_id + label (one of {LABELS}) required",
-                             "telegram_text": f"⚠️ Bad request: {new_label!r}."})
+                             "error": f"label must be one of {sorted(LABELS)}",
+                             "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
+                             "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
+                             "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
+            return
+        cid, err = self._resolve_target(payload)
+        if not cid:
+            self._send(200, {"ok": False, "error": err,
+                             "telegram_text": err})
             return
         try:
             row = get_current_label_row(cid)
@@ -2922,13 +2957,18 @@ class Handler(BaseHTTPRequestHandler):
     def _snooze(self, payload):
         """POST /snooze — set label_locked_until for a customer; don't change
         the label. Duration like '4h', '2d', '30m'."""
-        cid = (payload.get("customer_id") or "").strip()
         duration = (payload.get("duration") or "").strip().lower()
         m = re.match(r"^(\d+)([mhd])$", duration)
-        if not cid or not m:
+        if not m:
             self._send(200, {"ok": False,
-                             "error": "customer_id + duration (e.g. 4h, 2d) required",
-                             "telegram_text": "⚠️ Bad duration."})
+                             "error": "duration must match \\d+[mhd] (e.g. 4h, 2d, 30m)",
+                             "telegram_text": f"⚠️ Bad duration: {duration!r}.  "
+                             "Use 4h / 2d / 30m."})
+            return
+        cid, err = self._resolve_target(payload)
+        if not cid:
+            self._send(200, {"ok": False, "error": err,
+                             "telegram_text": err})
             return
         try:
             n_val = int(m.group(1))

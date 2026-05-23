@@ -4144,7 +4144,7 @@
       "onError": "continueRegularOutput",
       "parameters": {
         "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -4156,7 +4156,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"callback_query_id\": {{ $('Parse Callback').item.json.callback_query_id }}, \"text\": {{ JSON.stringify($json.telegram_text || '\ud83d\udca4 snoozed') }} }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text || '\ud83d\udca4 snoozed') }} }",
         "options": {}
       }
     },
