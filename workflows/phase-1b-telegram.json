@@ -1519,7 +1519,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// R3: fan a draft's messages[] into one item per message\nconst draft = $('Parse Callback').first().json.draft;\nconst msgs = (draft && Array.isArray(draft.messages) && draft.messages.length)\n  ? draft.messages\n  : [ (draft && draft.draft_text) || '(empty draft)' ];\nreturn msgs.map((m, i) => ({\n  json: { chatId: draft.customer_phone, text: String(m), seq: i + 1, total: msgs.length, draft_id: draft.id }\n}));"
+        "jsCode": "// R3: fan a draft's messages[] into one item per message\nconst draft = $('Parse Callback').first().json.draft;\n\n// S3.3 fix \u2014 double-Send race. If Mark Sent already ran (whether by this\n// exec or a prior concurrent Send tap on the same draft_id), bail before\n// firing WAHA. Same pattern Check Pending (FR-5 improver) uses.\nif (draft && (draft.messages_sent_count || 0) > 0) {\n  return [];  // already sent \u2014 block this exec\n}\n\nconst msgs = (draft && Array.isArray(draft.messages) && draft.messages.length)\n  ? draft.messages\n  : [ (draft && draft.draft_text) || '(empty draft)' ];\nreturn msgs.map((m, i) => ({\n  json: { chatId: draft.customer_phone, text: String(m), seq: i + 1, total: msgs.length, draft_id: draft.id }\n}));"
       },
       "id": "b9d119c4-7a74-4964-b7d7-10e5002db63b",
       "name": "Prepare Send",
