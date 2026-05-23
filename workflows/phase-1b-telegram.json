@@ -4523,7 +4523,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review \u2014 label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\u274c Skip', callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
+        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review \u2014 label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
       }
     },
     {
@@ -4767,6 +4767,158 @@
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify('\u26a0\ufe0f STALE FOLLOW-UP \u2014 Send aborted.\\n\\n' + 'Customer ' + ($json.customer_name || $json.customer_id || '?') + ' replied AFTER this draft was generated (' + (($json.lag_seconds || 0) > 60 ? Math.round(($json.lag_seconds||0)/60) + ' min later' : ($json.lag_seconds||0) + ' sec later') + ').\\n\\n' + 'Their last message:\\n\"' + ($json.last_msg_preview || '(no preview)') + '\"\\n\\n' + 'Tap [\ud83d\udcac Draft nudge] on /review to generate a fresh draft that addresses what they actually said.') }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
+    },
+    {
+      "id": "06a0492e-2800-4882-bbe6-dc972c8d46dc",
+      "name": "Followup Regen?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5296,
+        1440
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c05c8a5e-7368-426a-bfa7-04aaf0d88af7",
+              "leftValue": "={{ $('Parse Callback').item.json.draft.is_followup }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8ccd02ad-905d-4cf6-bba8-6b1ee13a48de",
+      "name": "Hermes Regen Followup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5536,
+        1200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/draft-followup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft.customer_phone) }} }",
+        "options": {
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "68149ded-7f2b-4bcd-80a4-7a71b09634e2",
+      "name": "Build Regen Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5776,
+        1200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the new card text + same inline keyboard for a regenerated followup.\nconst fu = $('Hermes Regen Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\n\nconst id    = d.id;\nconst cid   = d.customer_phone || pc.customer_id;\nconst label = fu.label || d.followup_label || 'WARM';\nconst draft = (fu.draft_text || '').trim();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')  \u00b7 regenerated';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n    new_messages: [draft],\n    telegram_message_id: d.telegram_message_id,\n    telegram_chat_id: d.telegram_chat_id || 5532831477,\n    edit_payload: {\n      chat_id: d.telegram_chat_id || 5532831477,\n      message_id: d.telegram_message_id,\n      text: text,\n      parse_mode: 'Markdown',\n      reply_markup: reply_markup\n    }\n  }\n};"
+      }
+    },
+    {
+      "id": "25ddbcba-f00d-4ff7-9027-fb56455ae229",
+      "name": "Update Redis (Regen)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6016,
+        1200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"update\", \"draft_id\": {{ JSON.stringify($('Build Regen Card').item.json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($('Build Regen Card').item.json.draft_text) }}, \"messages\": {{ JSON.stringify($('Build Regen Card').item.json.new_messages) }} } }",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "3dd73ee9-a148-470c-88a6-cf3931fe8cc5",
+      "name": "Edit Telegram (Regen Followup)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6256,
+        1200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Build Regen Card').item.json.edit_payload.chat_id }}, \"message_id\": {{ $('Build Regen Card').item.json.edit_payload.message_id }}, \"text\": {{ JSON.stringify($('Build Regen Card').item.json.edit_payload.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify($('Build Regen Card').item.json.edit_payload.reply_markup) }} }",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -4958,7 +5110,7 @@
         ],
         [
           {
-            "node": "Prep Regen",
+            "node": "Followup Regen?",
             "type": "main",
             "index": 0
           }
@@ -6367,6 +6519,62 @@
       ]
     },
     "Send Aborted Alert": {
+      "main": [
+        []
+      ]
+    },
+    "Followup Regen?": {
+      "main": [
+        [
+          {
+            "node": "Hermes Regen Followup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prep Regen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Regen Followup": {
+      "main": [
+        [
+          {
+            "node": "Build Regen Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Regen Card": {
+      "main": [
+        [
+          {
+            "node": "Update Redis (Regen)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Redis (Regen)": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (Regen Followup)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Telegram (Regen Followup)": {
       "main": [
         []
       ]
