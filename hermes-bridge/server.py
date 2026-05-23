@@ -1624,6 +1624,16 @@ def render_review(scored, totals, mode="ondemand"):
         sections[label]["items"].append((score, row))
         seen_ids.append(row["customer_id"])
 
+    # Sort NEW section by last_customer_message_at DESC NULLS LAST — most
+    # recently active customer first. Score-based tie-breaking was letting
+    # genuinely new contacts fall into the overflow behind older NEW leads.
+    # Other sections keep their score-based order (their boosts already
+    # encode recency via the "we owe a reply > 30min" rule).
+    def _recency_key(item):
+        secs = item[1].get("last_customer_message_at_seconds")
+        return (secs is None, secs if secs is not None else 0)
+    sections["NEW"]["items"].sort(key=_recency_key)
+
     # ---- Single-message render (backward compat) ----------------------------
     when = ("Scheduled review" if mode == "scheduled"
             else "On-demand review")
@@ -1648,7 +1658,7 @@ def render_review(scored, totals, mode="ondemand"):
         for i, (score, row) in enumerate(shown, 1):
             why = _why_line(row, label_key)
             lead_body = (
-                f"*{row.get('name') or 'Unknown'}* — "
+                f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
                 f"{(row.get('dates') or 'no date')} · "
                 f"msg #{row.get('message_count')}\n"
@@ -1687,6 +1697,18 @@ def render_review(scored, totals, mode="ondemand"):
         "per_lead_messages": per_lead_messages,
         "mark_seen_ids": seen_ids,
     }
+
+
+def _name_fallback(customer_id):
+    """Build a recognisable label from customer_id when the customer's name
+    is missing. Shows the last 4 digits prefixed with '…'. No country-code
+    guessing — @lid IDs aren't real E.164 numbers, and even @c.us IDs have
+    variable-length CCs that would mislabel."""
+    cid = (customer_id or "").strip()
+    digits = "".join(c for c in cid.split("@")[0] if c.isdigit())
+    if len(digits) < 4:
+        return "(unknown)"
+    return "…" + digits[-4:]
 
 
 def _why_line(row, label_key):
