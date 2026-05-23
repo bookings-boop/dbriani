@@ -330,32 +330,81 @@ FEEDBACK_CLASSIFIER_PROMPT = (
 )
 
 
+def _classify_feedback_fallback(text):
+    """Deterministic last-resort classifier when Hermes is slow/down.
+    Pattern-matches the operator's feedback to choose a class without LLM.
+    Bias: prefer SCENARIO_RULE or CUSTOMER_NOTE only when the cue is strong;
+    everything else lands in GLOBAL_RULE so the operator can still tweak it."""
+    t = (text or "").strip()
+    low = t.lower()
+    # CUSTOMER_NOTE: contains "customer <Name>" or a quoted/capitalized
+    # personal name marker. Pull the first capitalized token after "customer".
+    name = ""
+    m = re.search(r"\bcustomer\s+([A-Z][\w'-]{1,30})", t)
+    if m:
+        name = m.group(1).strip()
+    elif re.search(r"\b(mr|mrs|ms|sir|madam)\s+[a-z]", low):
+        pass  # honorific without name — skip
+    # SCENARIO cues
+    scenario = ""
+    for cue, name_ in (
+        ("proposal", "proposal"), ("birthday", "birthday"),
+        ("anniversary", "anniversary"), ("family group", "family group"),
+        ("corporate", "corporate"), ("b2b", "b2b"),
+        ("vip", "vip"), ("repeat", "repeat customer"),
+    ):
+        if cue in low:
+            scenario = name_
+            break
+    if name:
+        cls = "CUSTOMER_NOTE"
+    elif scenario:
+        cls = "SCENARIO_RULE"
+    else:
+        cls = "GLOBAL_RULE"
+    # Clean text: trim trailing punctuation, ensure imperative-ish.
+    clean = re.sub(r"\s+", " ", t).strip().rstrip(".,;:")
+    summary = clean if len(clean) <= 120 else (clean[:117] + "...")
+    return {
+        "classification": cls,
+        "customer_name": name,
+        "scenario": scenario,
+        "text": clean,
+        "summary": summary,
+        "_fallback": True,
+    }
+
+
 def classify_feedback(text):
-    """Hermes classifier call. Returns the parsed dict or None on failure."""
+    """Hermes classifier call. Returns the parsed dict or a deterministic
+    fallback on failure — never None when text is non-empty, so /feedback
+    never silently drops."""
     if not text or not text.strip():
         return None
     try:
         rc, out, _, _ = run_hermes(FEEDBACK_CLASSIFIER_PROMPT + text.strip(),
-                                   timeout=15)
+                                   timeout=60)
+        if rc == 0:
+            parsed, _ = extract_json(out)
+            if isinstance(parsed, dict):
+                cls = (parsed.get("classification") or "").upper().strip()
+                if cls in ("CUSTOMER_NOTE", "GLOBAL_RULE", "SCENARIO_RULE"):
+                    return {
+                        "classification": cls,
+                        "customer_name": (parsed.get("customer_name") or "").strip(),
+                        "scenario": (parsed.get("scenario") or "").strip(),
+                        "text": (parsed.get("text") or "").strip(),
+                        "summary": (parsed.get("summary") or "").strip(),
+                    }
+        log("feedback classify rc=", rc, "— falling back to deterministic")
     except Exception as e:
-        log("feedback classify hermes error:", repr(e))
-        return None
-    if rc != 0:
-        log("feedback classify rc=", rc)
-        return None
-    parsed, _ = extract_json(out)
-    if not isinstance(parsed, dict):
-        return None
-    cls = (parsed.get("classification") or "").upper().strip()
-    if cls not in ("CUSTOMER_NOTE", "GLOBAL_RULE", "SCENARIO_RULE"):
-        return None
-    return {
-        "classification": cls,
-        "customer_name": (parsed.get("customer_name") or "").strip(),
-        "scenario": (parsed.get("scenario") or "").strip(),
-        "text": (parsed.get("text") or "").strip(),
-        "summary": (parsed.get("summary") or "").strip(),
-    }
+        log("feedback classify hermes error:", repr(e),
+            "— falling back to deterministic")
+    # Hermes failed/timed out — never drop operator feedback silently.
+    fb = _classify_feedback_fallback(text)
+    log(f"feedback classify FALLBACK -> {fb['classification']} "
+        f"name={fb['customer_name']!r} scenario={fb['scenario']!r}")
+    return fb
 
 
 def _waha_get(path, timeout=12):
@@ -1191,7 +1240,7 @@ def extract_session(*streams):
 # ============================================================================
 
 LABELS = frozenset({
-    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
+    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD", "CONFIRMED",
     "PAUSED_SPAM", "PAUSED_B2B", "PAUSED_PERSONAL",
 })
 
@@ -1526,6 +1575,11 @@ def score_lead(row, now_dt):
     Negative scores → PAUSED/snoozed tail."""
     score = 0
     label = row.get("label") or "NEW"
+    # CONFIRMED is a terminal/success state — short-circuit before any urgency
+    # or damping math can take the score negative and dump them into the
+    # paused tail. They render in their own ✅ section.
+    if label == "CONFIRMED":
+        return 5000
     if label == "NEEDS_ATTENTION":
         score += 1000
     elif label == "HOT":
@@ -1720,11 +1774,16 @@ def render_review(scored, totals, mode="ondemand"):
         "COLD":            {"items": [], "cap": REVIEW_CAP_COLD,
                             "header": "❄️ COLD — re-engage candidates",
                             "emoji": "❄️"},
+        "CONFIRMED":       {"items": [], "cap": 20,
+                            "header": "✅ CONFIRMED — booked / paid",
+                            "emoji": "✅"},
     }
     pause_tail = []
     seen_ids = []
     for score, row in scored:
         label = row.get("label") or "NEW"
+        # PAUSED_* always tail. CONFIRMED is success — keep on the report,
+        # but in its own section without nudge buttons (handled below).
         if label.startswith("PAUSED_") or score < 0:
             pause_tail.append(row)
             continue
@@ -1755,7 +1814,8 @@ def render_review(scored, totals, mode="ondemand"):
     keyboards = []
     per_lead_messages = []
 
-    for label_key in ("HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD"):
+    for label_key in ("HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD",
+                      "CONFIRMED"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -1776,11 +1836,18 @@ def render_review(scored, totals, mode="ondemand"):
             )
             lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))
             sid = row["customer_id"]
-            kb = [[
-                {"text": "💬 Draft nudge", "callback_data": f"nudge:{sid}"},
-                {"text": "💤 Snooze 4h",   "callback_data": f"snz:{sid}:4h"},
-                {"text": "ℹ️ Info",        "callback_data": f"inf:{sid}"},
-            ]]
+            # CONFIRMED: payment done, no nudges needed — show Info + Unmark only.
+            if label_key == "CONFIRMED":
+                kb = [[
+                    {"text": "ℹ️ Info", "callback_data": f"inf:{sid}"},
+                    {"text": "↩️ Unmark", "callback_data": f"inf:{sid}"},
+                ]]
+            else:
+                kb = [[
+                    {"text": "💬 Draft nudge", "callback_data": f"nudge:{sid}"},
+                    {"text": "💤 Snooze 4h",   "callback_data": f"snz:{sid}:4h"},
+                    {"text": "ℹ️ Info",        "callback_data": f"inf:{sid}"},
+                ]]
             keyboards.append(kb[0])
             # Per-lead card: section emoji prefix + lead body, plus its own kb.
             per_lead_messages.append({
@@ -2885,6 +2952,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             previous_label = row.get("label")
 
+            # CONFIRMED is terminal — payment/booking won, never auto-demote
+            # back to WARM/HOT/COLD on subsequent customer messages. Operator
+            # can still override via `/label <name> WARM` if they need to.
+            if previous_label == "CONFIRMED":
+                self._send(200, {
+                    "ok": True, "customer_id": cid,
+                    "label": "CONFIRMED",
+                    "previous_label": "CONFIRMED",
+                    "changed": False, "signal": "confirmed_terminal",
+                    "confidence": 1.0,
+                    "evidence": "booking confirmed; auto-eval suppressed",
+                    "interrupt_required": False, "alert_text": None,
+                })
+                return
+
             # If locked (PAUSED via /label or /snooze), short-circuit.
             if skip_if_locked and row.get("label_locked_until"):
                 cid_esc = cid.replace("'", "''")
@@ -3012,6 +3094,12 @@ class Handler(BaseHTTPRequestHandler):
                         self._update_last_analysis(cid, "no_facts_row", 1.0)
                         continue
                     prev = row.get("label")
+                    # CONFIRMED is terminal — skip the hourly sweep entirely,
+                    # no transitions, no follow-up nudges. Operator can still
+                    # downgrade via /label.
+                    if prev == "CONFIRMED":
+                        self._update_last_analysis(cid, "confirmed_terminal", 1.0)
+                        continue
                     # Honor manual lock window.
                     cid_esc = cid.replace("'", "''")
                     lock_out, _err = _psql(
@@ -3282,7 +3370,8 @@ class Handler(BaseHTTPRequestHandler):
             scored = sorted(((score_lead(r, None), r) for r in rows),
                             key=lambda t: t[0], reverse=True)
             totals = {"total": len(rows), "HOT": 0, "WARM": 0, "COLD": 0,
-                      "NEW": 0, "NEEDS_ATTENTION": 0, "PAUSED": 0}
+                      "NEW": 0, "NEEDS_ATTENTION": 0, "CONFIRMED": 0,
+                      "PAUSED": 0}
             for r in rows:
                 lab = r.get("label") or "NEW"
                 if lab.startswith("PAUSED_"):
@@ -3628,7 +3717,7 @@ class Handler(BaseHTTPRequestHandler):
                              "error": f"label must be one of {sorted(LABELS)}",
                              "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
                              "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
-                             "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
+                             "CONFIRMED, PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
             return
         cid, err = self._resolve_target(payload)
         if not cid:

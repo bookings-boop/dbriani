@@ -219,7 +219,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.telegram_payload) }}",
+        "jsonBody": "={{ JSON.stringify($('Queue & Format').item.json.telegram_payload) }}",
         "options": {}
       },
       "id": "fd8c0029-447c-456b-9995-b125205dae2a",
@@ -344,7 +344,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload —\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nconst queue = wfData.pendingQueue || [];\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback — runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload —\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nif (!Array.isArray(wfData.pendingQueue)) wfData.pendingQueue = [];\nconst queue = wfData.pendingQueue;\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback — runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\n// BUG-FIX 2026-05-23: write-through cache — when Redis is the source\n// (hourly-sweep nudge cards live in a different workflow's staticData;\n// phase-1b's queue never had them), hydrate phase-1b's queue so Set\n// Awaiting Edit, Mark Sent, Mark Skipped, and Route Text Action's\n// awaiting_edit lookup all find the draft via queue.find(). Without\n// this, Edit on a hourly-sweep follow-up + text reply produces\n// '⚠️ Nothing sent'.\nif (redisDraft && !sdDraft && redisDraft.id) {\n  queue.push(redisDraft);\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -764,6 +764,44 @@
         5968,
         944
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/label",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify(($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.is_payment) ? ($('Parse Callback').item.json.draft.customer_phone || '') : '') }}, \"label\": \"CONFIRMED\", \"reason\": \"payment_link_sent — auto from Mark Sent\" }",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "b9d4f7c1-2026-05-23-confirmed",
+      "name": "Promote To Confirmed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6192,
+        1024
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
     },
     {
       "parameters": {
@@ -4523,7 +4561,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '💡 *NUDGE DRAFT* — ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review — label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
+        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '💡 *NUDGE DRAFT* — ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review — label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\n// BUG-FIX 2026-05-23: also push into staticData pendingQueue so Edit /\n// reply-with-feedback / Skip / Send all find the draft via the same\n// queue.find() path the customer-msg drafts use. Without this, pressing\n// Edit on a nudge card and replying with text falls through Route Text\n// Action's awaiting_edit lookup and produces '⚠️ Nothing sent'.\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\ndata.pendingQueue.push(draftObj);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
       }
     },
     {
@@ -5029,7 +5067,13 @@
             "node": "Persist Draft",
             "type": "main",
             "index": 0
-          },
+          }
+        ]
+      ]
+    },
+    "Persist Draft": {
+      "main": [
+        [
           {
             "node": "Send Draft to Telegram",
             "type": "main",
@@ -5216,6 +5260,11 @@
         [
           {
             "node": "Edit Telegram (Send)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Promote To Confirmed",
             "type": "main",
             "index": 0
           }
