@@ -4236,7 +4236,7 @@
         2200
       ],
       "parameters": {
-        "fieldToSplitOut": "={{ $('Hermes Review').item.json.per_lead_messages }}",
+        "fieldToSplitOut": "per_lead_messages",
         "options": {}
       }
     },
@@ -5640,6 +5640,11 @@
             "node": "Send Review",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Split Lead Cards",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -5712,13 +5717,7 @@
     },
     "Send Review": {
       "main": [
-        [
-          {
-            "node": "Split Lead Cards",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        []
       ]
     },
     "Split Lead Cards": {
