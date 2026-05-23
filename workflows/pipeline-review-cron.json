@@ -117,7 +117,7 @@
         300
       ],
       "parameters": {
-        "fieldToSplitOut": "per_lead_messages",
+        "fieldToSplitOut": "={{ $('Hermes Review').item.json.per_lead_messages }}",
         "options": {}
       }
     },
