@@ -1,5 +1,10 @@
 # Lead Intelligence Query Interface — Implementation Plan (7c)
 
+> ⚠️ **SUPERSEDED — 2026-05-23.** This plan has been merged with 7a
+> and 7b into a single unified plan:
+> **`docs/pipeline-review-plan.md`**. Kept here for reference only.
+> Do not build from this file.
+
 > **Status:** PLAN ONLY. No code written. No workflow changes deployed.
 > Built artifacts will follow the standard pattern (`scripts/build_*.py`,
 > `safe_put` via `n8n_deploy.N8N`, bridge edits compile-checked then

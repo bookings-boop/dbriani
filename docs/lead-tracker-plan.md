@@ -1,5 +1,10 @@
 # Lead Tracker + Auto-labeling + Digests — Implementation Plan (7a)
 
+> ⚠️ **SUPERSEDED — 2026-05-23.** This plan has been merged with 7b
+> and 7c into a single unified plan:
+> **`docs/pipeline-review-plan.md`**. Kept here for reference only.
+> Do not build from this file.
+
 > **Status:** PLAN ONLY. No code written. No workflow changes deployed.
 > Built artifacts will follow the standard pattern (`scripts/build_*.py`,
 > `safe_put` via `n8n_deploy.N8N`, bridge edits compile-checked then restarted).
