@@ -3062,14 +3062,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _draft_followup(self, payload):
         """POST /draft-followup — generate a follow-up draft via Hermes.
-        Body: {customer_id, history, customer_name?}. Reuses build_query
-        scaffold but injects a label-specific directive."""
+        Body: {customer_id, history?, customer_name?, silence_window?, silence_hours?}.
+        Reuses build_query scaffold but injects a label-specific directive.
+
+        If caller didn't supply history (proactive sweep + [Draft nudge]
+        button both omit it), pull the last 10 messages from WAHA so
+        Hermes always sees the live conversation context BEFORE drafting.
+        Without this, follow-up drafts ignore in-progress negotiations
+        and write off-context generic upsells."""
         cid = (payload.get("customer_id") or "").strip()
         history = payload.get("history") or ""
         if not cid:
             self._send(200, {"ok": False, "error": "customer_id required"})
             return
         try:
+            # Always pull live WAHA history if the caller didn't provide one
+            # (or provided a stale/short one). The customer-message path's
+            # /draft already gets history via the workflow's WAHA fetch —
+            # this brings /draft-followup to parity.
+            waha_used = False
+            waha_count = 0
+            if len(history.strip()) < 50:
+                waha = waha_fetch_history(cid, limit=10)
+                if not waha.get("err") and waha.get("history"):
+                    history = waha["history"]
+                    waha_used = True
+                    waha_count = waha.get("count", 0)
             row = get_current_label_row(cid)
             label = (row or {}).get("label", "WARM") if row else "WARM"
             name = (row or {}).get("name", "") if row else ""
@@ -3161,6 +3179,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as _e:
                 log("draft_followup nudge_drafted err:", repr(_e))
             log(f"draft-followup cid={cid!r} label={label} "
+                f"waha_used={waha_used} waha_count={waha_count} "
                 f"draft_len={len(draft_text)} elapsed={elapsed}s")
             self._send(200, {
                 "ok": True, "customer_id": cid, "label": label,
