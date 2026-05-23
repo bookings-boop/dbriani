@@ -3826,7 +3826,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\", \"reply_markup\": JSON.stringify({ inline_keyboard: ($json.inline_keyboards || []) }) }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboards || []) }) }} }",
         "options": {}
       }
     },
@@ -3892,7 +3892,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
     },
@@ -3958,7 +3958,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
     },
@@ -4024,7 +4024,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text) }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }} }",
         "options": {}
       }
     },
@@ -4090,7 +4090,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify('\ud83d\udca1 *NUDGE DRAFT* for `' + $('Parse Callback').item.json.customer_id + '`  (' + ($json.label || '?') + ')\\n\\n' + ($json.draft_text || '\u26a0\ufe0f no draft generated')), \"parse_mode\": \"Markdown\" }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify('\ud83d\udca1 *NUDGE DRAFT* for `' + $('Parse Callback').item.json.customer_id + '`  (' + ($json.label || '?') + ')\\n\\n' + ($json.draft_text || '\u26a0\ufe0f no draft generated')) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
     },
@@ -4156,7 +4156,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"callback_query_id\": $('Parse Callback').item.json.callback_query_id, \"text\": JSON.stringify($json.telegram_text || '\ud83d\udca4 snoozed') }",
+        "jsonBody": "={ \"callback_query_id\": {{ $('Parse Callback').item.json.callback_query_id }}, \"text\": {{ JSON.stringify($json.telegram_text || '\ud83d\udca4 snoozed') }} }",
         "options": {}
       }
     },
@@ -4222,7 +4222,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": JSON.stringify($json.telegram_text), \"parse_mode\": \"Markdown\" }",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
         "options": {}
       }
     }
