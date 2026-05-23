@@ -3554,7 +3554,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_phone) }}, \"latest_message\": {{ JSON.stringify($json.user_message) }}, \"skip_if_locked\": true }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"latest_message\": {{ JSON.stringify($('Format Context').item.json.userMessage) }}, \"skip_if_locked\": true }",
         "options": {}
       }
     },
@@ -3652,7 +3652,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_phone) }}, \"event\": \"customer_message\" }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"customer_message\" }",
         "options": {}
       }
     },
@@ -3688,7 +3688,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.customer_id) }}, \"event\": \"operator_reply\" }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.customer_phone) }}, \"event\": \"operator_reply\" }",
         "options": {}
       }
     },
@@ -3724,7 +3724,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Customer Facts').item.json.customer_id || $json.customer_phone) }}, \"event\": \"operator_reply\" }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"operator_reply\" }",
         "options": {}
       }
     },
@@ -3760,7 +3760,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Customer Facts').item.json.customer_id || $json.customer_phone) }}, \"event\": \"draft_posted\" }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"draft_posted\" }",
         "options": {}
       }
     },
