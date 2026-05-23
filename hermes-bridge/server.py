@@ -71,6 +71,9 @@ DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
                   "AT TIME ZONE 'Asia/Dubai'")
 
 # --- Nomod payment links (minimal build) -----------------------------------
+WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
+WAHA_BASE = os.environ.get("WAHA_BASE", "").rstrip("/")
+
 NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
 NOMOD_API_BASE = os.environ.get("NOMOD_API_BASE",
                                 "https://api.nomod.com/v1").rstrip("/")
@@ -353,6 +356,70 @@ def classify_feedback(text):
         "text": (parsed.get("text") or "").strip(),
         "summary": (parsed.get("summary") or "").strip(),
     }
+
+
+def _waha_get(path, timeout=12):
+    """GET against WAHA REST API. Returns (parsed_json_or_None, err_str_or_None).
+    Always non-raising."""
+    if not (WAHA_API_KEY and WAHA_BASE):
+        return None, "WAHA_API_KEY/WAHA_BASE not configured"
+    try:
+        req = urllib.request.Request(
+            WAHA_BASE + path,
+            headers={"X-Api-Key": WAHA_API_KEY})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        return None, f"WAHA {e.code}: {(e.read() or b'').decode('utf-8', 'replace')[:160]}"
+    except Exception as e:
+        return None, f"WAHA req failed: {e!r}"
+
+
+def waha_fetch_history(customer_id, limit=30):
+    """Pull last N messages from WAHA + pushName. Returns dict:
+    {history: '...', last_message: '...', push_name: '...', count: N, err: None|str}."""
+    msgs, err = _waha_get(
+        f"/api/default/chats/{customer_id}/messages?limit={limit}&downloadMedia=false")
+    if err:
+        return {"history": "", "last_message": "", "push_name": "",
+                "count": 0, "err": err}
+    if not isinstance(msgs, list) or not msgs:
+        return {"history": "First contact, no prior messages.",
+                "last_message": "", "push_name": "", "count": 0, "err": None}
+    # Get pushName from chat list
+    chats, _ = _waha_get("/api/default/chats?limit=50")
+    push_name = ""
+    if isinstance(chats, list):
+        for c in chats:
+            sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
+            if sid == customer_id:
+                pn = (c.get("name") or "").strip()
+                # Skip pushNames that aren't useful display names
+                if pn and not pn.startswith("+") and pn not in ("WhatsApp Business",
+                                                                "Dubriani admin chat"):
+                    push_name = pn
+                break
+    # Build history string (oldest first, max last 20 with body)
+    msgs_sorted = sorted(msgs, key=lambda x: x.get("timestamp", 0))
+    with_body = [m for m in msgs_sorted if (m.get("body") or "").strip()]
+    if not with_body:
+        return {"history": "First contact, no prior messages.",
+                "last_message": "", "push_name": push_name,
+                "count": 0, "err": None}
+    now_ts = int(time.time())
+    lines = []
+    for m in with_body[-20:-1]:
+        who = "Dubriani" if m.get("fromMe") else "Customer"
+        secs = max(0, now_ts - (m.get("timestamp") or now_ts))
+        ago = (f"{secs // 60}m" if secs < 5400 else
+               f"{secs // 3600}h" if secs < 129600 else
+               f"{secs // 86400}d")
+        body = (m.get("body") or "").replace("\n", " ").strip()[:240]
+        lines.append(f'{who} ({ago} ago): "{body}"')
+    history = "\n".join(lines) if lines else "First contact, no prior messages."
+    last = (with_body[-1].get("body") or "").strip()[:500]
+    return {"history": history, "last_message": last,
+            "push_name": push_name, "count": len(with_body), "err": None}
 
 
 def resolve_customer_by_name(name):
@@ -1855,7 +1922,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/review", "/draft-followup",
                              "/info", "/label", "/snooze",
                              "/queue",
-                             "/followup-action"):
+                             "/followup-action",
+                             "/refresh-facts"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -1911,6 +1979,8 @@ class Handler(BaseHTTPRequestHandler):
             self._queue(payload)
         elif self.path == "/followup-action":
             self._followup_action(payload)
+        elif self.path == "/refresh-facts":
+            self._refresh_facts(payload)
         else:
             self._draft(payload)
 
@@ -2851,6 +2921,68 @@ class Handler(BaseHTTPRequestHandler):
                              "hermes_calls": 0, "skipped_unchanged": 0,
                              "eligible_followups": [],
                              "elapsed_ms": int((_time.time() - t0) * 1000)})
+
+    def _refresh_facts(self, payload):
+        """POST /refresh-facts — pull a customer's WAHA history and re-run
+        Hermes extraction over the FULL conversation (not just one message).
+        Body: {customer_id|name}. Returns the refreshed customer_facts row +
+        the WAHA history summary. Operator-on-demand command."""
+        cid = (payload.get("customer_id") or "").strip()
+        name_query = (payload.get("name") or "").strip()
+        if not cid and name_query:
+            resolved, _ = resolve_customer_by_name(name_query)
+            if resolved:
+                cid = resolved
+        if not cid:
+            self._send(200, {"ok": False, "error": "customer_id or name required",
+                             "telegram_text": "⚠️ Customer not found."})
+            return
+        try:
+            waha = waha_fetch_history(cid, limit=30)
+            if waha.get("err"):
+                self._send(200, {"ok": False, "error": waha["err"],
+                                 "telegram_text": f"⚠️ WAHA fetch failed: {waha['err']}"})
+                return
+            if waha["count"] == 0:
+                self._send(200, {"ok": False,
+                                 "error": "no messages in WAHA",
+                                 "telegram_text": "⚠️ No chat history for that customer."})
+                return
+            # Re-extract via the same path /customer-facts uses, but feed full history
+            extracted = extract_customer_facts(waha["last_message"], waha["history"])
+            cached = get_customer_facts(cid)
+            merged = _merge_facts(cached, extracted) if extracted else _merge_facts(cached, None)
+            if not (merged.get("name") or "").strip() and waha["push_name"]:
+                merged["name"] = waha["push_name"]
+            new_count, err = upsert_customer_facts(cid, merged.get("name") or "", merged)
+            if err:
+                log("refresh_facts upsert err:", err)
+            row = get_current_label_row(cid) or {}
+            name = row.get("name") or merged.get("name") or "(no name)"
+            yachts = row.get("yachts") or merged.get("yachts") or ""
+            dates = row.get("dates") or merged.get("dates") or ""
+            party = merged.get("party_size", "") or ""
+            mc = new_count if isinstance(new_count, int) else row.get("message_count", 0)
+            text = (
+                f"🔄 *Refreshed* `{cid}`\n"
+                f"   *{name}*\n"
+                f"   🛥 {yachts or '(none)'}\n"
+                f"   📅 {dates or '(none)'}\n"
+                f"   👥 {party or '(none)'}\n"
+                f"   📊 label *{row.get('label','?')}* · msg #{mc} · "
+                f"{waha['count']} msgs in WAHA history"
+            )
+            log(f"refresh-facts cid={cid!r} name={name!r} yachts={yachts!r} "
+                f"waha_count={waha['count']}")
+            self._send(200, {
+                "ok": True, "customer_id": cid,
+                "facts": merged, "label": row.get("label"),
+                "waha_count": waha["count"], "telegram_text": text,
+            })
+        except Exception as e:
+            log("refresh_facts ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e),
+                             "telegram_text": f"⚠️ Refresh failed: {e}"})
 
     def _followup_action(self, payload):
         """POST /followup-action — log a proactive-follow-up event to
