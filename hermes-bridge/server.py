@@ -499,7 +499,13 @@ def waha_fetch_history(customer_id, limit=30):
                 "count": 0, "err": None}
     now_ts = int(time.time())
     lines = []
-    for m in with_body[-20:-1]:
+    # Include the entire tail INCLUDING the most recent message. Earlier code
+    # used `with_body[-20:-1]` which silently dropped the latest message —
+    # /draft-followup only reads `history` (not `last_message`), so the
+    # nudge draft never saw the customer's most recent reply. That produced
+    # off-context drafts (operator: "nudge draft is not considering his
+    # last 10 messages").
+    for m in with_body[-20:]:
         who = "Dubriani" if m.get("fromMe") else "Customer"
         secs = max(0, now_ts - (m.get("timestamp") or now_ts))
         ago = (f"{secs // 60}m" if secs < 5400 else
@@ -508,6 +514,9 @@ def waha_fetch_history(customer_id, limit=30):
         body = (m.get("body") or "").replace("\n", " ").strip()[:240]
         lines.append(f'{who} ({ago} ago): "{body}"')
     history = "\n".join(lines) if lines else "First contact, no prior messages."
+    # last_message kept for callers that consume it (/info preview, customer
+    # facts extraction) — it's the most recent message in the chat, fromMe
+    # or otherwise.
     last = (with_body[-1].get("body") or "").strip()[:500]
     return {"history": history, "last_message": last,
             "push_name": push_name, "count": len(with_body), "err": None}
@@ -1956,8 +1965,12 @@ def _why_line(row, label_key):
             notes.append("engaged — value-add nudge could move it")
         elif label_key == "COLD":
             notes.append("worth a soft re-engagement message")
-        else:
+        elif label_key == "CONFIRMED":
+            notes.append("booked / paid — share boarding details or upsell")
+        elif label_key == "NEW":
             notes.append("new conversation")
+        else:
+            notes.append(label_key.lower().replace("_", " "))
     return " · ".join(notes)
 
 
