@@ -4412,12 +4412,12 @@
       "main": [
         [
           {
-            "node": "Send Draft to Telegram",
+            "node": "Persist Draft",
             "type": "main",
             "index": 0
           },
           {
-            "node": "Persist Draft",
+            "node": "Send Draft to Telegram",
             "type": "main",
             "index": 0
           }
