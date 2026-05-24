@@ -14,11 +14,24 @@ All test draft ids start with `__test__` so they're easy to clean up.
 """
 import json
 import os
+import shutil
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
+
+
+# Environment guard — this suite exercises the LIVE Redis on the box
+# via subprocess(redis-cli). On a laptop without redis-cli installed,
+# every test would raise FileNotFoundError and run_tests.py would
+# report 7 spurious failures. Skip cleanly with a clear message so
+# the rest of the local test suite stays green.
+if not shutil.which("redis-cli"):
+    print("SKIP test_queue.py — redis-cli not on PATH "
+          "(run on the box: ssh dubriani-ec2 "
+          "'python3 ~/hermes-bridge/test_queue.py')")
+    sys.exit(0)
 
 
 TEST_PREFIX = "__test_q__"
