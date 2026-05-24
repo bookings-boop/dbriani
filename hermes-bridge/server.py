@@ -49,6 +49,14 @@ from waha import (  # noqa: F401
     WAHA_API_KEY, WAHA_BASE,
     _waha_get, waha_lookup_push_name, waha_fetch_history,
 )
+from labels import (  # noqa: F401
+    LABELS, _LABEL_RANK, _HARD_DEMOTE_SIGNALS, _TIER_BELOW,
+    MONEY_RE, LETS_DO_IT_RE, PAST_DATE_MONTH_RE, PAYMENT_CONFIRMED_RE,
+    SAME_DAY_RE, PRICING_INQUIRED_RE, YACHT_KEYWORD_RE,
+    CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
+    CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
+    _MONTH_NUM, _parse_booking_date,
+)
 
 HOME = os.path.expanduser("~")
 BRIDGE_DIR = os.path.join(HOME, "hermes-bridge")
@@ -1407,83 +1415,9 @@ def build_learn_query(p):
 # (see docs/pipeline-review-plan.md §1, §2a–§2c)
 # ============================================================================
 
-LABELS = frozenset({
-    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
-    "WAITING_FOR_PAYMENT", "CONFIRMED",
-    "PAUSED_SPAM", "PAUSED_B2B", "PAUSED_PERSONAL",
-    # DISREGARDED — operator (or Hermes via [🛑 Disregard]) closed the lead
-    # as unconvertible. Hidden from /review entirely; not in pause_tail.
-    # Reopened only via explicit `/label <name> WARM` (or other).
-    "DISREGARDED",
-})
-
-# Signal regexes (compiled module-level).
-MONEY_RE = re.compile(
-    r"\b(AED|aed|price|budget|cost|how\s*much|cheap|expensive)\b"
-    r"|\$\d|\b\d{4,}\b",
-    re.IGNORECASE,
-)
-LETS_DO_IT_RE = re.compile(
-    # Verified commit/finalize phrases. Detects when a customer is past
-    # negotiation and ready to pay. Each alternation is anchored on a
-    # commit verb so it doesn't false-positive on generic chat.
-    r"(let'?s\s+(do\s+it|book|lock|go\s+ahead|proceed)|"
-    r"i'?ll\s+take\s+it|i\s+want\s+to\s+(book|lock|take)|"
-    r"i'?m\s+(in|ready)|ready\s+to\s+(book|pay|lock)|"
-    r"sounds\s+(good|great)[,\s]+book|"
-    r"book\s+it|lock\s+it\s+in|"
-    r"send\s+(me\s+)?the?\s+(payment\s+)?link|"
-    r"how\s+(do|can|should)\s+i\s+pay|"
-    r"go\s+ahead\s+(with|and\s+book)|"
-    r"yes\s+(book|let'?s|please)|"
-    r"ok\s+(let'?s|book|go\s+ahead)|"
-    r"alright\s+(let'?s|book|go\s+ahead))",
-    re.IGNORECASE,
-)
-# Past-date detection — used to demote HOT customers whose booking date
-# has passed. Matches month + day-of-month patterns in the dates field.
-PAST_DATE_MONTH_RE = re.compile(
-    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
-    r"nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?",
-    re.IGNORECASE,
-)
-# Payment-confirmation language from the customer. ONLY trips CONFIRMED
-# when paired with a recent payment_link_sent in autonomous_sends (last
-# 48h) — see _has_recent_payment_link_sent + compute_label. Anchored on
-# explicit commit verbs so a generic 'done' / 'paid' in casual chat
-# (e.g. 'i paid for parking') doesn't false-positive without context.
-PAYMENT_CONFIRMED_RE = re.compile(
-    r"\b("
-    r"i'?ve?\s+(paid|sent|transferred|done\s+(it|the\s+payment))|"
-    r"(payment|paid)\s+(done|sent|made|complete|successful)|"
-    r"(transferred|sent)\s+(it|the\s+(payment|amount|aed|money))|"
-    r"made\s+the?\s+payment|just\s+paid|now\s+paid|"
-    r"transaction\s+(successful|complete|done)|"
-    r"all\s+(paid|done|settled)|"
-    r"settled\s+(it|the\s+(payment|invoice))|"
-    r"payment\s+✅|paid\s+✅|done\s+✅"
-    r")\b",
-    re.IGNORECASE,
-)
-SAME_DAY_RE = re.compile(
-    r"\b(today|tonight|right\s*now|now|asap|immediately|this\s+(afternoon|evening|night))\b",
-    re.IGNORECASE,
-)
-PRICING_INQUIRED_RE = re.compile(
-    r"\b(price|cost|how\s*much|rate|rates|charge|fee)\b",
-    re.IGNORECASE,
-)
-YACHT_KEYWORD_RE = re.compile(
-    r"\b(yacht|boat|satoshi|pershing|sunseeker|thunder|catamaran|cruise|charter)\b",
-    re.IGNORECASE,
-)
-
-# Confidence dampening — see plan §2a step 4.
-CORRECTION_WINDOW_DAYS = 90
-CORRECTION_DAMPENING_DIVISOR = 5.0
-CONFIDENCE_FLOOR = 0.2
-CONFIDENCE_DEMOTE_THRESHOLD = 0.4
+# LABELS frozenset, signal regexes, _LABEL_RANK, _HARD_DEMOTE_SIGNALS,
+# _TIER_BELOW, confidence-dampening constants moved to labels.py
+# (re-exported at top of server.py for backward compat).
 
 # Sameday-interrupt cooldown — one ping per customer per 4 h.
 SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
@@ -1518,30 +1452,8 @@ REVIEW_CAP_NEEDS_ATTENTION = int(os.environ.get("REVIEW_CAP_NEEDS_ATTENTION", "1
 REVIEW_CAP_WARM = int(os.environ.get("REVIEW_CAP_WARM", "8"))
 REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
 
-# Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
-_TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
-
-# Label-priority ranking — higher = higher operator priority. Used by
-# the sticky-upward guard in _label_eval to prevent weak signals from
-# demoting a strong state on a single message.
-_LABEL_RANK = {
-    "NEW": 0, "COLD": 1, "WARM": 2, "HOT": 3,
-    "NEEDS_ATTENTION": 4, "WAITING_FOR_PAYMENT": 5, "CONFIRMED": 6,
-    # DISREGARDED ranks ABOVE CONFIRMED so the auto-classifier's sticky-
-    # upward guard treats it as terminal — a stray HOT/WARM signal won't
-    # bounce a disregarded lead back into /review. Operator must explicitly
-    # /label them to reopen.
-    "DISREGARDED": 7,
-}
-
-# Signals strong enough to demote regardless of confidence dampening.
-# Past-date / cold-decay / payment-confirmed / lock are deterministic;
-# the rest are LLM/regex heuristics that shouldn't pull a HOT down
-# without strong agreement. Operator's manual /label always overrides
-# via a different code path (apply_label_transition with reason='manual:*').
-_HARD_DEMOTE_SIGNALS = frozenset({
-    "date_passed", "cold_decay", "confirmed_terminal", "locked",
-})
+# _TIER_BELOW, _LABEL_RANK, _HARD_DEMOTE_SIGNALS moved to labels.py
+# (re-exported at top of server.py for backward compat).
 
 
 def get_correction_count(auto_signal, window_days=CORRECTION_WINDOW_DAYS):
@@ -1602,57 +1514,8 @@ def _has_recent_payment_link_sent(customer_id, hours=48):
         return False
 
 
-_MONTH_NUM = {
-    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
-}
-
-
-def _parse_booking_date(dates_str):
-    """Best-effort parse of customer_facts.dates into a date object.
-    Returns datetime.date or None. Handles 'Sat May 23', 'Mon Jun 1',
-    'Thu Jan 28 2027', etc. Year defaults to nearest future year (so
-    'May 23' in late May means this year; in December means next year)."""
-    import datetime as _dt
-    if not dates_str:
-        return None
-    m = PAST_DATE_MONTH_RE.search(dates_str)
-    if not m:
-        return None
-    month = _MONTH_NUM.get(m.group(1).lower()[:3])
-    if not month:
-        return None
-    try:
-        day = int(m.group(2))
-    except (TypeError, ValueError):
-        return None
-    year_grp = m.group(3)
-    today = _dt.date.today()
-    if year_grp:
-        try:
-            year = int(year_grp)
-        except ValueError:
-            year = today.year
-    else:
-        # No year given — pick the nearest sensible year. If month+day is
-        # already past in current year by >7 days, assume next year. Else
-        # current year (covers cases like 'May 23' on May 24 where the
-        # date IS in the past).
-        try:
-            cand = _dt.date(today.year, month, day)
-        except ValueError:
-            return None
-        days_past = (today - cand).days
-        if days_past > 60:
-            year = today.year + 1
-        else:
-            year = today.year
-    try:
-        return _dt.date(year, month, day)
-    except ValueError:
-        return None
+# _MONTH_NUM + _parse_booking_date moved to labels.py
+# (re-exported at top of server.py for backward compat).
 
 
 def _is_past_booking_date(dates_str):
