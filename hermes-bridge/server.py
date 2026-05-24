@@ -45,6 +45,10 @@ from hermes_calls import (  # noqa: F401
     HERMES, HERMES_TIMEOUT, SESSION_RE, FENCE_RE,
     run_hermes, extract_json, extract_session,
 )
+from waha import (  # noqa: F401
+    WAHA_API_KEY, WAHA_BASE,
+    _waha_get, waha_lookup_push_name, waha_fetch_history,
+)
 
 HOME = os.path.expanduser("~")
 BRIDGE_DIR = os.path.join(HOME, "hermes-bridge")
@@ -82,8 +86,8 @@ DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
                   "AT TIME ZONE 'Asia/Dubai'")
 
 # --- Nomod payment links (minimal build) -----------------------------------
-WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
-WAHA_BASE = os.environ.get("WAHA_BASE", "").rstrip("/")
+# WAHA_API_KEY / WAHA_BASE moved to waha.py (re-exported at top of file
+# for backward compat with `from server import WAHA_*` callers).
 
 NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
 NOMOD_API_BASE = os.environ.get("NOMOD_API_BASE",
@@ -477,119 +481,8 @@ def classify_feedback(text):
     return fb
 
 
-def _waha_get(path, timeout=12):
-    """GET against WAHA REST API. Returns (parsed_json_or_None, err_str_or_None).
-    Always non-raising."""
-    if not (WAHA_API_KEY and WAHA_BASE):
-        return None, "WAHA_API_KEY/WAHA_BASE not configured"
-    try:
-        req = urllib.request.Request(
-            WAHA_BASE + path,
-            headers={"X-Api-Key": WAHA_API_KEY})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8")), None
-    except urllib.error.HTTPError as e:
-        return None, f"WAHA {e.code}: {(e.read() or b'').decode('utf-8', 'replace')[:160]}"
-    except Exception as e:
-        return None, f"WAHA req failed: {e!r}"
-
-
-# In-process cache for WAHA pushName lookups — keyed by cid, value is
-# (push_name, expires_at_ts). 5-minute TTL is plenty; WAHA's chat list
-# rarely changes mid-conversation and a restart purges. Prevents hammering
-# WAHA on every inbound message (Customer Facts fires per-msg).
-_WAHA_PUSHNAME_CACHE = {}
-_WAHA_PUSHNAME_TTL = 300  # seconds
-
-
-def waha_lookup_push_name(customer_id):
-    """Return a useful display name for the given customer_id by querying
-    WAHA's /api/default/chats. Returns '' if WAHA is unconfigured / chat
-    not found / name is just a phone number / name is a system label.
-    Cached in-process for 5 minutes per cid."""
-    cid = (customer_id or "").strip()
-    if not cid:
-        return ""
-    now_ts = time.time()
-    hit = _WAHA_PUSHNAME_CACHE.get(cid)
-    if hit and hit[1] > now_ts:
-        return hit[0]
-    chats, err = _waha_get("/api/default/chats?limit=200")
-    if err or not isinstance(chats, list):
-        # Don't poison the cache on transient failure
-        return ""
-    push_name = ""
-    for c in chats:
-        sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
-        if sid == cid:
-            pn = (c.get("name") or "").strip()
-            # Keep phone-string display names (like '+44 7869 651761') — they
-            # match exactly what the operator sees on their WhatsApp client,
-            # so '+44 7869 651761' on a /review card is recognisable. Only
-            # filter the system labels that aren't actual contacts.
-            if pn and pn not in ("WhatsApp Business", "Dubriani admin chat"):
-                push_name = pn
-            break
-    _WAHA_PUSHNAME_CACHE[cid] = (push_name, now_ts + _WAHA_PUSHNAME_TTL)
-    return push_name
-
-
-def waha_fetch_history(customer_id, limit=30):
-    """Pull last N messages from WAHA + pushName. Returns dict:
-    {history: '...', last_message: '...', push_name: '...', count: N, err: None|str}."""
-    msgs, err = _waha_get(
-        f"/api/default/chats/{customer_id}/messages?limit={limit}&downloadMedia=false")
-    if err:
-        return {"history": "", "last_message": "", "push_name": "",
-                "count": 0, "err": err}
-    if not isinstance(msgs, list) or not msgs:
-        return {"history": "First contact, no prior messages.",
-                "last_message": "", "push_name": "", "count": 0, "err": None}
-    # Get pushName from chat list
-    chats, _ = _waha_get("/api/default/chats?limit=50")
-    push_name = ""
-    if isinstance(chats, list):
-        for c in chats:
-            sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
-            if sid == customer_id:
-                pn = (c.get("name") or "").strip()
-                # Keep phone-string pushNames — they match what the operator
-                # sees on WhatsApp, so they ARE a useful display fallback when
-                # no real name is available. Only filter the system labels.
-                if pn and pn not in ("WhatsApp Business",
-                                     "Dubriani admin chat"):
-                    push_name = pn
-                break
-    # Build history string (oldest first, max last 20 with body)
-    msgs_sorted = sorted(msgs, key=lambda x: x.get("timestamp", 0))
-    with_body = [m for m in msgs_sorted if (m.get("body") or "").strip()]
-    if not with_body:
-        return {"history": "First contact, no prior messages.",
-                "last_message": "", "push_name": push_name,
-                "count": 0, "err": None}
-    now_ts = int(time.time())
-    lines = []
-    # Include the entire tail INCLUDING the most recent message. Earlier code
-    # used `with_body[-20:-1]` which silently dropped the latest message —
-    # /draft-followup only reads `history` (not `last_message`), so the
-    # nudge draft never saw the customer's most recent reply. That produced
-    # off-context drafts (operator: "nudge draft is not considering his
-    # last 10 messages").
-    for m in with_body[-20:]:
-        who = "Dubriani" if m.get("fromMe") else "Customer"
-        secs = max(0, now_ts - (m.get("timestamp") or now_ts))
-        ago = (f"{secs // 60}m" if secs < 5400 else
-               f"{secs // 3600}h" if secs < 129600 else
-               f"{secs // 86400}d")
-        body = (m.get("body") or "").replace("\n", " ").strip()[:240]
-        lines.append(f'{who} ({ago} ago): "{body}"')
-    history = "\n".join(lines) if lines else "First contact, no prior messages."
-    # last_message kept for callers that consume it (/info preview, customer
-    # facts extraction) — it's the most recent message in the chat, fromMe
-    # or otherwise.
-    last = (with_body[-1].get("body") or "").strip()[:500]
-    return {"history": history, "last_message": last,
-            "push_name": push_name, "count": len(with_body), "err": None}
+# _waha_get / waha_lookup_push_name / waha_fetch_history moved to
+# waha.py (re-exported at top of server.py for backward compat).
 
 
 def resolve_customer_by_name(name):
