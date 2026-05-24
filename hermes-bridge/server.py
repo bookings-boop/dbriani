@@ -1414,6 +1414,23 @@ REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 
+# Label-priority ranking — higher = higher operator priority. Used by
+# the sticky-upward guard in _label_eval to prevent weak signals from
+# demoting a strong state on a single message.
+_LABEL_RANK = {
+    "NEW": 0, "COLD": 1, "WARM": 2, "HOT": 3,
+    "NEEDS_ATTENTION": 4, "CONFIRMED": 5,
+}
+
+# Signals strong enough to demote regardless of confidence dampening.
+# Past-date / cold-decay / payment-confirmed / lock are deterministic;
+# the rest are LLM/regex heuristics that shouldn't pull a HOT down
+# without strong agreement. Operator's manual /label always overrides
+# via a different code path (apply_label_transition with reason='manual:*').
+_HARD_DEMOTE_SIGNALS = frozenset({
+    "date_passed", "cold_decay", "confirmed_terminal", "locked",
+})
+
 
 def get_correction_count(auto_signal, window_days=CORRECTION_WINDOW_DAYS):
     """Count label_corrections rows for this signal in the last N days.
@@ -3222,6 +3239,35 @@ class Handler(BaseHTTPRequestHandler):
             if confidence < CONFIDENCE_DEMOTE_THRESHOLD:
                 applied = _TIER_BELOW.get(target, target)
 
+            # STICKY-UPWARD guard. Prevents a single weak/dampened signal
+            # from demoting a customer who was previously HOT (or higher)
+            # all the way down. Scenario observed in production:
+            #   customer was HOT (money_mentioned)
+            #   next message contained only a date question
+            #   compute_label returned WARM (date_asked_no_commit)
+            #   dampening demoted WARM -> NEW (signal had been corrected
+            #     by operator 4+ times -> confidence 0.20)
+            #   transition fired HOT -> NEW (a 2-tier drop on one weak
+            #     message) — wrong; the customer is still HOT, they
+            #     just happened to ask a date question.
+            # Fix: if the new label ranks BELOW the previous label AND
+            # the signal isn't a HARD demote signal AND the confidence
+            # is dampened, KEEP the previous label. Stronger signals
+            # (HOT promotions, payment confirmations, past_date,
+            # cold_decay, operator manual /label) still take effect.
+            prev_rank = _LABEL_RANK.get(previous_label or "NEW", 0)
+            new_rank = _LABEL_RANK.get(applied, 0)
+            if (new_rank < prev_rank
+                    and sig not in _HARD_DEMOTE_SIGNALS
+                    and confidence < CONFIDENCE_DEMOTE_THRESHOLD):
+                log(f"label-eval sticky-keep cid={cid!r} "
+                    f"prev={previous_label} would-apply={applied} "
+                    f"sig={sig} conf={confidence:.2f} — kept previous")
+                applied = previous_label
+                sig = "sticky_" + (previous_label or "new").lower()
+                ev = (f"weak {target}/{confidence:.2f} signal not allowed "
+                      f"to demote {previous_label}")
+
             # Sameday interrupt — only on same_day_booking signal.
             interrupt_required = False
             alert_text = None
@@ -3359,6 +3405,23 @@ class Handler(BaseHTTPRequestHandler):
                         applied = target
                         if confidence < CONFIDENCE_DEMOTE_THRESHOLD:
                             applied = _TIER_BELOW.get(target, target)
+                        # Sticky-upward guard — see same logic in _label_eval.
+                        # Hourly sweep re-evals with no specific latest message,
+                        # so signal often reverts to date_asked_no_commit etc.
+                        # Don't let that demote a HOT customer to NEW.
+                        prev_rank = _LABEL_RANK.get(prev or "NEW", 0)
+                        new_rank = _LABEL_RANK.get(applied, 0)
+                        if (new_rank < prev_rank
+                                and sig not in _HARD_DEMOTE_SIGNALS
+                                and confidence < CONFIDENCE_DEMOTE_THRESHOLD):
+                            log(f"hourly_sweep sticky-keep cid={cid!r} "
+                                f"prev={prev} would-apply={applied} "
+                                f"sig={sig} conf={confidence:.2f} — kept")
+                            applied = prev
+                            sig = "sticky_" + (prev or "new").lower()
+                            ev = (f"weak {target}/{confidence:.2f} "
+                                  f"signal not allowed to demote {prev}")
+                            confidence = 1.0
                     if applied != prev:
                         _o, err = apply_label_transition(
                             cid, prev, applied,
