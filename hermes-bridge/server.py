@@ -1310,6 +1310,24 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     }
 
 
+def _md_escape(s):
+    """Escape Telegram-Markdown-v1 metachars in dynamic text. Hermes
+    reasoning + customer names can legitimately contain '_' / '*' /
+    '`' / '[' / ']' which open entity spans Telegram then can't close
+    → '400 can't parse entities' (we've hit this with 'apple_pay',
+    'keep_open', URL paths, etc.). Apply this around ANY non-trusted
+    string being interpolated into a parse_mode=Markdown payload."""
+    if s is None:
+        return ""
+    return (str(s)
+            .replace("\\", "\\\\")
+            .replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("`", "\\`")
+            .replace("[", "\\[")
+            .replace("]", "\\]"))
+
+
 def refresh_customer_facts_from_waha(customer_id):
     """Pull WAHA history for a customer + re-run extraction over the FULL
     conversation, then upsert. Returns the merged facts dict, or None on
@@ -4633,12 +4651,15 @@ class Handler(BaseHTTPRequestHandler):
                     "disregard_verdict = 'close', "
                     "disregard_analyzed_at = now() "
                     f"WHERE customer_id = {_lit(cid)}")
+                # Escape dynamic name — customer pushNames can contain '_'
+                # or '*' which would break Markdown parse on Telegram.
+                nm_e = _md_escape(nm)
                 tx = (
-                    f"🛑 *DISREGARDED* — {nm}\n"
-                    f"_Operator override_ — closed despite Hermes "
-                    "keep_open.\n\n"
+                    f"🛑 *DISREGARDED* — {nm_e}\n"
+                    f"_Operator override_ — closed despite Hermes saying "
+                    "'keep open'.\n\n"
                     f"→ label {cur_label} → DISREGARDED. Hidden from "
-                    f"/review.\n_Undo with_ `/label {nm} WARM`")
+                    f"/review.\n_Undo with_ `/label {nm_e} WARM`")
                 self._send(200, {
                     "ok": True, "verdict": "close",
                     "label_before": cur_label, "label_after": "DISREGARDED",
@@ -4693,6 +4714,15 @@ class Handler(BaseHTTPRequestHandler):
             )
             _psql(upd)
 
+            # Escape ANY Hermes/customer text going into Markdown. Hermes
+            # reasoning can contain `code_fences`, *bold-like* phrases,
+            # snake_case identifiers, or [bracketed] notes — all of which
+            # open entity spans Telegram can't close → '400 can't parse
+            # entities'.
+            nm_e = _md_escape(nm)
+            reasoning_e = _md_escape(reasoning or "(no reasoning)")
+            suggested_e = _md_escape(suggested) if suggested else ""
+
             if verdict == "close":
                 # Auto-close. apply_label_transition writes the audit row.
                 apply_label_transition(
@@ -4702,21 +4732,22 @@ class Handler(BaseHTTPRequestHandler):
                     message_count=mc,
                     created_by="operator:disregard_button")
                 tx = (
-                    f"🛑 *DISREGARDED* — {nm}\n"
-                    f"_Hermes analysis:_ {reasoning or '(no reasoning)'}"
+                    f"🛑 *DISREGARDED* — {nm_e}\n"
+                    f"_Hermes analysis:_ {reasoning_e}"
                     f"\n\n→ label flipped {cur_label} → DISREGARDED. "
                     "Hidden from /review.\n"
-                    f"_Undo with_ `/label {nm} WARM`")
+                    f"_Undo with_ `/label {nm_e} WARM`")
                 self._send(200, {
                     "ok": True, "verdict": "close",
                     "label_before": cur_label, "label_after": "DISREGARDED",
                     "reasoning": reasoning, "telegram_text": tx})
             else:
                 tx = (
-                    f"🟢 *KEEP OPEN* — {nm}\n"
-                    f"_Hermes analysis:_ {reasoning or '(no reasoning)'}\n"
+                    f"🟢 *KEEP OPEN* — {nm_e}\n"
+                    f"_Hermes analysis:_ {reasoning_e}\n"
                     f"_Importance score:_ {int(score)}/100"
-                    + (f"\n_Suggested play:_ {suggested}" if suggested else "")
+                    + (f"\n_Suggested play:_ {suggested_e}"
+                       if suggested else "")
                     + f"\n\n→ label unchanged ({cur_label})."
                     "\n\n_Disagree? Override below._"
                 )
