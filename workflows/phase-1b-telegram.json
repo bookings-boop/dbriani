@@ -5181,7 +5181,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $json.chat_id }},\n  \"message_id\": {{ $json.message_id }},\n  \"text\": {{ JSON.stringify($json.blocked ? ('\u26a0\ufe0f Another draft is awaiting an amount for ' + ($json.blocking_phone || 'a customer') + '. Send that one first, then retry.') : ('\ud83d\udcb3 Enter amount in AED to generate link for ' + ($json.customer_id || 'customer') + ' \u00b7 ' + ($json.payment_summary || '') + '\\n\\n\ud83d\udc49 Reply with the AED amount (digits only, or like \"3k\"). Example:  3000  or  4.5k') ) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $json.chat_id }},\n  \"message_id\": {{ $json.message_id }},\n  \"text\": {{ JSON.stringify($json.blocked ? ('\u26a0\ufe0f Another draft is awaiting an amount for ' + ($json.blocking_phone || 'a customer') + '. Send that one first, then retry.') : ('\ud83d\udcb3 Enter amount in AED to generate link for ' + (($('Prep Paylink').item && $('Prep Paylink').item.json.customer_name) || $json.customer_id || 'customer') + ' \u00b7 ' + ($json.payment_summary || '') + '\\n\\n\ud83d\udc49 Reply with the AED amount (digits only, or like \"3k\"). Example:  3000  or  4.5k') ) }}\n}",
         "options": {}
       },
       "onError": "continueRegularOutput"
@@ -5335,7 +5335,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify($json.customer_id) }},\n  \"text\": {{ JSON.stringify('tap to complete your booking: ' + $json.link_url) }}\n}",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify($json.customer_id) }},\n  \"text\": {{ JSON.stringify(\n    ($json.draft_text ? ($json.draft_text + '\\n\\n') : '') +\n    'tap to complete your booking: ' + $json.link_url\n  ) }}\n}",
         "options": {
           "timeout": 20000
         }
@@ -5371,7 +5371,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('\ud83d\udcb3 PAYMENT LINK SENT to ' + $json.customer_id + '\\n\\nAED ' + $json.amount + ' \u00b7 ' + ($json.payment_summary || '(no summary)') + '\\n\\n' + $json.link_url + '\\n\\n\u2192 customer auto-promoted to CONFIRMED.') }}\n}",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('\ud83d\udcb3 PAYMENT LINK SENT to ' + ($('Unify Paylink Context').item.json.customer_name || $('Unify Paylink Context').item.json.customer_id) + '\\n\\nAED ' + $('Unify Paylink Context').item.json.amount + ' \u00b7 ' + ($('Unify Paylink Context').item.json.payment_summary || '(no summary)') + '\\n\\n' + $('Unify Paylink Context').item.json.link_url) }}\n}",
         "options": {}
       },
       "onError": "continueRegularOutput"
@@ -5429,7 +5429,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.customer_id) }},\n  \"kind\": \"payment_link_sent\",\n  \"notes\": {\n    \"link_url\": {{ JSON.stringify($json.link_url) }},\n    \"amount\": {{ $json.amount }},\n    \"summary\": {{ JSON.stringify($json.payment_summary) }}\n  }\n}",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($('Unify Paylink Context').item.json.customer_id) }},\n  \"kind\": \"payment_link_sent\",\n  \"notes\": {\n    \"link_url\": {{ JSON.stringify($('Unify Paylink Context').item.json.link_url) }},\n    \"amount\": {{ $('Unify Paylink Context').item.json.amount }},\n    \"summary\": {{ JSON.stringify($('Unify Paylink Context').item.json.payment_summary) }}\n  }\n}",
         "options": {
           "timeout": 8000
         }
@@ -5505,7 +5505,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// One node merges the two paylink paths (button click vs operator\n// text reply) into a single $json shape so downstream nodes don't\n// need cross-execution lookups like `$('Prep Paylink').item ? ...`.\n// In n8n, accessing .item on a node that didn't run in this branch\n// THROWS 'Node X hasn't been executed' \u2014 kills the chain at body\n// evaluation, so the WAHA send never fires and the customer never\n// receives the link.\n//\n// $json on THIS node = the Nomod call response (link_url, link_id,\n// amount, ok). Then try each upstream context source; whichever\n// actually ran provides the rest.\nconst nomod = $input.item.json || {};\nlet ctx = null;\ntry { ctx = $('Prep Paylink').item.json; } catch (e) { ctx = null; }\nif (!ctx) {\n  try { ctx = $('Build Paylink From Reply').item.json; } catch (e) { ctx = null; }\n}\nctx = ctx || {};\nreturn { json: {\n  ok: nomod.ok === true,\n  link_url: nomod.link_url || '',\n  link_id: nomod.link_id || '',\n  amount: nomod.amount || ctx.amount || 0,\n  error: nomod.error || '',\n  draft_id: ctx.draft_id || '',\n  customer_id: ctx.customer_id || '',\n  customer_name: ctx.customer_name || '',\n  payment_summary: ctx.payment_summary || '',\n  chat_id: ctx.chat_id || 5532831477,\n  message_id: ctx.message_id || null,\n  admin_chat_id: ctx.admin_chat_id || 5532831477\n} };"
+        "jsCode": "// One node merges the two paylink paths (button click vs operator\n// text reply) into a single $json shape so downstream nodes don't\n// need cross-execution lookups like `$('Prep Paylink').item ? ...`.\n// In n8n, accessing .item on a node that didn't run in this branch\n// THROWS 'Node X hasn't been executed' \u2014 kills the chain at body\n// evaluation, so the WAHA send never fires and the customer never\n// receives the link.\n//\n// $json on THIS node = the Nomod call response (link_url, link_id,\n// amount, ok). Then try each upstream context source; whichever\n// actually ran provides the rest.\nconst nomod = $input.item.json || {};\nlet ctx = null;\ntry { ctx = $('Prep Paylink').item.json; } catch (e) { ctx = null; }\nif (!ctx) {\n  try { ctx = $('Build Paylink From Reply').item.json; } catch (e) { ctx = null; }\n}\nctx = ctx || {};\n// Pull the operator-facing draft text from staticData so we can\n// merge it WITH the payment link in the customer message (was:\n// payment link sent alone, without the LLM draft context).\n// Also pull the customer_name for operator card display.\nlet draftText = '';\nlet custName = '';\ntry {\n  const data = $getWorkflowStaticData('global');\n  const entry = (data.pendingQueue || []).find(d => d.id === ctx.draft_id);\n  if (entry) {\n    draftText = entry.draft_text || '';\n    custName = entry.customer_name || '';\n  }\n} catch (e) {}\nreturn { json: {\n  ok: nomod.ok === true,\n  link_url: nomod.link_url || '',\n  link_id: nomod.link_id || '',\n  amount: nomod.amount || ctx.amount || 0,\n  error: nomod.error || '',\n  draft_id: ctx.draft_id || '',\n  customer_id: ctx.customer_id || '',\n  customer_name: ctx.customer_name || '',\n  payment_summary: ctx.payment_summary || '',\n  chat_id: ctx.chat_id || 5532831477,\n  message_id: ctx.message_id || null,\n  admin_chat_id: ctx.admin_chat_id || 5532831477,\n  draft_text: draftText,\n  customer_name: custName\n} };"
       }
     },
     {
