@@ -5335,7 +5335,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify(($('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id) ) }},\n  \"text\": {{ JSON.stringify('please make payment using this link to confirm your booking: ' + $json.link_url) }}\n}",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify(($('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id) ) }},\n  \"text\": {{ JSON.stringify('Its available as of now, to confirm please use this link: ' + $json.link_url) }}\n}",
         "options": {
           "timeout": 20000
         }
