@@ -1916,7 +1916,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// FR-2: gather the new lead for an outbound first-contact draft\nconst inp = $('Process Text Reply').item.json;\nreturn { json: {\n  systemPrompt: '',\n  leadPhone: inp.lead_phone,\n  leadText: inp.lead_text || '',\n  adminChatId: inp.admin_chat_id || 5532831477\n} };\n"
+        "jsCode": "// FR-2: gather the new lead for an outbound first-contact draft.\n// Also pre-extract the customer name from common form-paste formats\n// ('Name: <X>', 'Customer: <X>') \u2014 Hermes's chat-tuned name extractor\n// misses these reliably, so we feed the regex hit as customer_name to\n// /customer-facts and the bridge falls back to it when the LLM\n// returns empty.\nconst inp = $('Process Text Reply').item.json;\nconst leadText = inp.lead_text || '';\nlet leadName = '';\nconst m = leadText.match(/(?:^|\\n)\\s*(?:name|customer)\\s*[:;\\s]\\s*([A-Za-z][A-Za-z\\s.'-]{1,40})/i);\nif (m) leadName = m[1].trim().replace(/[\\s,;:]+$/, '');\nreturn { json: {\n  systemPrompt: '',\n  leadPhone: inp.lead_phone,\n  leadText: leadText,\n  leadName: leadName,\n  adminChatId: inp.admin_chat_id || 5532831477\n} };"
       },
       "id": "6fa087ce-2b45-447a-b3ae-f312508c36a3",
       "name": "Prep Lead Draft",
@@ -5563,7 +5563,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.leadPhone) }},\n  \"customer_name\": \"\",\n  \"incoming_message\": {{ JSON.stringify($json.leadText) }},\n  \"history\": \"\"\n}",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.leadPhone) }},\n  \"customer_name\": {{ JSON.stringify($json.leadName || '') }},\n  \"incoming_message\": {{ JSON.stringify($json.leadText) }},\n  \"history\": \"\"\n}",
         "options": {
           "timeout": 25000
         }
