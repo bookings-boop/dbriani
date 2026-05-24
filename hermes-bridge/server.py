@@ -32,6 +32,16 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Refactor week #3: foundational helpers moved out of server.py.
+# These imports re-export the names at server module scope, so any
+# `from server import _psql, _lit, _redis, log, _envflag` still
+# resolves — no caller-side change required.
+from util import log, _envflag  # noqa: F401
+from db import (  # noqa: F401
+    PG_CONTAINER, PG_USER, PG_DB, REDIS_CONTAINER,
+    _psql, _redis, _lit,
+)
+
 HOME = os.path.expanduser("~")
 BRIDGE_DIR = os.path.join(HOME, "hermes-bridge")
 SYSTEM_PROMPT_PATH = os.path.join(BRIDGE_DIR, "system-prompt.md")
@@ -41,10 +51,8 @@ TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 PORT = int(os.environ.get("BRIDGE_PORT", "8788"))
 HERMES_TIMEOUT = int(os.environ.get("BRIDGE_HERMES_TIMEOUT", "120"))
 
-PG_CONTAINER = os.environ.get("BRIDGE_PG_CONTAINER", "n8n-postgres-1")
-PG_USER = os.environ.get("BRIDGE_PG_USER", "hermes_rw")
-PG_DB = os.environ.get("BRIDGE_PG_DB", "n8n")
-REDIS_CONTAINER = os.environ.get("BRIDGE_REDIS_CONTAINER", "n8n-redis-1")
+# PG_CONTAINER / PG_USER / PG_DB / REDIS_CONTAINER moved to db.py
+# (still importable from server for backward-compat — see top of file).
 AUTOSEND_TTL = int(os.environ.get("BRIDGE_AUTOSEND_TTL", "3600"))
 DEBOUNCE_TTL = int(os.environ.get("BRIDGE_DEBOUNCE_TTL", "120"))
 QUEUE_TTL = int(os.environ.get("BRIDGE_QUEUE_TTL", "86400"))  # 24h — drafts auto-expire
@@ -56,8 +64,7 @@ FEEDBACK_MAX_SCENARIO = int(os.environ.get("FEEDBACK_MAX_SCENARIO", "5"))
 FEEDBACK_MAX_PER_CUSTOMER = int(os.environ.get("FEEDBACK_MAX_PER_CUSTOMER", "5"))
 
 
-def _envflag(key, default):
-    return os.environ.get(key, default).strip().lower() in ("true", "1", "yes")
+# _envflag moved to util.py (imported at top of file for backward compat).
 
 
 # Autonomous-mode safety caps (spec §5.7) — all default ON.
@@ -110,38 +117,10 @@ _FACTS_BOOK_RE = re.compile(
     re.IGNORECASE)
 
 
-def log(*a):
-    print(time.strftime("%Y-%m-%dT%H:%M:%S"), *a, flush=True)
-
-
-# --- Postgres (behavior_rules) ---------------------------------------------
-
-def _psql(sql, timeout=12):
-    """Run one SQL statement via docker exec; return (stdout, err_or_None)."""
-    r = subprocess.run(
-        ["docker", "exec", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB,
-         "-tA", "-c", sql],
-        capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        return None, r.stderr.strip()[:200]
-    return r.stdout, None
-
-
-def _redis(args, timeout=8):
-    """Run one redis-cli command via docker exec; return (stdout, err_or_None)."""
-    r = subprocess.run(
-        ["docker", "exec", REDIS_CONTAINER, "redis-cli"] + list(args),
-        capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        return None, r.stderr.strip()[:200]
-    return r.stdout, None
-
-
-def _lit(v):
-    """SQL string literal (or NULL) — escapes single quotes."""
-    if v is None or v == "":
-        return "NULL"
-    return "'" + str(v).replace("'", "''") + "'"
+# log() moved to util.py; _psql, _redis, _lit moved to db.py.
+# All four are imported at the top of this file for backward-compat
+# with `from server import log, _psql, _redis, _lit` callers (tests,
+# scripts) — re-export only, no behavior change.
 
 
 # ============================================================================

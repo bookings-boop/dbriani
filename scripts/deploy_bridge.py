@@ -254,20 +254,31 @@ def main():
     print(f"3. backed up local workflow JSON -> {local_backup.name}")
     prune_local_backups()
 
-    # 3. upload server.py + master prompt to bridge
-    ssh_upload(SERVER_PY.read_bytes(),
-               "~/hermes-bridge/server.py", "upload-server")
+    # 3. upload all bridge python modules + master prompt to bridge.
+    # The bridge was a single server.py file; refactoring week split it
+    # into util.py, db.py, etc. — upload every *.py module in BRIDGE_DIR
+    # (excluding test_* files which the bridge doesn't need at runtime)
+    # so the box always has the full set in sync. Otherwise a deploy
+    # that lands a server.py importing a not-yet-uploaded module would
+    # crash the bridge on restart.
+    modules = sorted(p for p in BRIDGE_DIR.glob("*.py")
+                     if not p.name.startswith("test_"))
+    for mod in modules:
+        ssh_upload(mod.read_bytes(),
+                   f"~/hermes-bridge/{mod.name}", f"upload-{mod.name}")
     ssh_upload(prompt_text.encode(),
                "~/hermes-bridge/system-prompt.md", "upload-prompt")
-    print("4. uploaded server.py + system-prompt.md to bridge")
+    print(f"4. uploaded {len(modules)} module(s) "
+          f"({', '.join(m.name for m in modules)}) + system-prompt.md")
 
-    # 4. compile-check server.py on the box
+    # 4. compile-check every uploaded module on the box.
+    mod_paths = " ".join(f"~/hermes-bridge/{m.name}" for m in modules)
     out, err, _ = ssh_run(
-        "python3 -m py_compile ~/hermes-bridge/server.py && echo COMPILE_OK",
+        f"python3 -m py_compile {mod_paths} && echo COMPILE_OK",
         "compile")
     if "COMPILE_OK" not in out:
-        die(f"server.py failed to compile on the box:\n{err[:400]}")
-    print("5. server.py compiles on the box")
+        die(f"bridge modules failed to compile on the box:\n{err[:400]}")
+    print(f"5. all {len(modules)} module(s) compile on the box")
 
     # 5. inject master prompt into all 4 workflow Set nodes + rewrite the
     # local workflow JSON so the on-disk file always matches what's live
