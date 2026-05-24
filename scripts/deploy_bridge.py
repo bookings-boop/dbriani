@@ -225,11 +225,23 @@ def main():
     # n8n's two-space indent for diff readability.
     patched_data, patched_names = inject_prompt_into_workflow(
         prompt_text, WORKFLOW_PATH)
-    WORKFLOW_PATH.write_text(json.dumps(patched_data, indent=2) + "\n")
+    new_pretty = json.dumps(patched_data, indent=2) + "\n"
+    # Skip-n8n-restart optimization: if the workflow JSON content is
+    # byte-identical to what's already on disk, the n8n side hasn't
+    # changed. Skip the import + docker restart entirely. Every n8n
+    # restart kills in-flight Debounce Wait nodes — customer messages
+    # mid-debounce never produce drafts. Avoiding the restart when
+    # nothing changed makes bridge-only deploys safe during traffic.
+    existing_pretty = WORKFLOW_PATH.read_text() if WORKFLOW_PATH.exists() else ""
+    workflow_unchanged = (new_pretty == existing_pretty)
+    WORKFLOW_PATH.write_text(new_pretty)
     tmp_local = Path(f"/tmp/wf-deploy-{ts}.json")
     tmp_local.write_text(json.dumps(patched_data))
-    print(f"6. injected master prompt into {len(patched_names)} Set nodes: "
-          f"{sorted(patched_names)} + rewrote local workflow JSON")
+    if workflow_unchanged:
+        print(f"6. workflow JSON unchanged — will skip n8n import + restart")
+    else:
+        print(f"6. injected master prompt into {len(patched_names)} Set nodes: "
+              f"{sorted(patched_names)} + rewrote local workflow JSON")
 
     # 6. restart the bridge
     ssh_run(f'{SYSCTL} restart hermes-bridge && echo RESTARTED',
@@ -238,24 +250,33 @@ def main():
     print("7. hermes-bridge restarted")
 
     # 7. push workflow to n8n + docker-restart (per runbook — in-memory
-    # webhook registration doesn't refresh on import alone)
-    ssh_upload(tmp_local.read_bytes(), "/tmp/wf.json", "upload-wf")
-    ssh_run(f"docker cp /tmp/wf.json {N8N_CONTAINER}:/tmp/wf.json && "
-            f"docker exec {N8N_CONTAINER} n8n import:workflow "
-            f"--input=/tmp/wf.json && "
-            f"docker exec {N8N_CONTAINER} n8n update:workflow "
-            f"--id={WORKFLOW_ID} --active=true && echo IMPORTED",
-            "n8n-import", timeout=180)
-    print("8. workflow imported into n8n")
+    # webhook registration doesn't refresh on import alone). Skipped
+    # entirely when the workflow content is unchanged.
+    if workflow_unchanged:
+        print("8. n8n import skipped (workflow JSON unchanged)")
+        print("9. n8n restart skipped (workflow JSON unchanged) — "
+              "in-flight Debounce Wait nodes preserved")
+    else:
+        ssh_upload(tmp_local.read_bytes(), "/tmp/wf.json", "upload-wf")
+        ssh_run(f"docker cp /tmp/wf.json {N8N_CONTAINER}:/tmp/wf.json && "
+                f"docker exec {N8N_CONTAINER} n8n import:workflow "
+                f"--input=/tmp/wf.json && "
+                f"docker exec {N8N_CONTAINER} n8n update:workflow "
+                f"--id={WORKFLOW_ID} --active=true && echo IMPORTED",
+                "n8n-import", timeout=180)
+        print("8. workflow imported into n8n")
 
-    ssh_run(f"docker restart {N8N_CONTAINER} && echo RESTARTED",
-            "n8n-restart", timeout=120)
-    print("9. n8n container restarted (refresh in-memory webhook registry)")
+        ssh_run(f"docker restart {N8N_CONTAINER} && echo RESTARTED",
+                "n8n-restart", timeout=120)
+        print("9. n8n container restarted (refresh in-memory webhook registry)")
 
     # 8. verify
-    if not wait_for_n8n_ready():
-        die("n8n /healthz never came back 200 after restart")
-    print("10. n8n /healthz: 200")
+    if workflow_unchanged:
+        print("10. n8n /healthz check skipped (container wasn't restarted)")
+    else:
+        if not wait_for_n8n_ready():
+            die("n8n /healthz never came back 200 after restart")
+        print("10. n8n /healthz: 200")
 
     active, _, _ = ssh_run(f'{SYSCTL} is-active hermes-bridge', "is-active",
                            timeout=15)

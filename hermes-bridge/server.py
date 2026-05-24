@@ -1409,7 +1409,8 @@ def extract_session(*streams):
 # ============================================================================
 
 LABELS = frozenset({
-    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD", "CONFIRMED",
+    "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
+    "WAITING_FOR_PAYMENT", "CONFIRMED",
     "PAUSED_SPAM", "PAUSED_B2B", "PAUSED_PERSONAL",
 })
 
@@ -1507,7 +1508,7 @@ _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 # demoting a strong state on a single message.
 _LABEL_RANK = {
     "NEW": 0, "COLD": 1, "WARM": 2, "HOT": 3,
-    "NEEDS_ATTENTION": 4, "CONFIRMED": 5,
+    "NEEDS_ATTENTION": 4, "WAITING_FOR_PAYMENT": 5, "CONFIRMED": 6,
 }
 
 # Signals strong enough to demote regardless of confidence dampening.
@@ -1905,6 +1906,11 @@ def score_lead(row, now_dt):
     # paused tail. They render in their own ✅ section.
     if label == "CONFIRMED":
         return 5000
+    # WAITING_FOR_PAYMENT is high-priority: link sent, expecting payment soon.
+    # Above HOT (which is 800) so it surfaces at the top of /review with the
+    # operator-action signal 'check if payment arrived / nudge customer'.
+    if label == "WAITING_FOR_PAYMENT":
+        return 4000
     if label == "NEEDS_ATTENTION":
         score += 1000
     elif label == "HOT":
@@ -2084,6 +2090,9 @@ def render_review(scored, totals, mode="ondemand"):
       }
     """
     sections = {
+        "WAITING_FOR_PAYMENT": {"items": [], "cap": 20,
+                            "header": "⏳ WAITING FOR PAYMENT — link sent, awaiting payment",
+                            "emoji": "⏳"},
         "HOT":             {"items": [], "cap": REVIEW_CAP_HOT,
                             "header": "🔥 HOT — ready to close",
                             "emoji": "🔥"},
@@ -2139,8 +2148,8 @@ def render_review(scored, totals, mode="ondemand"):
     keyboards = []
     per_lead_messages = []
 
-    for label_key in ("HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD",
-                      "CONFIRMED"):
+    for label_key in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
+                      "WARM", "NEW", "COLD", "CONFIRMED"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -2281,6 +2290,8 @@ def _why_line(row, label_key):
             notes.append("engaged — value-add nudge could move it")
         elif label_key == "COLD":
             notes.append("worth a soft re-engagement message")
+        elif label_key == "WAITING_FOR_PAYMENT":
+            notes.append("payment link sent — check if paid or nudge")
         elif label_key == "CONFIRMED":
             notes.append("booked / paid — share boarding details or upsell")
         elif label_key == "NEW":
@@ -4062,7 +4073,8 @@ class Handler(BaseHTTPRequestHandler):
             scored = sorted(((score_lead(r, None), r) for r in rows),
                             key=lambda t: t[0], reverse=True)
             totals = {"total": len(rows), "HOT": 0, "WARM": 0, "COLD": 0,
-                      "NEW": 0, "NEEDS_ATTENTION": 0, "CONFIRMED": 0,
+                      "NEW": 0, "NEEDS_ATTENTION": 0,
+                      "WAITING_FOR_PAYMENT": 0, "CONFIRMED": 0,
                       "PAUSED": 0}
             for r in rows:
                 lab = r.get("label") or "NEW"
@@ -4470,7 +4482,8 @@ class Handler(BaseHTTPRequestHandler):
                              "error": f"label must be one of {sorted(LABELS)}",
                              "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
                              "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
-                             "CONFIRMED, PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
+                             "WAITING_FOR_PAYMENT, CONFIRMED, "
+                             "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
             return
         cid, err = self._resolve_target(payload)
         if not cid:
