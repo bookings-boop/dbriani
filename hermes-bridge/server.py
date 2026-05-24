@@ -2162,7 +2162,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/queue",
                              "/followup-action",
                              "/refresh-facts",
-                             "/draft-freshness"):
+                             "/draft-freshness",
+                             "/autonomous-log"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -2222,6 +2223,8 @@ class Handler(BaseHTTPRequestHandler):
             self._refresh_facts(payload)
         elif self.path == "/draft-freshness":
             self._draft_freshness(payload)
+        elif self.path == "/autonomous-log":
+            self._autonomous_log(payload)
         else:
             self._draft(payload)
 
@@ -3461,6 +3464,46 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "customer_id": cid, "action": action})
         except Exception as e:
             log("followup_action EXC:", repr(e))
+            self._send(200, {"ok": False, "degraded": True, "error": str(e)})
+
+    def _autonomous_log(self, payload):
+        """POST /autonomous-log — generic event row into autonomous_sends.
+        Body: {customer_id, kind, notes?}. `kind` is the literal string
+        (e.g. 'payment_link_sent', 'edit_link_sent') — NO prefix added
+        (unlike /followup-action which prefixes 'proactive_followup_').
+        `notes` is an arbitrary JSON object stored as jsonb. Fail-safe:
+        always returns 200; logs but never raises."""
+        cid = (payload.get("customer_id") or "").strip()
+        kind = (payload.get("kind") or "").strip()
+        notes = payload.get("notes") or {}
+        if not cid or not kind:
+            self._send(200, {"ok": False,
+                             "error": "customer_id + kind required"})
+            return
+        # Whitelist character set on kind — keeps it INSERT-safe even though
+        # we _lit-escape below.
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", kind):
+            self._send(200, {"ok": False,
+                             "error": "kind must match [A-Za-z0-9_]{1,64}"})
+            return
+        if not isinstance(notes, dict):
+            notes = {"raw": str(notes)}
+        try:
+            sql = (
+                "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+                f"VALUES ({_lit(cid)}, {_lit(kind)}, "
+                f"{_lit(json.dumps(notes))}::jsonb)"
+            )
+            _, err = _psql(sql)
+            if err:
+                log("autonomous_log insert err:", err)
+                self._send(200, {"ok": False, "degraded": True,
+                                 "error": err[:200]})
+                return
+            log(f"autonomous-log cid={cid!r} kind={kind!r}")
+            self._send(200, {"ok": True, "customer_id": cid, "kind": kind})
+        except Exception as e:
+            log("autonomous_log EXC:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e)})
 
     def _review(self, payload):

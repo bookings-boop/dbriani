@@ -193,7 +193,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage   // Nomod: skip the FR-5 improver\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  lines = ['\ud83d\udce9 from ' + pending.customer_phone];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending } };"
+        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage   // Nomod: skip the FR-5 improver\n};\ndata.pendingQueue.push(pending);\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  lines = ['\ud83d\udce9 from ' + pending.customer_phone];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + id }]\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending } };"
       },
       "id": "0353eee2-a420-41e4-9ae9-2e3f4d547b33",
       "name": "Queue & Format",
@@ -712,6 +712,30 @@
                 "combinator": "and"
               },
               "renameOutput": true
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "p4yl1nk-2026-05-24-act",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "paylink",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "paylink"
             }
           ]
         },
@@ -1071,7 +1095,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REGEN] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $json.draft_id}]]}) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REGEN] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $json.draft_id},{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $json.draft_id}]]}) }}\n}",
         "options": {}
       },
       "id": "2fa0e426-23da-4756-a56f-0ae1e2bde1c8",
@@ -1086,7 +1110,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '\u26a0\ufe0f Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const await_amt = queue.find(x => x.status === 'awaiting_amount');\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await_amt.status = 'pending';  // release lock; downstream sets link_sent\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '\u26a0\ufe0f Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -1412,6 +1436,30 @@
                 "combinator": "and"
               },
               "renameOutput": true
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "p4yl1nk-2026-05-24-txt",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "paylink_amount",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "paylink_amount"
             }
           ]
         },
@@ -1853,7 +1901,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Refine').item.json.admin_chat_id }},\n  \"message_id\": {{ $('Parse Refine').item.json.telegram_message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REFINED] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $json.draft_id}]]}) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Refine').item.json.admin_chat_id }},\n  \"message_id\": {{ $('Parse Refine').item.json.telegram_message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REFINED] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $json.draft_id},{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $json.draft_id}]]}) }}\n}",
         "options": {}
       },
       "id": "f07d84c0-d0d6-4145-a5f7-e4acc788db24",
@@ -2079,7 +2127,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-5: apply Hermes's improvement to the pending draft + re-render the card\nconst resp = $input.item.json || {};\nconst cp = $('Check Pending').item.json;\nconst draftId = cp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\n// race guard: the operator may have acted during the ~18s Hermes call\nif (!d || d.status !== 'pending') return [];\nif (resp.ok !== true || resp.improved !== true) return [];\nconst msgs = (Array.isArray(resp.messages) && resp.messages.length)\n  ? resp.messages.slice(0, 4).map(m => String(m)) : null;\nif (!msgs) return [];\nd.messages = msgs;\nd.draft_text = msgs.join('\\n\\n');\nd.improved_note = resp.note || '';\nconst preview = msgs.length === 1 ? msgs[0]\n  : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = msgs.length === 1 ? '\ud83d\udcac DRAFT:'\n  : ('\ud83d\udcac DRAFT (' + msgs.length + ' messages):');\nconst lines = [];\nif (d.is_lead) {\n  lines.push('\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + d.customer_phone,\n             '', 'Lead brief (from you):', '\"' + d.customer_message + '\"');\n} else {\n  lines.push('\ud83d\udce9 from ' + d.customer_phone);\n  if (d.customer_name) lines.push('\ud83d\udc64 ' + d.customer_name);\n  lines.push('', 'They said:', '\"' + d.customer_message + '\"');\n}\nlines.push('', '---', '\u2728 improved by Hermes', draftHeader, preview,\n           '', '\ud83d\udcdd Notes: ' + (d.notes || ''));\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + draftId }]\n] };\nreturn [{ json: {\n  chat_id: d.telegram_chat_id || 5532831477,\n  message_id: cp.telegram_message_id,\n  text: lines.join('\\n'),\n  reply_markup: reply_markup,\n  draft_id: draftId,\n  improved_draft_text: d.draft_text\n} }];\n"
+        "jsCode": "// FR-5: apply Hermes's improvement to the pending draft + re-render the card\nconst resp = $input.item.json || {};\nconst cp = $('Check Pending').item.json;\nconst draftId = cp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\n// race guard: the operator may have acted during the ~18s Hermes call\nif (!d || d.status !== 'pending') return [];\nif (resp.ok !== true || resp.improved !== true) return [];\nconst msgs = (Array.isArray(resp.messages) && resp.messages.length)\n  ? resp.messages.slice(0, 4).map(m => String(m)) : null;\nif (!msgs) return [];\nd.messages = msgs;\nd.draft_text = msgs.join('\\n\\n');\nd.improved_note = resp.note || '';\nconst preview = msgs.length === 1 ? msgs[0]\n  : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = msgs.length === 1 ? '\ud83d\udcac DRAFT:'\n  : ('\ud83d\udcac DRAFT (' + msgs.length + ' messages):');\nconst lines = [];\nif (d.is_lead) {\n  lines.push('\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + d.customer_phone,\n             '', 'Lead brief (from you):', '\"' + d.customer_message + '\"');\n} else {\n  lines.push('\ud83d\udce9 from ' + d.customer_phone);\n  if (d.customer_name) lines.push('\ud83d\udc64 ' + d.customer_name);\n  lines.push('', 'They said:', '\"' + d.customer_message + '\"');\n}\nlines.push('', '---', '\u2728 improved by Hermes', draftHeader, preview,\n           '', '\ud83d\udcdd Notes: ' + (d.notes || ''));\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + draftId },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + draftId }]\n] };\nreturn [{ json: {\n  chat_id: d.telegram_chat_id || 5532831477,\n  message_id: cp.telegram_message_id,\n  text: lines.join('\\n'),\n  reply_markup: reply_markup,\n  draft_id: draftId,\n  improved_draft_text: d.draft_text\n} }];\n"
       },
       "id": "6736d545-a4a5-4046-ad11-fa9ac2f5c51f",
       "name": "Apply Improvement",
@@ -2412,7 +2460,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83e\udd16 AUTONOMOUS MODE ON \u2014 claude will draft and auto-send for \" + $('Parse Callback').item.json.draft.customer_phone + \" (safety caps + a ~1-5 min review window). press \ud83d\ude4b Take over to return it to you.\\n\\n\ud83d\udcac current draft:\\n\" + $('Parse Callback').item.json.draft.draft_text) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text:\"\u2705 Send now\",callback_data:\"send:\"+$('Parse Callback').item.json.draft_id},{text:\"\u270f\ufe0f Edit\",callback_data:\"edit:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\udd01 Regen\",callback_data:\"regen:\"+$('Parse Callback').item.json.draft_id},{text:\"\u274c Skip\",callback_data:\"skip:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\ude4b Take over\",callback_data:\"takeover:\"+$('Parse Callback').item.json.draft_id}]]}) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83e\udd16 AUTONOMOUS MODE ON \u2014 claude will draft and auto-send for \" + $('Parse Callback').item.json.draft.customer_phone + \" (safety caps + a ~1-5 min review window). press \ud83d\ude4b Take over to return it to you.\\n\\n\ud83d\udcac current draft:\\n\" + $('Parse Callback').item.json.draft.draft_text) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text:\"\u2705 Send now\",callback_data:\"send:\"+$('Parse Callback').item.json.draft_id},{text:\"\u270f\ufe0f Edit\",callback_data:\"edit:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\udd01 Regen\",callback_data:\"regen:\"+$('Parse Callback').item.json.draft_id},{text:\"\u274c Skip\",callback_data:\"skip:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\ude4b Take over\",callback_data:\"takeover:\"+$('Parse Callback').item.json.draft_id}],[{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $('Parse}]]}) }}\n}",
         "options": {}
       },
       "id": "44b635e6-7c96-4f43-af9f-37e951172c96",
@@ -2475,7 +2523,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\ude4b back to manual approval for \" + $('Parse Callback').item.json.draft.customer_phone + \" \u2014 every reply needs your Send again.\\n\\n\ud83d\udcac current draft:\\n\" + $('Parse Callback').item.json.draft.draft_text) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text:\"\u2705 Send\",callback_data:\"send:\"+$('Parse Callback').item.json.draft_id},{text:\"\u270f\ufe0f Edit\",callback_data:\"edit:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\udd01 Regen\",callback_data:\"regen:\"+$('Parse Callback').item.json.draft_id},{text:\"\u274c Skip\",callback_data:\"skip:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83e\udd16 Auto\",callback_data:\"auto:\"+$('Parse Callback').item.json.draft_id}]]}) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\ude4b back to manual approval for \" + $('Parse Callback').item.json.draft.customer_phone + \" \u2014 every reply needs your Send again.\\n\\n\ud83d\udcac current draft:\\n\" + $('Parse Callback').item.json.draft.draft_text) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text:\"\u2705 Send\",callback_data:\"send:\"+$('Parse Callback').item.json.draft_id},{text:\"\u270f\ufe0f Edit\",callback_data:\"edit:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83d\udd01 Regen\",callback_data:\"regen:\"+$('Parse Callback').item.json.draft_id},{text:\"\u274c Skip\",callback_data:\"skip:\"+$('Parse Callback').item.json.draft_id}],[{text:\"\ud83e\udd16 Auto\",callback_data:\"auto:\"+$('Parse Callback').item.json.draft_id}],[{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $('Parse}]]}) }}\n}",
         "options": {}
       },
       "id": "a4cd74cb-9919-45f0-b550-d3c32ba1c712",
@@ -2489,7 +2537,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d) return [];\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '\ud83e\udd16 AUTO \u2014 auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop \u00b7 or \u270f\ufe0f Edit \u00b7 \u274c Skip)', '',\n  '\ud83d\udce9 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '\ud83d\udcac will send:', preview];\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send now', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }]\n] };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: d.telegram_message_id,\n      draft_text: d.draft_text || '',\n      customer_name: d.customer_name || '',\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
+        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\nif (!d) return [];\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '\ud83e\udd16 AUTO \u2014 auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop \u00b7 or \u270f\ufe0f Edit \u00b7 \u274c Skip)', '',\n  '\ud83d\udce9 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '\ud83d\udcac will send:', preview];\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send now', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }]\n\n    [{ text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + draftId }]\n  ] };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: d.telegram_message_id,\n      draft_text: d.draft_text || '',\n      customer_name: d.customer_name || '',\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
       },
       "id": "442b1740-643f-400c-95a2-715d3e15e6fb",
       "name": "Auto Prep",
@@ -4599,7 +4647,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review \u2014 label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\n// BUG-FIX 2026-05-23: also push into staticData pendingQueue so Edit /\n// reply-with-feedback / Skip / Send all find the draft via the same\n// queue.find() path the customer-msg drafts use. Without this, pressing\n// Edit on a nudge card and replying with text falls through Route Text\n// Action's awaiting_edit lookup and produces '\u26a0\ufe0f Nothing sent'.\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\ndata.pendingQueue.push(draftObj);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
+        "jsCode": "// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: 'Operator-triggered nudge from /review \u2014 label: ' + label,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n};\n\n// BUG-FIX 2026-05-23: also push into staticData pendingQueue so Edit /\n// reply-with-feedback / Skip / Send all find the draft via the same\n// queue.find() path the customer-msg drafts use. Without this, pressing\n// Edit on a nudge card and replying with text falls through Route Text\n// Action's awaiting_edit lookup and produces '\u26a0\ufe0f Nothing sent'.\nconst data = $getWorkflowStaticData('global');\nif (!Array.isArray(data.pendingQueue)) data.pendingQueue = [];\ndata.pendingQueue.push(draftObj);\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  \n    [{ text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
       }
     },
     {
@@ -4941,7 +4989,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Build the new card text + same inline keyboard for a regenerated followup.\nconst fu = $('Hermes Regen Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\n\nconst id    = d.id;\nconst cid   = d.customer_phone || pc.customer_id;\nconst label = fu.label || d.followup_label || 'WARM';\nconst draft = (fu.draft_text || '').trim();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')  \u00b7 regenerated';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n    new_messages: [draft],\n    telegram_message_id: d.telegram_message_id,\n    telegram_chat_id: d.telegram_chat_id || 5532831477,\n    edit_payload: {\n      chat_id: d.telegram_chat_id || 5532831477,\n      message_id: d.telegram_message_id,\n      text: text,\n      parse_mode: 'Markdown',\n      reply_markup: reply_markup\n    }\n  }\n};"
+        "jsCode": "// Build the new card text + same inline keyboard for a regenerated followup.\nconst fu = $('Hermes Regen Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\n\nconst id    = d.id;\nconst cid   = d.customer_phone || pc.customer_id;\nconst label = fu.label || d.followup_label || 'WARM';\nconst draft = (fu.draft_text || '').trim();\n\nconst header = '\ud83d\udca1 *NUDGE DRAFT* \u2014 ' + (cid || '?') + '  (' + label.toLowerCase() + ')  \u00b7 regenerated';\nconst body   = '\\n\\n' + (draft || '\u26a0\ufe0f Hermes returned no draft \u2014 skip recommended.');\nconst text   = header + body;\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id },\n     { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id },\n     { text: '\u274c Skip',  callback_data: 'skip:' + id }]\n  \n    [{ text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + id }]\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n    new_messages: [draft],\n    telegram_message_id: d.telegram_message_id,\n    telegram_chat_id: d.telegram_chat_id || 5532831477,\n    edit_payload: {\n      chat_id: d.telegram_chat_id || 5532831477,\n      message_id: d.telegram_message_id,\n      text: text,\n      parse_mode: 'Markdown',\n      reply_markup: reply_markup\n    }\n  }\n};"
       }
     },
     {
@@ -5047,6 +5095,404 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "p4yl1nk-prep-2026-05-24",
+      "name": "Prep Paylink",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5536,
+        1620
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Operator hit [\ud83d\udcb3 Send Link] on a draft card. Read the draft\n// from Parse Callback (already enriched via staticData + Redis),\n// extract amount/customer/summary. Decide: direct call to Nomod\n// (if draft already carries an amount > 0) or prompt operator\n// for an amount.\nconst pc = $('Parse Callback').item.json;\nconst draft = pc.draft || {};\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === pc.draft_id) || draft;\n// Reject if another draft is already awaiting an amount (same lock pattern as awaiting_edit)\nconst conflict = (data.pendingQueue || []).find(d => d.status === 'awaiting_amount' && d.id !== pc.draft_id);\nconst cid = entry.customer_phone || pc.customer_id || '';\nconst name = entry.customer_name || '';\n// Build a reasonable payment_summary if not present\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  const date = entry.dates || '';\n  const pax = entry.party_size || '';\n  summary = [yacht, date, pax ? pax + ' guests' : ''].filter(Boolean).join(' \u00b7 ') || 'Dubriani booking';\n}\nlet amount = 0;\ntry { amount = parseFloat(entry.payment_amount || draft.payment_amount || 0) || 0; } catch(e) {}\nreturn { json: {\n  draft_id: pc.draft_id,\n  customer_id: cid,\n  customer_name: name,\n  payment_summary: summary,\n  amount: amount,\n  has_amount: amount > 0,\n  blocked: !!conflict,\n  blocking_phone: conflict ? (conflict.customer_phone || 'unknown') : '',\n  chat_id: pc.chat_id,\n  message_id: pc.message_id,\n  admin_chat_id: 5532831477\n} };"
+      }
+    },
+    {
+      "id": "p4yl1nk-if-amt-2026-05-24",
+      "name": "Amount Set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5760,
+        1620
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "p4yl1nk-amt-cond",
+              "leftValue": "={{ $json.has_amount }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "p4yl1nk-await-2026-05-24",
+      "name": "Set Awaiting Amount",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5984,
+        1740
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Mark draft as awaiting an amount, mirror to Redis. The next\n// operator text reply is interpreted as the AED amount by\n// Process Text Reply's awaiting_amount block.\nconst prep = $('Prep Paylink').item.json;\nif (prep.blocked) {\n  return { json: { blocked: true, blocking_phone: prep.blocking_phone,\n    chat_id: prep.chat_id, message_id: prep.message_id,\n    admin_chat_id: prep.admin_chat_id } };\n}\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === prep.draft_id);\nif (entry) entry.status = 'awaiting_amount';\nreturn { json: { blocked: false, draft_id: prep.draft_id,\n  customer_id: prep.customer_id,\n  payment_summary: prep.payment_summary,\n  chat_id: prep.chat_id, message_id: prep.message_id,\n  admin_chat_id: prep.admin_chat_id } };"
+      }
+    },
+    {
+      "id": "p4yl1nk-prompt-2026-05-24",
+      "name": "Edit Telegram (Amount Prompt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6208,
+        1740
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": {{ $json.chat_id }},\n  \"message_id\": {{ $json.message_id }},\n  \"text\": {{ JSON.stringify($json.blocked ? ('\u26a0\ufe0f Another draft is awaiting an amount for ' + ($json.blocking_phone || 'a customer') + '. Send that one first, then retry.') : ('\ud83d\udcb3 Enter amount in AED to generate link for ' + ($json.customer_id || 'customer') + ' \u00b7 ' + ($json.payment_summary || '') + '\\n\\n\ud83d\udc49 Reply with the AED amount (digits only, or like \"3k\"). Example:  3000  or  4.5k') ) }}\n}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "p4yl1nk-bldreply-2026-05-24",
+      "name": "Build Paylink From Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5536,
+        1900
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Operator typed the amount in reply to '\ud83d\udcb3 Enter amount...'.\n// Process Text Reply already validated it's a positive number.\n// Pull customer + summary from the draft (still in pendingQueue).\nconst inp = $input.item.json;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === inp.draft_id) || {};\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  const date = entry.dates || '';\n  const pax = entry.party_size || '';\n  summary = [yacht, date, pax ? pax + ' guests' : ''].filter(Boolean).join(' \u00b7 ') || 'Dubriani booking';\n}\nreturn { json: {\n  draft_id: inp.draft_id,\n  customer_id: entry.customer_phone || '',\n  customer_name: entry.customer_name || '',\n  payment_summary: summary,\n  amount: inp.amount,\n  chat_id: entry.telegram_chat_id || 5532831477,\n  message_id: entry.telegram_message_id || null,\n  admin_chat_id: inp.admin_chat_id || 5532831477\n} };"
+      }
+    },
+    {
+      "id": "p4yl1nk-nomod-btn-2026-05-24",
+      "name": "Call Nomod",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5984,
+        1620
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/payment-link",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.customer_id) }},\n  \"customer_name\": {{ JSON.stringify($json.customer_name || '') }},\n  \"payment_summary\": {{ JSON.stringify($json.payment_summary) }},\n  \"amount\": {{ $json.amount }}\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "id": "p4yl1nk-nomod-rep-2026-05-24",
+      "name": "Call Nomod (Reply)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5760,
+        1900
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/payment-link",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.customer_id) }},\n  \"customer_name\": {{ JSON.stringify($json.customer_name || '') }},\n  \"payment_summary\": {{ JSON.stringify($json.payment_summary) }},\n  \"amount\": {{ $json.amount }}\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "id": "p4yl1nk-if-ok-2026-05-24",
+      "name": "Nomod OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6208,
+        1620
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "p4yl1nk-ok-cond",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "p4yl1nk-waha-2026-05-24",
+      "name": "Send Link to Customer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6432,
+        1500
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "https://waha.13-63-82-112.sslip.io/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": {{ JSON.stringify(($('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id) ) }},\n  \"text\": {{ JSON.stringify('please make payment using this link to confirm your booking: ' + $json.link_url) }}\n}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OaAspqZjcpsXIowi",
+          "name": "WAHA API"
+        }
+      }
+    },
+    {
+      "id": "p4yl1nk-edit-sent-2026-05-24",
+      "name": "Edit Telegram (Link Sent)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6656,
+        1500
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('\ud83d\udcb3 PAYMENT LINK SENT to ' + ($('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id) + '\\n\\nAED ' + ($('Call Nomod').item ? $('Call Nomod').item.json.amount : $('Call Nomod (Reply)').item.json.amount) + ' \u00b7 ' + ($('Prep Paylink').item ? $('Prep Paylink').item.json.payment_summary : $('Build Paylink From Reply').item.json.payment_summary) + '\\n\\n' + ($('Call Nomod').item ? $('Call Nomod').item.json.link_url : $('Call Nomod (Reply)').item.json.link_url) + '\\n\\n\u2192 customer auto-promoted to CONFIRMED.') }}\n}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "p4yl1nk-err-2026-05-24",
+      "name": "Notify Nomod Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6432,
+        1740
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('\u26a0\ufe0f Nomod payment-link FAILED: ' + ($json.error || 'unknown error') + '\\n\\nCustomer NOT messaged. The draft is still pending \u2014 retry [\ud83d\udcb3 Send Link] or hit Send to use the LLM reply instead.') }}\n}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "p4yl1nk-log-2026-05-24",
+      "name": "Log Payment Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6880,
+        1500
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/autonomous-log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify(($('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id) ) }},\n  \"kind\": \"payment_link_sent\",\n  \"notes\": {\n    \"link_url\": {{ JSON.stringify(($('Call Nomod').item ? $('Call Nomod').item.json.link_url : $('Call Nomod (Reply)').item.json.link_url)) }},\n    \"amount\": {{ ($('Call Nomod').item ? $('Call Nomod').item.json.amount : $('Call Nomod (Reply)').item.json.amount) }},\n    \"summary\": {{ JSON.stringify(($('Prep Paylink').item ? $('Prep Paylink').item.json.payment_summary : $('Build Paylink From Reply').item.json.payment_summary)) }}\n  }\n}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "id": "p4yl1nk-mark-2026-05-24",
+      "name": "Mark Link Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7104,
+        1500
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Mark the draft as link_sent in staticData + flip is_payment\n// so the downstream Promote To Confirmed hook (which gates on\n// draft.is_payment) auto-moves the customer to CONFIRMED.\nconst cid = $('Prep Paylink').item ? $('Prep Paylink').item.json.customer_id : $('Build Paylink From Reply').item.json.customer_id;\nconst draftId = $('Prep Paylink').item ? $('Prep Paylink').item.json.draft_id : $('Build Paylink From Reply').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.status = 'link_sent';\n  entry.is_payment = true;\n  entry.messages_sent_count = (entry.messages_sent_count || 0) + 1;\n}\nreturn { json: { ok: true, draft_id: draftId, customer_id: cid,\n  // Shape Promote To Confirmed expects (it reads draft.is_payment + .customer_phone)\n  draft: entry ? { is_payment: true, customer_phone: cid } : { is_payment: true, customer_phone: cid }\n} };"
+      }
+    },
+    {
+      "id": "p4yl1nk-conf-2026-05-24",
+      "name": "Promote To Confirmed (Paylink)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7328,
+        1500
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/label",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.customer_id) }},\n  \"label\": \"CONFIRMED\",\n  \"reason\": \"payment_link_sent \u2014 auto from [\ud83d\udcb3 Send Link]\"\n}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
     }
   ],
   "connections": {
@@ -5304,6 +5750,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Prep Paylink",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -5501,6 +5954,13 @@
         [
           {
             "node": "Hermes Refresh",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Paylink From Reply",
             "type": "main",
             "index": 0
           }
@@ -6746,6 +7206,141 @@
     "Cancel Prior Autosend": {
       "main": [
         []
+      ]
+    },
+    "Prep Paylink": {
+      "main": [
+        [
+          {
+            "node": "Amount Set?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Amount Set?": {
+      "main": [
+        [
+          {
+            "node": "Call Nomod",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Awaiting Amount",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Awaiting Amount": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (Amount Prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Paylink From Reply": {
+      "main": [
+        [
+          {
+            "node": "Call Nomod (Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Nomod": {
+      "main": [
+        [
+          {
+            "node": "Nomod OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Nomod (Reply)": {
+      "main": [
+        [
+          {
+            "node": "Nomod OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nomod OK?": {
+      "main": [
+        [
+          {
+            "node": "Send Link to Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Nomod Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Link to Customer": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (Link Sent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Telegram (Link Sent)": {
+      "main": [
+        [
+          {
+            "node": "Log Payment Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Payment Sent": {
+      "main": [
+        [
+          {
+            "node": "Mark Link Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Link Sent": {
+      "main": [
+        [
+          {
+            "node": "Promote To Confirmed (Paylink)",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
