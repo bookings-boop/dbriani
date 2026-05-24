@@ -141,17 +141,36 @@ def wait_for_n8n_ready(timeout=120):
 
 def check_telegram_webhook():
     """Run getWebhookInfo, parse pending_update_count + last_error. Returns
-    (pending_int, last_error_str or '')."""
+    (pending_int, last_error_str or '', url_str)."""
     out, _, _ = ssh_run(
         'TOKEN=$(docker exec ' + N8N_CONTAINER + ' printenv TELEGRAM_BOT_TOKEN); '
         f'curl -s "https://api.telegram.org/bot${{TOKEN}}/getWebhookInfo"',
         "webhook-info", timeout=30)
     try:
         r = json.loads(out).get("result", {})
-        return int(r.get("pending_update_count") or 0), \
-               (r.get("last_error_message") or "")
+        return (int(r.get("pending_update_count") or 0),
+                (r.get("last_error_message") or ""),
+                (r.get("url") or ""))
     except Exception as e:
-        return -1, f"parse-err {e!r}"
+        return -1, f"parse-err {e!r}", ""
+
+
+def heal_telegram_webhook(webhook_url):
+    """Call setWebhook with drop_pending_updates=true to fix the
+    'Wrong response from the webhook: 404 Not Found' state that often
+    follows an n8n import + container restart. n8n's in-memory webhook
+    registry can lag behind container readiness; re-setting the webhook
+    plus discarding the stale retry queue is the documented runbook
+    recovery (see docs/fixes-2026-05-23-evening.md §5).
+
+    Returns the setWebhook response (best-effort logging only)."""
+    out, _, _ = ssh_run(
+        'TOKEN=$(docker exec ' + N8N_CONTAINER + ' printenv TELEGRAM_BOT_TOKEN); '
+        f'curl -s -X POST -H "Content-Type: application/json" '
+        f'-d \'{{"url":"{webhook_url}","drop_pending_updates":true}}\' '
+        f'"https://api.telegram.org/bot${{TOKEN}}/setWebhook"',
+        "set-webhook", timeout=30)
+    return out
 
 
 def main():
@@ -250,8 +269,24 @@ def main():
     print(f"11. bridge: service={active}  /health=HTTP {health}  "
           f"/improve=HTTP {route}  (401 = route live + token-gated)")
 
-    pending, last_err = check_telegram_webhook()
+    pending, last_err, webhook_url = check_telegram_webhook()
     print(f"12. telegram webhook: pending={pending}  last_err='{last_err}'")
+
+    # Self-heal Telegram webhook 404. The post-import n8n restart sometimes
+    # leaves the in-memory webhook registry stale; Telegram's last attempted
+    # callback returns 404. Re-setting the webhook with
+    # drop_pending_updates=true clears the bad retry queue and re-registers.
+    # Operator hit this manually after every other deploy — now automatic.
+    if last_err and webhook_url:
+        is_404_pattern = ("404" in last_err
+                          or "Wrong response" in last_err
+                          or "Not Found" in last_err)
+        if is_404_pattern:
+            print(f"13. webhook self-heal: setWebhook drop_pending_updates=true")
+            heal_telegram_webhook(webhook_url)
+            time.sleep(6)  # let n8n reattach routes
+            pending, last_err, _ = check_telegram_webhook()
+            print(f"14. webhook recheck: pending={pending}  last_err='{last_err}'")
 
     ok = (active == "active" and health == "200" and route == "401"
           and pending == 0 and not last_err)
