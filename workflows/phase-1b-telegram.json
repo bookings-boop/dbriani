@@ -5429,7 +5429,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($('Unify Paylink Context').item.json.customer_id) }},\n  \"kind\": \"payment_link_sent\",\n  \"notes\": {\n    \"link_url\": {{ JSON.stringify($('Unify Paylink Context').item.json.link_url) }},\n    \"amount\": {{ $('Unify Paylink Context').item.json.amount }},\n    \"summary\": {{ JSON.stringify($('Unify Paylink Context').item.json.payment_summary) }}\n  }\n}",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($('Unify Paylink Context').item.json.customer_id) }},\n  \"kind\": \"payment_link_sent\",\n  \"notes\": {\n    \"link_id\": {{ JSON.stringify($('Unify Paylink Context').item.json.link_id) }},\n    \"link_url\": {{ JSON.stringify($('Unify Paylink Context').item.json.link_url) }},\n    \"amount\": {{ $('Unify Paylink Context').item.json.amount }},\n    \"summary\": {{ JSON.stringify($('Unify Paylink Context').item.json.payment_summary) }}\n  }\n}",
         "options": {
           "timeout": 8000
         }

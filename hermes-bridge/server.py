@@ -269,6 +269,94 @@ def _draft_latest_for_customer(customer_id, want_status=None):
     return None, None
 
 
+def nomod_list_recent_charges(page_size=50):
+    """GET /v1/charges — Nomod's payment feed. Returns
+    (list_of_charges_or_None, err_string_or_None). Always non-raising.
+    Used by /poll-payments to detect customer payments."""
+    if not NOMOD_API_KEY:
+        return None, "NOMOD_API_KEY not configured on the bridge"
+    req = urllib.request.Request(
+        NOMOD_API_BASE + f"/charges?page_size={int(page_size)}",
+        headers={"X-API-KEY": NOMOD_API_KEY,
+                 "User-Agent": "DubrianiHermesBridge/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        results = resp.get("results")
+        if not isinstance(results, list):
+            return None, "Nomod /charges response had no results array"
+        return results, None
+    except urllib.error.HTTPError as e:
+        return None, f"Nomod HTTP {e.code}"
+    except Exception as e:
+        return None, f"Nomod fetch failed: {e!r}"
+
+
+def _normalize_phone_digits(s):
+    """Strip everything except digits. Used to compare charge.customer_info
+    phone numbers against customer_facts customer_ids (which embed digits
+    before the @c.us or as the suffix of @lid pushNames)."""
+    return "".join(ch for ch in (s or "") if ch.isdigit())
+
+
+def _payer_mismatch(charge_payer, customer_facts_row, waha_chats=None):
+    """True if the charge.customer_info doesn't look like the same person
+    we sent the link to. Compares payer phone digit suffix against:
+      1. customer_id digits (catches @c.us-shape ids — phone IS the id)
+      2. customer_facts.name digits (catches phone-string pushName fallback)
+      3. WAHA chat-list pushName digits (catches @lid hashed ids — only
+         WAHA knows the real phone)
+    Returns False (no mismatch) when we don't have a phone for the
+    customer to compare against — we can't verify, so don't false-flag.
+    Operator wants this surfaced when payer ≠ customer so CRM can link
+    the two; false positives are worse than false negatives here."""
+    if not customer_facts_row:
+        return False
+    payer_phone = _normalize_phone_digits(
+        (charge_payer or {}).get("phone_number"))
+    if not payer_phone:
+        return False
+    tail = payer_phone[-9:] if len(payer_phone) >= 9 else payer_phone
+    if not tail:
+        return False
+    # Layer A: @c.us-shape customer_id contains the phone literally.
+    cust_id_digits = _normalize_phone_digits(
+        (customer_facts_row.get("customer_id") or "").split("@")[0])
+    if cust_id_digits and len(cust_id_digits) >= 7 \
+            and cust_id_digits.endswith(tail):
+        return False
+    # Layer B: customer_facts.name is a phone-string fallback (e.g. WAHA
+    # pushName before backfill — '+971 55 563 3317').
+    cust_name_digits = _normalize_phone_digits(
+        customer_facts_row.get("name") or "")
+    if cust_name_digits and len(cust_name_digits) >= 7 \
+            and cust_name_digits.endswith(tail):
+        return False
+    # Layer C: WAHA chat pushName — the only source for @lid hashed
+    # customer_ids that have a human-name in customer_facts.
+    cid = customer_facts_row.get("customer_id") or ""
+    if waha_chats and cid:
+        for ch in waha_chats:
+            cid_str = ch.get("_serialized") or (
+                ch.get("id") or {}).get("_serialized") or ""
+            if cid_str == cid:
+                pn_digits = _normalize_phone_digits(ch.get("name") or "")
+                if pn_digits and len(pn_digits) >= 7 \
+                        and pn_digits.endswith(tail):
+                    return False
+                # WAHA had the customer but their pushName isn't a phone
+                # we can match against — can't determine mismatch reliably.
+                if not pn_digits:
+                    return False
+                break  # WAHA chat found but phone didn't match
+    # No comparable phone found anywhere — can't verify, default to no
+    # false-flag.
+    if not (cust_id_digits or cust_name_digits or waha_chats):
+        return False
+    # We had data to compare AND nothing matched — true mismatch.
+    return True
+
+
 def nomod_create_link(amount, summary, customer_name):
     """Create a Nomod payment link. Returns (link_url, link_id, err).
 
@@ -2319,7 +2407,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/followup-action",
                              "/refresh-facts",
                              "/draft-freshness",
-                             "/autonomous-log"):
+                             "/autonomous-log",
+                             "/poll-payments"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -2381,6 +2470,8 @@ class Handler(BaseHTTPRequestHandler):
             self._draft_freshness(payload)
         elif self.path == "/autonomous-log":
             self._autonomous_log(payload)
+        elif self.path == "/poll-payments":
+            self._poll_payments(payload)
         else:
             self._draft(payload)
 
@@ -3707,6 +3798,258 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log("autonomous_log EXC:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e)})
+
+    def _poll_payments(self, payload):
+        """POST /poll-payments — fetch recent Nomod charges, match each to
+        a customer via 3-layer priority, log payment_received to
+        autonomous_sends, promote matched customers to CONFIRMED, return
+        match + unmatched lists for caller (n8n cron) to fire Telegram
+        notifications. Redis-deduped on charge.id (TTL 30d).
+
+        Body (all optional):
+          window_hours: int — only consider charges with created >= now-N
+                       hours. Default 24 (catches recent traffic on first
+                       run; subsequent polls only need ~1h but the dedup
+                       is the real safety).
+          page_size: int — Nomod page_size. Default 50.
+
+        Returns:
+          { ok, scanned, dedup_skipped, matched: [...], unmatched: [...] }
+        each match item = { charge_id, link_id, total, currency, method,
+          created, customer_id, customer_name, payer_info, payer_mismatch,
+          summary, matched_via }
+        each unmatched item = { charge_id, total, currency, method, created,
+          payer_info, summary }
+        """
+        import datetime as _dt
+        window_hours = int(payload.get("window_hours") or 24)
+        page_size = int(payload.get("page_size") or 50)
+
+        charges, err = nomod_list_recent_charges(page_size=page_size)
+        if err:
+            log("poll-payments fetch err:", err)
+            self._send(200, {"ok": False, "error": err, "scanned": 0,
+                             "matched": [], "unmatched": []})
+            return
+
+        cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(
+            hours=window_hours)
+        matched = []
+        unmatched = []
+        dedup_skipped = 0
+        scanned = 0
+
+        # Cache WAHA chats once for both phone-lookup (layer 2) and
+        # payer-mismatch detection. Avoids N+1 across multiple charges.
+        waha_chats_cache = None
+        try:
+            chats, _werr = _waha_get("/api/default/chats?limit=200")
+            if isinstance(chats, list):
+                waha_chats_cache = chats
+        except Exception as _e:
+            log("poll-payments WAHA cache err:", repr(_e))
+
+        for c in (charges or []):
+            if (c.get("status") or "").lower() != "paid":
+                continue
+            # Window filter
+            created_str = c.get("created") or ""
+            try:
+                created_dt = _dt.datetime.fromisoformat(
+                    created_str.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if created_dt < cutoff:
+                continue
+            scanned += 1
+            charge_id = c.get("id") or ""
+            if not charge_id:
+                continue
+
+            # Redis dedup — SET-before-notify per operator spec.
+            # NX = only set if not exists; if EXISTS, this is a re-poll
+            # of a charge we already handled.
+            redis_key = f"nomod_seen:{charge_id}"
+            _o, _e = _redis(["SET", redis_key, "1",
+                             "EX", str(30 * 24 * 3600), "NX"])
+            # Redis returns "OK" on success, "" (empty/null) on NX-failed.
+            # Be tolerant of either return shape.
+            already_seen = (not _o or "OK" not in str(_o))
+            if already_seen:
+                dedup_skipped += 1
+                continue
+
+            # Extract data we want regardless of match outcome.
+            link_obj = c.get("link") or {}
+            link_id = link_obj.get("id") if isinstance(link_obj, dict) else ""
+            total = c.get("total") or "0"
+            try:
+                total_f = float(total)
+            except ValueError:
+                total_f = 0.0
+            method = c.get("payment_method") or "unknown"
+            currency = c.get("currency") or "AED"
+            payer = c.get("customer_info") or {}
+            items = c.get("items") or []
+            summary = ""
+            if items and isinstance(items[0], dict):
+                summary = items[0].get("name", "") or ""
+
+            # ── LAYER 1: link.id → autonomous_sends row we logged ──
+            customer_id = ""
+            customer_name = ""
+            matched_via = ""
+            log_row = None
+            if link_id:
+                lid_esc = link_id.replace("'", "''")
+                sql = (
+                    "SELECT customer_id, notes::text FROM autonomous_sends "
+                    "WHERE kind = 'payment_link_sent' "
+                    f"AND notes->>'link_id' = '{lid_esc}' "
+                    "ORDER BY id DESC LIMIT 1"
+                )
+                out, _err = _psql(sql)
+                row_line = (out or "").strip().splitlines()
+                if row_line and "|" in row_line[0]:
+                    parts = row_line[0].split("|", 1)
+                    customer_id = parts[0].strip()
+                    matched_via = "link_id"
+                    try:
+                        log_row = json.loads(parts[1].strip()) \
+                            if len(parts) > 1 else None
+                    except (ValueError, IndexError):
+                        log_row = None
+
+            # ── LAYER 2: phone → customer_id via DB then WAHA fallback ──
+            if not customer_id:
+                phone = _normalize_phone_digits(payer.get("phone_number"))
+                if phone and len(phone) >= 7:
+                    tail = phone[-9:] if len(phone) >= 9 else phone
+                    out, _err = _psql(
+                        "SELECT customer_id, COALESCE(name,'') FROM customer_facts "
+                        f"WHERE customer_id LIKE '%{tail}@%' "
+                        "ORDER BY updated_at DESC LIMIT 1"
+                    )
+                    line = (out or "").strip().splitlines()
+                    if line and "|" in line[0]:
+                        parts = line[0].split("|", 1)
+                        customer_id = parts[0].strip()
+                        customer_name = parts[1].strip()
+                        matched_via = "phone_db"
+                    elif waha_chats_cache:
+                        # WAHA fallback — match the pushName-digits to phone tail
+                        for ch in waha_chats_cache:
+                            cid_str = ch.get("_serialized") or (
+                                ch.get("id") or {}).get(
+                                "_serialized") or ""
+                            pn_digits = _normalize_phone_digits(
+                                ch.get("name") or "")
+                            if (pn_digits.endswith(tail)
+                                    or cid_str.startswith(phone + "@")):
+                                customer_id = cid_str
+                                matched_via = "phone_waha"
+                                break
+
+            # ── LAYER 3: amount + time fuzzy match ──
+            if not customer_id:
+                # Same currency assumed (AED). Match autonomous_sends row
+                # within ±30min and ±1 AED of charge.total.
+                created_iso = created_dt.isoformat()
+                sql = (
+                    "SELECT customer_id, notes::text FROM autonomous_sends "
+                    "WHERE kind = 'payment_link_sent' "
+                    f"AND ABS((notes->>'amount')::numeric - {total_f}) < 1 "
+                    f"AND sent_at BETWEEN "
+                    f"  '{created_iso}'::timestamptz - interval '30 minutes' "
+                    f"AND '{created_iso}'::timestamptz + interval '5 minutes' "
+                    "LIMIT 2"
+                )
+                out, _err = _psql(sql)
+                lines = (out or "").strip().splitlines()
+                if len(lines) == 1 and "|" in lines[0]:
+                    parts = lines[0].split("|", 1)
+                    customer_id = parts[0].strip()
+                    matched_via = "amount_time"
+
+            # Get customer name from customer_facts if we have a match.
+            row = None
+            if customer_id and not customer_name:
+                row = get_current_label_row(customer_id)
+                customer_name = (row or {}).get("name", "") or ""
+
+            # Payer-vs-customer discrepancy check. Only meaningful when we
+            # matched via link_id or amount_time (phone matches already
+            # confirm identity).
+            pay_mismatch = False
+            if customer_id and matched_via in ("link_id", "amount_time"):
+                row = row or get_current_label_row(customer_id)
+                pay_mismatch = _payer_mismatch(payer, row, waha_chats_cache)
+
+            # Build payment_received audit row.
+            notes_obj = {
+                "charge_id": charge_id,
+                "link_id": link_id,
+                "matched_via": matched_via or "unmatched",
+                "total": total_f,
+                "currency": currency,
+                "payment_method": method,
+                "created_at": created_str,
+                "payer_info": {
+                    "first_name": (payer.get("first_name") or "").strip(),
+                    "last_name": (payer.get("last_name") or "").strip(),
+                    "email": (payer.get("email") or "").strip(),
+                    "phone_number": (payer.get("phone_number") or "").strip(),
+                },
+                "payer_mismatch": pay_mismatch,
+                "summary": summary,
+            }
+            try:
+                kind = "payment_received" if customer_id else \
+                    "payment_received_unmatched"
+                cid_for_log = customer_id or "unknown"
+                sql = (
+                    "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+                    f"VALUES ({_lit(cid_for_log)}, {_lit(kind)}, "
+                    f"{_lit(json.dumps(notes_obj))}::jsonb)"
+                )
+                _psql(sql)
+            except Exception as e:
+                log("poll-payments log insert err:", repr(e))
+
+            entry = dict(notes_obj)
+            entry["customer_id"] = customer_id
+            entry["customer_name"] = customer_name
+
+            if customer_id:
+                # Promote to CONFIRMED (operator's terminal-state rule).
+                try:
+                    cid_e = customer_id.replace("'", "''")
+                    prev_row = row or get_current_label_row(customer_id)
+                    prev_label = (prev_row or {}).get("label") or "NEW"
+                    if prev_label != "CONFIRMED":
+                        apply_label_transition(
+                            customer_id, prev_label, "CONFIRMED",
+                            "poll-payments:payment_received",
+                            f"charge {charge_id[:8]} matched_via={matched_via}",
+                            (prev_row or {}).get("message_count", 0),
+                            created_by="system")
+                        log(f"poll-payments cid={customer_id!r} "
+                            f"{prev_label} -> CONFIRMED matched_via={matched_via}")
+                except Exception as e:
+                    log("poll-payments promote err:", repr(e))
+                matched.append(entry)
+            else:
+                unmatched.append(entry)
+
+        log(f"poll-payments scanned={scanned} matched={len(matched)} "
+            f"unmatched={len(unmatched)} dedup_skipped={dedup_skipped}")
+        self._send(200, {
+            "ok": True,
+            "scanned": scanned,
+            "dedup_skipped": dedup_skipped,
+            "matched": matched,
+            "unmatched": unmatched,
+        })
 
     def _review(self, payload):
         """POST /review — read v_lead_summary, score, render Telegram report
