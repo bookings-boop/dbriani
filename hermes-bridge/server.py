@@ -2363,15 +2363,23 @@ def render_review(scored, totals, mode="ondemand"):
         for i, (score, row) in enumerate(shown, 1):
             why = _why_line(row, label_key)
             # Hermes importance — append score + suggestion when present.
+            # Dedupe: if _why_line already used suggested_action (CONFIRMED/
+            # WAITING_FOR_PAYMENT path), don't repeat it on the 🧠 line —
+            # show the reasoning instead, or just the score alone.
             imp = row.get("importance_score")
             imp_bits = ""
             if isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                 sug = (row.get("suggested_action") or "").strip()
-                if sug:
-                    imp_bits += f" — _{sug}_"
                 rea = (row.get("importance_reasoning") or "").strip()
-                if rea and not sug:
+                why_used_sug = (sug and why == sug)
+                if sug and not why_used_sug:
+                    imp_bits += f" — _{sug}_"
+                elif rea and why_used_sug:
+                    # Why-line already carries the suggestion; show the
+                    # 'why this score' reasoning on the 🧠 line instead.
+                    imp_bits += f" — _{rea}_"
+                elif rea:
                     imp_bits += f" — _{rea}_"
             lead_body = (
                 f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
@@ -2493,8 +2501,18 @@ def _name_fallback(customer_id):
 
 
 def _why_line(row, label_key):
-    """Heuristic one-liner. v1: deterministic. Hermes-driven 'why' is a
-    follow-up enhancement."""
+    """Heuristic one-liner. Prefers Hermes' suggested_action when present
+    for CONFIRMED + WAITING_FOR_PAYMENT (where the generic line — e.g.
+    'share boarding details or upsell' — is often wrong because the
+    operator has already shared boarding / payment link), and falls
+    back to deterministic rules everywhere else."""
+    # For CONFIRMED/WAITING customers, suggested_action from Hermes is
+    # more accurate than the generic guidance (it knows what's already
+    # been said in the chat). Skip generic notes if we have it.
+    if label_key in ("CONFIRMED", "WAITING_FOR_PAYMENT"):
+        sug = (row.get("suggested_action") or "").strip()
+        if sug:
+            return sug
     notes = []
     if row.get("last_payment_link_at_seconds") is not None:
         plink_h = int(row["last_payment_link_at_seconds"] / 3600)
@@ -4309,16 +4327,38 @@ class Handler(BaseHTTPRequestHandler):
             rows = read_lead_summary(
                 filter_label if filter_label in ("hot", "warm", "cold") else None)
 
-            # Auto-heal: identify customers missing critical facts. Active
-            # labels only (paused/confirmed/disregarded already in terminal
-            # states; not worth a Hermes call).
+            # Auto-heal: refresh customers whose facts are likely stale or
+            # missing. Two triggers:
+            #   (a) ACTIVE labels with empty name AND empty yacht — the
+            #       broken-intake case (webhook miss / first-msg-was-media).
+            #   (b) CONFIRMED + WAITING_FOR_PAYMENT + HOT with stale facts
+            #       (>30 min since last update). These can change ACTIVELY
+            #       post-confirm (yacht upgrades, addon changes, last-minute
+            #       date moves) and the operator needs the current booking.
             ACTIVE_LABELS = ("NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
                              "WAITING_FOR_PAYMENT")
+            STALE_RECHECK_LABELS = ("CONFIRMED", "WAITING_FOR_PAYMENT", "HOT")
+            STALE_RECHECK_AFTER_SECS = int(
+                os.environ.get("REVIEW_STALE_AFTER_SECS", "1800"))
+
+            def _needs_refresh(r):
+                lab = r.get("label") or ""
+                # (a) broken-intake
+                if (lab in ACTIVE_LABELS
+                        and not (r.get("name") or "").strip()
+                        and not (r.get("yachts") or "").strip()):
+                    return True
+                # (b) high-value stale (use facts_updated_at proxy via
+                # last_review_seen_at fallback to importance_analyzed_at)
+                if lab in STALE_RECHECK_LABELS:
+                    stale_secs = r.get("importance_analyzed_at_seconds")
+                    if stale_secs is None or stale_secs > STALE_RECHECK_AFTER_SECS:
+                        return True
+                return False
+
             needs_refresh = [
                 r["customer_id"] for r in rows
-                if r.get("label") in ACTIVE_LABELS
-                and not (r.get("name") or "").strip()
-                and not (r.get("yachts") or "").strip()
+                if _needs_refresh(r)
             ][:REVIEW_INLINE_REFRESH_CAP]
             refreshed_count = 0
             if needs_refresh:
@@ -4722,13 +4762,17 @@ class Handler(BaseHTTPRequestHandler):
                 "telegram_text": ""})
             return
         try:
-            # Pull active leads (skip terminal/paused). Order by oldest
-            # importance_analyzed_at first so the cap rotates fairly across
-            # all leads instead of always re-scoring the same 20 each hour.
+            # Pull leads worth scoring. CONFIRMED is included because
+            # post-confirm chats actively change (yacht upgrades, addons,
+            # boarding details) — operator wants Hermes' next-action
+            # suggestion to reflect chat state ('addons', 'send
+            # boarding pack', 'thank-you nudge') rather than the generic
+            # CONFIRMED guidance. PAUSED_*/DISREGARDED stay excluded —
+            # they're terminal/dormant.
             sql = (
                 "SELECT customer_id FROM customer_facts WHERE label IN ("
                 "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
-                "'WAITING_FOR_PAYMENT') "
+                "'WAITING_FOR_PAYMENT','CONFIRMED') "
                 "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
                 f"updated_at DESC LIMIT {int(cap)}"
             )
