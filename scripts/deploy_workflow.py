@@ -134,6 +134,19 @@ def main():
     backup.write_text(json.dumps(live, indent=2, ensure_ascii=False) + "\n")
     print(f"3. live workflow backed up -> {backup.relative_to(ROOT)}")
     print(f"   live: {len(live.get('nodes', []))} nodes, active={was_active}\n")
+    # Retention: keep last 5 LIVE-backup snapshots, delete older.
+    _BACKUP_KEEP = 5
+    _live_backups = sorted(
+        (ROOT / "workflows").glob("phase-1b-telegram.LIVE-backup-*.json"),
+        key=lambda p: p.stat().st_mtime, reverse=True)
+    for _old in _live_backups[_BACKUP_KEEP:]:
+        try:
+            _old.unlink()
+        except OSError:
+            pass
+    if len(_live_backups) > _BACKUP_KEEP:
+        print(f"   pruned {len(_live_backups) - _BACKUP_KEEP} old "
+              f"LIVE-backup(s) (kept {_BACKUP_KEEP})")
 
     # --- phase 4: apply surgery ---
     rewired, changed = surgery(json.loads(json.dumps(live)))

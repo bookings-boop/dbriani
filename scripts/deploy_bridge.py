@@ -56,6 +56,55 @@ def die(m):
     sys.exit(f"x {m}")
 
 
+# Backup retention — keep the N most recent of each pattern, delete the
+# rest. Without this, every deploy leaves a snapshot behind forever; we
+# accumulated 112 backup files (63MB) before this was added. Five gives
+# enough rollback history without polluting the tree.
+BACKUP_KEEP = 5
+
+
+def prune_local_backups():
+    """Delete older PRE-DEPLOY workflow backups in workflows/, keep the 5
+    most recent. Also delete LIVE-backup-* files (created by deploy_workflow.py)
+    and hermes-bridge/server.PRE-*.py / system-prompt.PRE-*.md snapshots
+    if they exist. Mtime-sorted (newest first), older ones unlinked."""
+    targets = [
+        (ROOT / "workflows", "phase-1b-telegram.PRE-DEPLOY-*.json"),
+        (ROOT / "workflows", "phase-1b-telegram.LIVE-backup-*.json"),
+        (ROOT / "workflows", "phase-1b-telegram.PRE-*.json"),
+        (BRIDGE_DIR, "server.PRE-*.py"),
+        (BRIDGE_DIR, "system-prompt.PRE-*.md"),
+    ]
+    pruned = 0
+    for dir_, pattern in targets:
+        files = sorted(dir_.glob(pattern),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in files[BACKUP_KEEP:]:
+            try:
+                f.unlink()
+                pruned += 1
+            except OSError as e:
+                print(f"  WARN: couldn't prune {f.name}: {e}")
+    if pruned:
+        print(f"   pruned {pruned} old local backup(s) "
+              f"(kept {BACKUP_KEEP} per pattern)")
+
+
+def prune_box_backups():
+    """Delete older .bak.<ts> backups on the box, keep the 5 most recent.
+    The box accumulates one .bak.<ts> per deploy in ~/hermes-bridge/."""
+    cmd = (
+        f"cd ~/hermes-bridge && "
+        f"for pat in 'server.py.bak.*' 'system-prompt.md.bak.*'; do "
+        f"  ls -1t $pat 2>/dev/null | tail -n +$(({BACKUP_KEEP}+1)) | "
+        f"  xargs -r rm -f; "
+        f"done && echo BOX_PRUNED"
+    )
+    out, _, _ = ssh_run(cmd, "prune-box-backups", timeout=15)
+    if "BOX_PRUNED" in out:
+        print(f"   pruned old box-side .bak.<ts> (kept {BACKUP_KEEP} per pattern)")
+
+
 def ssh_run(script, label, timeout=120):
     """Retry-with-backoff ssh exec. Returns (stdout, stderr, rc)."""
     last = ""
@@ -196,12 +245,14 @@ def main():
             f'{{ [ -f system-prompt.md ] && cp system-prompt.md '
             f'system-prompt.md.bak.{ts} || true; }} && echo OK', "backup-box")
     print(f"2. backed up box server.py + system-prompt.md (.bak.{ts})")
+    prune_box_backups()
 
     # 2. back up local workflow JSON
     local_backup = WORKFLOW_PATH.with_name(
         f"phase-1b-telegram.PRE-DEPLOY-{ts}.json")
     local_backup.write_bytes(WORKFLOW_PATH.read_bytes())
     print(f"3. backed up local workflow JSON -> {local_backup.name}")
+    prune_local_backups()
 
     # 3. upload server.py + master prompt to bridge
     ssh_upload(SERVER_PY.read_bytes(),
