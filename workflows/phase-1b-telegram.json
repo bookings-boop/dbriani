@@ -1940,19 +1940,19 @@
             {
               "id": "533ab141-b525-4838-b3ff-743165f8ac9b",
               "name": "leadPhone",
-              "value": "={{ $json.leadPhone }}",
+              "value": "={{ $('Prep Lead Draft').item.json.leadPhone }}",
               "type": "string"
             },
             {
               "id": "f03881a3-b916-4c24-9589-2b6b772cf1ad",
               "name": "leadText",
-              "value": "={{ $json.leadText }}",
+              "value": "={{ $('Prep Lead Draft').item.json.leadText }}",
               "type": "string"
             },
             {
               "id": "022077cb-b065-4841-b136-e3fd88439e5d",
               "name": "adminChatId",
-              "value": "={{ $json.adminChatId }}",
+              "value": "={{ $('Prep Lead Draft').item.json.adminChatId }}",
               "type": "number"
             }
           ]
@@ -5537,6 +5537,44 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "bootstrap-lead-2026-05-24",
+      "name": "Bootstrap Lead Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5024,
+        2200
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/customer-facts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"customer_id\": {{ JSON.stringify($json.leadPhone) }},\n  \"customer_name\": \"\",\n  \"incoming_message\": {{ JSON.stringify($json.leadText) }},\n  \"history\": \"\"\n}",
+        "options": {
+          "timeout": 25000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
     }
   ],
   "connections": {
@@ -6218,7 +6256,7 @@
       "main": [
         [
           {
-            "node": "Build Lead Prompt",
+            "node": "Bootstrap Lead Facts",
             "type": "main",
             "index": 0
           }
@@ -7391,6 +7429,17 @@
         [
           {
             "node": "Nomod OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bootstrap Lead Facts": {
+      "main": [
+        [
+          {
+            "node": "Build Lead Prompt",
             "type": "main",
             "index": 0
           }
