@@ -6,10 +6,18 @@
       "name": "Schedule (every 2 min)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 320],
+      "position": [
+        240,
+        320
+      ],
       "parameters": {
         "rule": {
-          "interval": [{"field": "minutes", "minutesInterval": 2}]
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
         }
       }
     },
@@ -18,23 +26,36 @@
       "name": "Poll Payments",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [464, 320],
+      "position": [
+        464,
+        320
+      ],
       "parameters": {
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "method": "POST",
         "url": "http://172.18.0.1:8788/poll-payments",
         "sendHeaders": true,
-        "headerParameters": {"parameters": [
-          {"name": "Content-Type", "value": "application/json"}
-        ]},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={ \"window_hours\": 24, \"page_size\": 50 }",
-        "options": {"timeout": 30000}
+        "options": {
+          "timeout": 30000
+        }
       },
       "credentials": {
-        "httpHeaderAuth": {"id": "IgIcvPoibuAayVDx", "name": "Hermes Bridge"}
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
       }
     },
     {
@@ -42,17 +63,29 @@
       "name": "Anything New?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [688, 320],
+      "position": [
+        688,
+        320
+      ],
       "parameters": {
         "conditions": {
-          "options": {"caseSensitive": true, "leftValue": "",
-                      "typeValidation": "loose", "version": 2},
-          "conditions": [{
-            "id": "pp-cond-1",
-            "leftValue": "={{ ($json.matched.length || 0) + ($json.unmatched.length || 0) }}",
-            "rightValue": 0,
-            "operator": {"type": "number", "operation": "gt"}
-          }],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pp-cond-1",
+              "leftValue": "={{ ($json.matched.length || 0) + ($json.unmatched.length || 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
           "combinator": "and"
         }
       }
@@ -60,9 +93,12 @@
     {
       "id": "pp-split-matched-2026-05-24",
       "name": "Split Matched",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [912, 240],
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        912,
+        240
+      ],
       "parameters": {
         "fieldToSplitOut": "matched",
         "options": {}
@@ -73,27 +109,40 @@
       "name": "Notify Matched",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1136, 240],
+      "position": [
+        1136,
+        240
+      ],
       "parameters": {
         "method": "POST",
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
         "sendHeaders": true,
-        "headerParameters": {"parameters": [
-          {"name": "Content-Type", "value": "application/json"}
-        ]},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"parse_mode\": \"Markdown\",\n  \"text\": {{ JSON.stringify(\n    '💰 *PAYMENT RECEIVED*' + ($json.payer_mismatch ? '  ⚠️ payer ≠ customer' : '') + '\\n' +\n    'Customer: *' + ($json.customer_name || $json.customer_id || '(unknown)') + '*\\n' +\n    (($json.payer_info && ($json.payer_info.first_name || $json.payer_info.email))\n      ? ('Paid by: ' + [($json.payer_info.first_name + ' ' + $json.payer_info.last_name).trim(), $json.payer_info.email, ($json.payer_info.phone_number ? '+' + $json.payer_info.phone_number : '')].filter(x=>x).join(' · ') + '\\n')\n      : '') +\n    'Amount: AED ' + ($json.total || '?') + '\\n' +\n    'Method: ' + ($json.payment_method || 'unknown') + '\\n' +\n    'Booking: ' + ($json.summary || '(no summary)') + '\\n' +\n    '→ promoted to ✅ CONFIRMED  _(via ' + ($json.matched_via || 'unknown') + ')_' +\n    ($json.payer_mismatch ? '\\n\\n📋 Payer info logged — link to customer in CRM.' : '')\n  ) }}\n}",
-        "options": {"timeout": 8000}
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"parse_mode\": \"HTML\",\n  \"text\": {{ JSON.stringify(\n    '\\ud83d\\udcb0 <b>PAYMENT RECEIVED</b>' + ($json.payer_mismatch ? '  \\u26a0\\ufe0f payer \\u2260 customer' : '') + '\\n' +\n    'Customer: <b>' + ($json.customer_name || $json.customer_id || '(unknown)') + '</b>\\n' +\n    (($json.payer_info && ($json.payer_info.first_name || $json.payer_info.email))\n      ? ('Paid by: ' + [($json.payer_info.first_name + ' ' + $json.payer_info.last_name).trim(), $json.payer_info.email, ($json.payer_info.phone_number ? '+' + $json.payer_info.phone_number : '')].filter(x=>x).join(' \\u00b7 ') + '\\n')\n      : '') +\n    'Amount: AED ' + ($json.total || '?') + '\\n' +\n    'Method: ' + ($json.payment_method || 'unknown') + '\\n' +\n    'Booking: ' + ($json.summary || '(no summary)') + '\\n' +\n    '\\u2192 promoted to \\u2705 CONFIRMED  <i>(via ' + ($json.matched_via || 'unknown') + ')</i>' +\n    ($json.payer_mismatch ? '\\n\\n\\ud83d\\udccb Payer info logged \\u2014 link to customer in CRM.' : '')\n  ) }}\n}",
+        "options": {
+          "timeout": 8000
+        }
       },
       "onError": "continueRegularOutput"
     },
     {
       "id": "pp-split-unmatched-2026-05-24",
       "name": "Split Unmatched",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [912, 400],
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        912,
+        400
+      ],
       "parameters": {
         "fieldToSplitOut": "unmatched",
         "options": {}
@@ -104,45 +153,97 @@
       "name": "Notify Unmatched",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1136, 400],
+      "position": [
+        1136,
+        400
+      ],
       "parameters": {
         "method": "POST",
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
         "sendHeaders": true,
-        "headerParameters": {"parameters": [
-          {"name": "Content-Type", "value": "application/json"}
-        ]},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"parse_mode\": \"Markdown\",\n  \"text\": {{ JSON.stringify(\n    '💰 *PAYMENT RECEIVED* (unmatched)\\n' +\n    'Amount: AED ' + ($json.total || '?') + '\\n' +\n    'Method: ' + ($json.payment_method || 'unknown') + '\\n' +\n    'Time: ' + ($json.created_at || '?') + '\\n' +\n    (($json.payer_info && ($json.payer_info.first_name || $json.payer_info.email))\n      ? ('From: ' + [($json.payer_info.first_name + ' ' + $json.payer_info.last_name).trim(), $json.payer_info.email, ($json.payer_info.phone_number ? '+' + $json.payer_info.phone_number : '')].filter(x=>x).join(' · ') + '\\n')\n      : '') +\n    'Reference: `' + ($json.charge_id || '?').slice(0, 8) + '...`\\n\\n' +\n    'Check Nomod dashboard to identify customer + run `/label <name> CONFIRMED` manually.'\n  ) }}\n}",
-        "options": {"timeout": 8000}
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"parse_mode\": \"HTML\",\n  \"text\": {{ JSON.stringify(\n    '\\ud83d\\udcb0 <b>PAYMENT RECEIVED</b> (unmatched)\\n' +\n    'Amount: AED ' + ($json.total || '?') + '\\n' +\n    'Method: ' + ($json.payment_method || 'unknown') + '\\n' +\n    'Time: ' + ($json.created_at || '?') + '\\n' +\n    (($json.payer_info && ($json.payer_info.first_name || $json.payer_info.email))\n      ? ('From: ' + [($json.payer_info.first_name + ' ' + $json.payer_info.last_name).trim(), $json.payer_info.email, ($json.payer_info.phone_number ? '+' + $json.payer_info.phone_number : '')].filter(x=>x).join(' \\u00b7 ') + '\\n')\n      : '') +\n    'Reference: <code>' + ($json.charge_id || '?').slice(0, 8) + '...</code>\\n\\n' +\n    'Check Nomod dashboard to identify customer + run <code>/label name CONFIRMED</code> manually.'\n  ) }}\n}",
+        "options": {
+          "timeout": 8000
+        }
       },
       "onError": "continueRegularOutput"
     }
   ],
   "connections": {
     "Schedule (every 2 min)": {
-      "main": [[{"node": "Poll Payments", "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Poll Payments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Poll Payments": {
-      "main": [[{"node": "Anything New?", "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Anything New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Anything New?": {
       "main": [
         [
-          {"node": "Split Matched", "type": "main", "index": 0},
-          {"node": "Split Unmatched", "type": "main", "index": 0}
+          {
+            "node": "Split Matched",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Unmatched",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Split Matched": {
-      "main": [[{"node": "Notify Matched", "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Notify Matched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Split Unmatched": {
-      "main": [[{"node": "Notify Unmatched", "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Notify Unmatched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "settings": {"executionOrder": "v1"},
+  "settings": {
+    "executionOrder": "v1"
+  },
   "staticData": null,
   "tags": [],
   "triggerCount": 0,
