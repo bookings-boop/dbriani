@@ -7348,13 +7348,7 @@
     },
     "Mark Link Sent": {
       "main": [
-        [
-          {
-            "node": "Promote To Confirmed (Paylink)",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        []
       ]
     },
     "Unify Paylink Context": {

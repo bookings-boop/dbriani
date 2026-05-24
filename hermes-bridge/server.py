@@ -1356,6 +1356,24 @@ PAST_DATE_MONTH_RE = re.compile(
     r"nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?",
     re.IGNORECASE,
 )
+# Payment-confirmation language from the customer. ONLY trips CONFIRMED
+# when paired with a recent payment_link_sent in autonomous_sends (last
+# 48h) — see _has_recent_payment_link_sent + compute_label. Anchored on
+# explicit commit verbs so a generic 'done' / 'paid' in casual chat
+# (e.g. 'i paid for parking') doesn't false-positive without context.
+PAYMENT_CONFIRMED_RE = re.compile(
+    r"\b("
+    r"i'?ve?\s+(paid|sent|transferred|done\s+(it|the\s+payment))|"
+    r"(payment|paid)\s+(done|sent|made|complete|successful)|"
+    r"(transferred|sent)\s+(it|the\s+(payment|amount|aed|money))|"
+    r"made\s+the?\s+payment|just\s+paid|now\s+paid|"
+    r"transaction\s+(successful|complete|done)|"
+    r"all\s+(paid|done|settled)|"
+    r"settled\s+(it|the\s+(payment|invoice))|"
+    r"payment\s+✅|paid\s+✅|done\s+✅"
+    r")\b",
+    re.IGNORECASE,
+)
 SAME_DAY_RE = re.compile(
     r"\b(today|tonight|right\s*now|now|asap|immediately|this\s+(afternoon|evening|night))\b",
     re.IGNORECASE,
@@ -1427,6 +1445,25 @@ def _has_recent_payment_intent(customer_id, hours=24):
         f"SELECT count(*) FROM customer_triggers WHERE customer_id = '{cid}' "
         "AND type IN ('payment_promised','payment_link_sent','booking_intent') "
         f"AND created_at > now() - interval '{int(hours)} hours'"
+    )
+    if err:
+        return False
+    try:
+        return int((out or "0").strip().splitlines()[0]) > 0
+    except (ValueError, IndexError):
+        return False
+
+
+def _has_recent_payment_link_sent(customer_id, hours=48):
+    """True if autonomous_sends has a payment_link_sent row for this
+    customer within the last N hours. Used by the payment-confirmation
+    chat-signal detection — only trust 'paid' / 'done' / 'transferred'
+    language when we ACTUALLY sent them a link recently."""
+    cid = (customer_id or "").replace("'", "''")
+    out, err = _psql(
+        "SELECT count(*) FROM autonomous_sends "
+        f"WHERE customer_id = '{cid}' AND kind = 'payment_link_sent' "
+        f"AND sent_at > now() - interval '{int(hours)} hours'"
     )
     if err:
         return False
@@ -1508,7 +1545,20 @@ def compute_label(latest_message, facts):
     yachts = ((facts or {}).get("yachts") or "").strip()
     dates = ((facts or {}).get("dates") or "").strip()
 
-    # Past-date demotion takes precedence over all positive signals.
+    # Payment-confirmed chat signal takes HIGHEST priority — overrides
+    # everything (including past-date COLD). Only fires when:
+    #   (a) the customer's latest message matches a confirm phrase, AND
+    #   (b) we logged a payment_link_sent for them in the last 48h.
+    # Both gates needed — a casual 'i paid for parking yesterday' without
+    # a recent link can't false-positive to CONFIRMED. Operator can still
+    # always /label override.
+    if customer_id and PAYMENT_CONFIRMED_RE.search(msg) \
+            and _has_recent_payment_link_sent(customer_id, hours=48):
+        m = PAYMENT_CONFIRMED_RE.search(msg)
+        evidence = msg[max(0, m.start() - 10):m.end() + 20].strip()
+        return ("CONFIRMED", "payment_confirmed_chat", evidence[:200])
+
+    # Past-date demotion takes precedence over all OTHER positive signals.
     # The booking date has come and gone — the customer is either a
     # missed sale or a future re-engagement candidate; either way it
     # should NOT sit at the top of /review as HOT.
