@@ -1189,7 +1189,7 @@ def extract_customer_facts(incoming_message, history):
 
 # --- pattern-recognition analyzer (used by /lead-analyze-disregard +
 #     /pipeline-analyze hourly importance ranker) ----------------------------
-ANALYZE_LEAD_TIMEOUT = int(os.environ.get("BRIDGE_ANALYZE_TIMEOUT", "20"))
+ANALYZE_LEAD_TIMEOUT = int(os.environ.get("BRIDGE_ANALYZE_TIMEOUT", "45"))
 
 # UAE working hours (Asia/Dubai = UTC+4, no DST). Used by /pipeline-analyze
 # cron to skip overnight runs — keeps the Hermes spend in business hours.
@@ -1661,10 +1661,13 @@ HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200")
 HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 
 # Hourly pipeline analyzer — Hermes-driven importance ranking over active
-# leads. Cap is per-run; the analyzer rotates via oldest-analyzed-first so
-# every lead gets a fresh score within ~ceil(N/cap) hours during working
-# hours. 20 calls/hour @ ~5s each = ~100s of Hermes time/hour (low spend).
-PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "20"))
+# leads. Cap=100 covers a healthy pipeline in one run; with parallel=5
+# workers and ~6s per customer, that's ~120s wall-clock worst-case, well
+# inside the 600s cron timeout. Rotation (oldest-analyzed-first) still
+# applies — if total pipeline ever exceeds the cap, the cap-spillover
+# gets picked up next hour.
+PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "100"))
+PIPELINE_ANALYZE_WORKERS = int(os.environ.get("PIPELINE_ANALYZE_WORKERS", "5"))
 
 # /review inline auto-heal — for customers with missing critical facts
 # (no name AND no yacht), refresh from WAHA history before rendering.
@@ -4815,57 +4818,70 @@ class Handler(BaseHTTPRequestHandler):
                 return
             cids = [ln.strip() for ln in (out or "").splitlines()
                     if ln.strip()]
+
+            def _analyze_one(cid):
+                """Per-customer pipeline: refresh facts, score, persist.
+                Returns ('analyzed', score, cid, name, reasoning,
+                verdict) on success, ('error', cid) on Hermes failure.
+                Pure side-effects on DB so calling in parallel is safe."""
+                try:
+                    refresh_customer_facts_from_waha(cid)
+                    facts_ = get_customer_facts(cid) or {}
+                    row_ = get_current_label_row(cid) or {}
+                    mc_ = int(row_.get("message_count") or
+                              facts_.get("message_count") or 0)
+                    cs_out_, _e_ = _psql(
+                        "SELECT EXTRACT(EPOCH FROM (now() - "
+                        "last_customer_message_at))::int FROM "
+                        "conversation_state "
+                        f"WHERE customer_id = {_lit(cid)}")
+                    try:
+                        sh_ = (int((cs_out_ or "").strip().splitlines()[0])
+                               / 3600.0)
+                    except (ValueError, IndexError):
+                        sh_ = None
+                    waha_ = waha_fetch_history(cid, limit=30)
+                    history_ = (waha_ or {}).get("history") or ""
+                    v_ = hermes_analyze_lead(cid, history_, facts_,
+                                             message_count=mc_,
+                                             silent_hours=sh_)
+                    if not v_:
+                        return ("error", cid)
+                    score_ = int(v_.get("importance_score") or 0)
+                    reasoning_ = (v_.get("reasoning") or "").strip()
+                    suggested_ = (v_.get("suggested_action") or "").strip()
+                    verdict_ = v_.get("verdict")
+                    _psql(
+                        "UPDATE customer_facts SET "
+                        f"importance_score = {score_}, "
+                        f"importance_reasoning = {_lit(reasoning_)}, "
+                        f"suggested_action = {_lit(suggested_)}, "
+                        "importance_analyzed_at = now() "
+                        f"WHERE customer_id = {_lit(cid)}")
+                    return ("analyzed", score_, cid,
+                            facts_.get("name") or _name_fallback(cid),
+                            reasoning_, verdict_)
+                except Exception as ex_:
+                    log(f"pipeline_analyze worker err cid={cid!r}: {ex_!r}")
+                    return ("error", cid)
+
+            from concurrent.futures import ThreadPoolExecutor
             analyzed = 0
             errors = 0
             closed = []
             top = []  # (score, cid, name, reasoning)
-            for cid in cids:
-                # Refresh facts FIRST so importance-scoring sees the latest
-                # name/yachts/dates extracted from full WAHA history. Without
-                # this, the hourly cron silently scores stale data.
-                refresh_customer_facts_from_waha(cid)
-                facts = get_customer_facts(cid) or {}
-                row = get_current_label_row(cid) or {}
-                mc = int(row.get("message_count") or
-                         facts.get("message_count") or 0)
-                cs_out, _e = _psql(
-                    "SELECT EXTRACT(EPOCH FROM (now() - "
-                    "last_customer_message_at))::int FROM conversation_state "
-                    f"WHERE customer_id = {_lit(cid)}")
-                try:
-                    silent_h = (int((cs_out or "").strip().splitlines()[0])
-                                / 3600.0)
-                except (ValueError, IndexError):
-                    silent_h = None
-                waha = waha_fetch_history(cid, limit=30)
-                history = (waha or {}).get("history") or ""
-                v = hermes_analyze_lead(cid, history, facts,
-                                        message_count=mc,
-                                        silent_hours=silent_h)
-                if not v:
-                    errors += 1
-                    continue
-                score = int(v.get("importance_score") or 0)
-                reasoning = (v.get("reasoning") or "").strip()
-                suggested = (v.get("suggested_action") or "").strip()
-                verdict = v.get("verdict")
-                _psql(
-                    "UPDATE customer_facts SET "
-                    f"importance_score = {score}, "
-                    f"importance_reasoning = {_lit(reasoning)}, "
-                    f"suggested_action = {_lit(suggested)}, "
-                    "importance_analyzed_at = now() "
-                    f"WHERE customer_id = {_lit(cid)}")
-                # Hourly cron does NOT auto-close — too aggressive. We only
-                # log a close-recommendation for operator review via the
-                # /review card's [🛑 Disregard] button.
-                if verdict == "close":
-                    closed.append((cid, facts.get("name") or
-                                   _name_fallback(cid), reasoning))
-                else:
-                    top.append((score, cid, facts.get("name") or
-                                _name_fallback(cid), reasoning))
-                analyzed += 1
+            with ThreadPoolExecutor(
+                    max_workers=PIPELINE_ANALYZE_WORKERS) as pool:
+                for result in pool.map(_analyze_one, cids):
+                    if result[0] == "error":
+                        errors += 1
+                        continue
+                    _, sc, c, nm_, rea, ver = result
+                    analyzed += 1
+                    if ver == "close":
+                        closed.append((c, nm_, rea))
+                    else:
+                        top.append((sc, c, nm_, rea))
             top.sort(key=lambda t: t[0], reverse=True)
             top3 = top[:3]
             # Silent-by-default policy. The operator's mental model is ONE
