@@ -4673,26 +4673,35 @@ class Handler(BaseHTTPRequestHandler):
                 analyzed += 1
             top.sort(key=lambda t: t[0], reverse=True)
             top3 = top[:3]
-            tx_lines = [
-                f"🧠 *Pipeline analysis* — {analyzed} lead(s) scored"
-                + (f", {errors} Hermes error(s)" if errors else "")
-            ]
-            if top3:
-                tx_lines.append("\n*Top priority:*")
-                for s, _c, nm, r in top3:
-                    tx_lines.append(f"  • *{nm}* ({s}/100) — {r}")
+            # Silent-by-default policy. The operator's mental model is ONE
+            # pipeline command: /review. The cron is the engine, not a
+            # second feature — it just updates importance scores in the
+            # background. We ONLY ping Telegram when Hermes flagged
+            # close-candidates the operator should review (actionable),
+            # otherwise leave telegram_text empty so the cron's
+            # 'If has_summary?' gate short-circuits and stays quiet.
+            telegram_text = ""
             if closed:
-                tx_lines.append(
-                    f"\n_Hermes flagged {len(closed)} lead(s) as "
-                    "not-convertible — visible on /review with [🛑 Disregard] "
-                    "to confirm._")
+                close_lines = [
+                    f"🛑 *Hermes flagged {len(closed)} lead(s) as "
+                    "not-convertible* — tap 🛑 Disregard on the matching "
+                    "/review card to close, or override with `/label "
+                    "<name> WARM`.",
+                    "",
+                ]
+                for cid, nm, r in closed[:5]:
+                    close_lines.append(f"  • *{nm}* — {r}")
+                if len(closed) > 5:
+                    close_lines.append(
+                        f"  _…and {len(closed) - 5} more — see /review_")
+                telegram_text = "\n".join(close_lines)
             self._send(200, {
                 "ok": True, "analyzed": analyzed, "errors": errors,
                 "close_recommended": len(closed),
                 "top_3": [{"customer_id": c, "name": nm,
                            "importance_score": s, "reasoning": r}
                           for s, c, nm, r in top3],
-                "telegram_text": "\n".join(tx_lines),
+                "telegram_text": telegram_text,
             })
         except Exception as e:
             log("pipeline_analyze ERROR:", repr(e))
