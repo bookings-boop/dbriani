@@ -1310,6 +1310,32 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     }
 
 
+def refresh_customer_facts_from_waha(customer_id):
+    """Pull WAHA history for a customer + re-run extraction over the FULL
+    conversation, then upsert. Returns the merged facts dict, or None on
+    error / no-history. Shared by /refresh-facts (operator on-demand),
+    /review (auto-heal for empty critical facts), and /pipeline-analyze
+    (hourly cron — refresh-before-score)."""
+    try:
+        waha = waha_fetch_history(customer_id, limit=30)
+        if (waha or {}).get("err") or not (waha or {}).get("count"):
+            return None
+        extracted = extract_customer_facts(
+            waha["last_message"], waha["history"])
+        cached = get_customer_facts(customer_id)
+        merged = (_merge_facts(cached, extracted) if extracted
+                  else _merge_facts(cached, None))
+        if not (merged.get("name") or "").strip() and waha.get("push_name"):
+            merged["name"] = waha["push_name"]
+        upsert_customer_facts(customer_id,
+                              merged.get("name") or "", merged)
+        return merged
+    except Exception as e:
+        log(f"refresh_customer_facts_from_waha cid={customer_id!r} "
+            f"err={e!r}")
+        return None
+
+
 def _merge_facts(cached, extracted):
     """Merge rule: a non-empty extracted field overwrites; an empty extracted
     field keeps the cached value — a failed/partial extraction never erases a
@@ -1621,6 +1647,12 @@ HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 # every lead gets a fresh score within ~ceil(N/cap) hours during working
 # hours. 20 calls/hour @ ~5s each = ~100s of Hermes time/hour (low spend).
 PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "20"))
+
+# /review inline auto-heal — for customers with missing critical facts
+# (no name AND no yacht), refresh from WAHA history before rendering.
+# Bounded so /review latency stays under 10s even with a stale cohort.
+# 5 parallel refreshes × ~5s per Hermes extract = ~5-7s wall-clock.
+REVIEW_INLINE_REFRESH_CAP = int(os.environ.get("REVIEW_INLINE_REFRESH_CAP", "5"))
 
 # Proactive follow-up engine — see docs/cowork-targeted-integration-plan.md
 # (follow-up engine section). Default ON; operator can flip to disable.
@@ -4265,12 +4297,45 @@ class Handler(BaseHTTPRequestHandler):
 
     def _review(self, payload):
         """POST /review — read v_lead_summary, score, render Telegram report
-        + inline keyboards. Always returns 200; fail-open."""
+        + inline keyboards. Always returns 200; fail-open.
+
+        Auto-heal pass: customers with no name AND no yacht (broken
+        first-message intake — e.g. customer first sent media) get
+        refreshed from WAHA in parallel before render. Capped at
+        REVIEW_INLINE_REFRESH_CAP to bound /review latency."""
         mode = (payload.get("mode") or "ondemand").strip()
         filter_label = (payload.get("filter") or "all").strip().lower()
         try:
             rows = read_lead_summary(
                 filter_label if filter_label in ("hot", "warm", "cold") else None)
+
+            # Auto-heal: identify customers missing critical facts. Active
+            # labels only (paused/confirmed/disregarded already in terminal
+            # states; not worth a Hermes call).
+            ACTIVE_LABELS = ("NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
+                             "WAITING_FOR_PAYMENT")
+            needs_refresh = [
+                r["customer_id"] for r in rows
+                if r.get("label") in ACTIVE_LABELS
+                and not (r.get("name") or "").strip()
+                and not (r.get("yachts") or "").strip()
+            ][:REVIEW_INLINE_REFRESH_CAP]
+            refreshed_count = 0
+            if needs_refresh:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=5) as ex:
+                    results = list(ex.map(
+                        refresh_customer_facts_from_waha, needs_refresh))
+                refreshed_count = sum(1 for r in results if r)
+                if refreshed_count:
+                    # Re-read summary after refresh so the render uses fresh
+                    # name/yachts/dates pulled from WAHA.
+                    rows = read_lead_summary(
+                        filter_label if filter_label in
+                        ("hot", "warm", "cold") else None)
+                    log(f"/review auto-healed {refreshed_count}/"
+                        f"{len(needs_refresh)} customers")
+
             scored = sorted(((score_lead(r, None), r) for r in rows),
                             key=lambda t: t[0], reverse=True)
             totals = {"total": len(rows), "HOT": 0, "WARM": 0, "COLD": 0,
@@ -4680,6 +4745,10 @@ class Handler(BaseHTTPRequestHandler):
             closed = []
             top = []  # (score, cid, name, reasoning)
             for cid in cids:
+                # Refresh facts FIRST so importance-scoring sees the latest
+                # name/yachts/dates extracted from full WAHA history. Without
+                # this, the hourly cron silently scores stale data.
+                refresh_customer_facts_from_waha(cid)
                 facts = get_customer_facts(cid) or {}
                 row = get_current_label_row(cid) or {}
                 mc = int(row.get("message_count") or
