@@ -20,3 +20,24 @@ def _envflag(key, default):
     is itself parsed by the same rule so callers pass strings, not
     bools."""
     return os.environ.get(key, default).strip().lower() in ("true", "1", "yes")
+
+
+def _md_escape(s):
+    """Escape Telegram-Markdown-v1 metachars in dynamic text. Hermes
+    reasoning + customer names can legitimately contain '_' / '*' /
+    '`' / '[' / ']' which open entity spans Telegram then can't close
+    → '400 can't parse entities' (we've hit this with 'apple_pay',
+    'keep_open', URL paths, etc.). Apply this around ANY non-trusted
+    string being interpolated into a parse_mode=Markdown payload.
+
+    Lives in util.py (not a domain module) because it's pure and used
+    across multiple endpoints' response formatting."""
+    if s is None:
+        return ""
+    return (str(s)
+            .replace("\\", "\\\\")
+            .replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("`", "\\`")
+            .replace("[", "\\[")
+            .replace("]", "\\]"))

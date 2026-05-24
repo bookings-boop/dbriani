@@ -34,22 +34,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Refactor week #3: foundational helpers moved out of server.py.
 # These imports re-export the names at server module scope, so any
-# `from server import _psql, _lit, _redis, log, _envflag` still
-# resolves — no caller-side change required.
-from util import log, _envflag  # noqa: F401
+# `from server import _psql, _lit, _redis, log, _envflag, _md_escape`
+# still resolves — no caller-side change required.
+from util import log, _envflag, _md_escape  # noqa: F401
 from db import (  # noqa: F401
     PG_CONTAINER, PG_USER, PG_DB, REDIS_CONTAINER,
     _psql, _redis, _lit,
+)
+from hermes_calls import (  # noqa: F401
+    HERMES, HERMES_TIMEOUT, SESSION_RE, FENCE_RE,
+    run_hermes, extract_json, extract_session,
 )
 
 HOME = os.path.expanduser("~")
 BRIDGE_DIR = os.path.join(HOME, "hermes-bridge")
 SYSTEM_PROMPT_PATH = os.path.join(BRIDGE_DIR, "system-prompt.md")
-HERMES = os.path.join(HOME, ".local", "bin", "hermes")
+# HERMES path + HERMES_TIMEOUT moved to hermes_calls.py
+# (still importable from server for backward-compat — see top of file).
 
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 PORT = int(os.environ.get("BRIDGE_PORT", "8788"))
-HERMES_TIMEOUT = int(os.environ.get("BRIDGE_HERMES_TIMEOUT", "120"))
 
 # PG_CONTAINER / PG_USER / PG_DB / REDIS_CONTAINER moved to db.py
 # (still importable from server for backward-compat — see top of file).
@@ -86,8 +90,7 @@ NOMOD_API_BASE = os.environ.get("NOMOD_API_BASE",
                                 "https://api.nomod.com/v1").rstrip("/")
 PAYMENTS_ENABLED = _envflag("PAYMENTS_ENABLED", "true")
 
-SESSION_RE = re.compile(r"session_id:\s*(\S+)")
-FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
+# SESSION_RE / FENCE_RE moved to hermes_calls.py (re-exported above).
 VALID_SCOPES = ("global", "customer", "scenario", "tier")
 
 # --- customer facts (feature-header) ---------------------------------------
@@ -1289,22 +1292,8 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     }
 
 
-def _md_escape(s):
-    """Escape Telegram-Markdown-v1 metachars in dynamic text. Hermes
-    reasoning + customer names can legitimately contain '_' / '*' /
-    '`' / '[' / ']' which open entity spans Telegram then can't close
-    → '400 can't parse entities' (we've hit this with 'apple_pay',
-    'keep_open', URL paths, etc.). Apply this around ANY non-trusted
-    string being interpolated into a parse_mode=Markdown payload."""
-    if s is None:
-        return ""
-    return (str(s)
-            .replace("\\", "\\\\")
-            .replace("_", "\\_")
-            .replace("*", "\\*")
-            .replace("`", "\\`")
-            .replace("[", "\\[")
-            .replace("]", "\\]"))
+# _md_escape moved to util.py (re-exported at top of server.py for
+# backward compat).
 
 
 def refresh_customer_facts_from_waha(customer_id):
@@ -1516,37 +1505,8 @@ def build_learn_query(p):
     ])
 
 
-def run_hermes(query, timeout=None):
-    if timeout is None:
-        timeout = HERMES_TIMEOUT
-    cmd = [HERMES, "--profile", "default", "chat", "-q", query, "-Q",
-           "--source", "tool", "--yolo", "-t", "memory"]
-    log("hermes call:", " ".join(c for c in cmd if c != query))
-    env = dict(os.environ)
-    env["PATH"] = os.path.dirname(HERMES) + os.pathsep + env.get("PATH", "")
-    t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=timeout, env=env)
-    return proc.returncode, proc.stdout, proc.stderr, int((time.time() - t0) * 1000)
-
-
-def extract_json(stdout):
-    """Pull the outermost {...} JSON object out of Hermes stdout."""
-    text = FENCE_RE.sub("", stdout)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None, text.strip()
-    blob = text[start:end + 1]
-    try:
-        return json.loads(blob), blob
-    except json.JSONDecodeError:
-        return None, blob
-
-
-def extract_session(*streams):
-    m = SESSION_RE.search("\n".join(streams))
-    return m.group(1) if m else None
+# run_hermes / extract_json / extract_session moved to hermes_calls.py
+# (re-exported at the top of server.py for backward compat).
 
 
 # ============================================================================
