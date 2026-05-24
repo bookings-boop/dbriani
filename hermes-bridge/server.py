@@ -3820,6 +3820,29 @@ class Handler(BaseHTTPRequestHandler):
                                         "lock it in. ≤ 2 sentences."),
                 }
                 directive = directive_map.get(label, directive_map["WARM"])
+                # Inject cached customer_facts so Hermes anchors on the
+                # yacht/date/party-size it already knows about, instead of
+                # asking the customer to repeat themselves or going generic.
+                # Operator complaint: nudge drafts felt unanchored / generic
+                # because Hermes only saw chat history but never the
+                # extracted facts directly.
+                facts_bits = []
+                if (row or {}).get("yachts"):
+                    facts_bits.append(f"yacht: {row['yachts']}")
+                if (row or {}).get("dates"):
+                    facts_bits.append(f"date: {row['dates']}")
+                # party_size is on customer_facts but not in label_row; fetch
+                ps_out, _err = _psql(
+                    "SELECT COALESCE(party_size,'') FROM customer_facts "
+                    f"WHERE customer_id = '{cid.replace(chr(39), chr(39)+chr(39))}'"
+                )
+                ps_val = (ps_out or "").strip().splitlines()
+                if ps_val and ps_val[0].strip():
+                    facts_bits.append(f"party: {ps_val[0].strip()}")
+                if facts_bits:
+                    directive += (" KNOWN FACTS to anchor on (do NOT ask the "
+                                  "customer to repeat these): "
+                                  + " · ".join(facts_bits) + ".")
             # Build the prompt — mirrors _draft() but with the directive
             # injected as the incoming_message context.
             inner = {
@@ -3841,6 +3864,9 @@ class Handler(BaseHTTPRequestHandler):
             # extract_json returns (parsed_dict, raw_blob_str) — unpack both.
             parsed, _blob = extract_json(out)
             draft_text = ""
+            notes_for_zayn = ""
+            if isinstance(parsed, dict):
+                notes_for_zayn = (parsed.get("notes_for_zayn") or "").strip()
             if isinstance(parsed, dict):
                 # Hermes shape: {messages: ["hey Mark...", "..."]} —
                 # strings, not dicts. Be tolerant of both.
@@ -3888,6 +3914,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {
                 "ok": True, "customer_id": cid, "label": label,
                 "draft_text": draft_text,
+                "notes_for_zayn": notes_for_zayn,
+                "customer_name": name,
                 "approval_card_header": (
                     f"🔔 PROACTIVE FOLLOW-UP — {label.lower()}"),
                 "session_id": extract_session(out, err),
@@ -3895,7 +3923,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log("draft_followup ERROR:", repr(e))
             self._send(200, {"ok": False, "degraded": True, "error": str(e),
-                             "draft_text": "", "label": "WARM"})
+                             "draft_text": "", "label": "WARM",
+                             "notes_for_zayn": "", "customer_name": ""})
 
     def _resolve_target(self, payload):
         """Return (customer_id, error_text). On success: ('cid…@lid', None).
@@ -4019,10 +4048,19 @@ class Handler(BaseHTTPRequestHandler):
                 facts_bits.append(f"Looking at: *{row['yachts']}*")
             if row.get("dates"):
                 facts_bits.append(f"Date: *{row['dates']}*")
-            if row.get("party_size"):
-                facts_bits.append(f"Party: *{row['party_size']}*")
+            # Pull party_size too — not in label_row but on customer_facts
+            ps_out, _err = _psql(
+                "SELECT COALESCE(party_size,'') FROM customer_facts "
+                f"WHERE customer_id = '{cid_e}'"
+            )
+            party_size = (ps_out or "").strip().splitlines()
+            party_size = party_size[0].strip() if party_size else ""
+            if party_size:
+                facts_bits.append(f"Party: *{party_size}*")
             if facts_bits:
-                lines.append("   " + " · ".join(facts_bits))
+                lines.append("   📋 *Request:* " + " · ".join(facts_bits))
+            else:
+                lines.append("   📋 *Request:* _not captured yet_")
             lines.append(f"   {row.get('message_count', 0)} message(s) in this conversation")
 
             # silence + last reply
@@ -4032,6 +4070,29 @@ class Handler(BaseHTTPRequestHandler):
                     f"({last_cust_dt})")
             if last_op_dt:
                 lines.append(f"   ↳ Last operator reply: {last_op_dt}")
+
+            # Last 5 customer messages from WAHA — gives operator the actual
+            # quotes so they can decide quickly without opening WhatsApp.
+            try:
+                waha = waha_fetch_history(cid, limit=20)
+                hist_lines = (waha.get("history") or "").split("\n")
+                cust_lines = [ln for ln in hist_lines
+                              if ln.startswith("Customer ")]
+                if cust_lines:
+                    lines.append("\n   💬 *Last customer messages:*")
+                    for ln in cust_lines[-5:]:
+                        # Normalize to: "      • (1h ago) "text"
+                        # Source format: 'Customer (1h ago): "body"'
+                        try:
+                            # WAHA format: 'Customer (1h ago): "body"'.
+                            # ts already includes "ago", don't append it.
+                            ts = ln.split("(", 1)[1].split(")", 1)[0]
+                            body = ln.split('"', 1)[1].rstrip('"')
+                            lines.append(f"      • _({ts})_ \"{body[:200]}\"")
+                        except (IndexError, ValueError):
+                            lines.append(f"      • {ln[:240]}")
+            except Exception as _e:
+                log("info WAHA history err:", repr(_e))
 
             # notes
             if notes:
