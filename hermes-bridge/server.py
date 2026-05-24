@@ -1332,8 +1332,28 @@ MONEY_RE = re.compile(
     re.IGNORECASE,
 )
 LETS_DO_IT_RE = re.compile(
-    r"(let'?s\s+(do\s+it|book|lock)|i'?ll\s+take\s+it|"
-    r"sounds\s+(good|great)[,\s]+book|book\s+it)",
+    # Verified commit/finalize phrases. Detects when a customer is past
+    # negotiation and ready to pay. Each alternation is anchored on a
+    # commit verb so it doesn't false-positive on generic chat.
+    r"(let'?s\s+(do\s+it|book|lock|go\s+ahead|proceed)|"
+    r"i'?ll\s+take\s+it|i\s+want\s+to\s+(book|lock|take)|"
+    r"i'?m\s+(in|ready)|ready\s+to\s+(book|pay|lock)|"
+    r"sounds\s+(good|great)[,\s]+book|"
+    r"book\s+it|lock\s+it\s+in|"
+    r"send\s+(me\s+)?the?\s+(payment\s+)?link|"
+    r"how\s+(do|can|should)\s+i\s+pay|"
+    r"go\s+ahead\s+(with|and\s+book)|"
+    r"yes\s+(book|let'?s|please)|"
+    r"ok\s+(let'?s|book|go\s+ahead)|"
+    r"alright\s+(let'?s|book|go\s+ahead))",
+    re.IGNORECASE,
+)
+# Past-date detection — used to demote HOT customers whose booking date
+# has passed. Matches month + day-of-month patterns in the dates field.
+PAST_DATE_MONTH_RE = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?",
     re.IGNORECASE,
 )
 SAME_DAY_RE = re.compile(
@@ -1416,6 +1436,68 @@ def _has_recent_payment_intent(customer_id, hours=24):
         return False
 
 
+_MONTH_NUM = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _parse_booking_date(dates_str):
+    """Best-effort parse of customer_facts.dates into a date object.
+    Returns datetime.date or None. Handles 'Sat May 23', 'Mon Jun 1',
+    'Thu Jan 28 2027', etc. Year defaults to nearest future year (so
+    'May 23' in late May means this year; in December means next year)."""
+    import datetime as _dt
+    if not dates_str:
+        return None
+    m = PAST_DATE_MONTH_RE.search(dates_str)
+    if not m:
+        return None
+    month = _MONTH_NUM.get(m.group(1).lower()[:3])
+    if not month:
+        return None
+    try:
+        day = int(m.group(2))
+    except (TypeError, ValueError):
+        return None
+    year_grp = m.group(3)
+    today = _dt.date.today()
+    if year_grp:
+        try:
+            year = int(year_grp)
+        except ValueError:
+            year = today.year
+    else:
+        # No year given — pick the nearest sensible year. If month+day is
+        # already past in current year by >7 days, assume next year. Else
+        # current year (covers cases like 'May 23' on May 24 where the
+        # date IS in the past).
+        try:
+            cand = _dt.date(today.year, month, day)
+        except ValueError:
+            return None
+        days_past = (today - cand).days
+        if days_past > 60:
+            year = today.year + 1
+        else:
+            year = today.year
+    try:
+        return _dt.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _is_past_booking_date(dates_str):
+    """True if the parsed date is in the past by more than 1 day."""
+    import datetime as _dt
+    d = _parse_booking_date(dates_str)
+    if d is None:
+        return False
+    return (_dt.date.today() - d).days >= 1
+
+
 def compute_label(latest_message, facts):
     """Match signal heuristics against latest message + cached facts.
     Returns (target_label, signal, evidence). NO DB writes. NO dampening
@@ -1425,6 +1507,13 @@ def compute_label(latest_message, facts):
     mc = (facts or {}).get("message_count", 0) or 0
     yachts = ((facts or {}).get("yachts") or "").strip()
     dates = ((facts or {}).get("dates") or "").strip()
+
+    # Past-date demotion takes precedence over all positive signals.
+    # The booking date has come and gone — the customer is either a
+    # missed sale or a future re-engagement candidate; either way it
+    # should NOT sit at the top of /review as HOT.
+    if dates and _is_past_booking_date(dates):
+        return ("COLD", "date_passed", dates[:200])
 
     if customer_id and _has_recent_payment_intent(customer_id):
         return ("HOT", "payment_intent", "trigger in last 24h")
