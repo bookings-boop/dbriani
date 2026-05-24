@@ -545,6 +545,78 @@ def resolve_customer_by_name(name):
     return None, matches
 
 
+def _normalize_phone(s):
+    """Strip everything except digits. Drop leading 00. UAE local
+    formats (0xxxxxxxxx, xxxxxxxxx starting with 5) get normalized to
+    971-prefix. Returns digits-only string or '' if no digits."""
+    digits = "".join(ch for ch in (s or "") if ch.isdigit())
+    if not digits:
+        return ""
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "971" + digits[1:]
+    elif len(digits) == 9 and digits.startswith("5"):
+        digits = "971" + digits
+    return digits
+
+
+def resolve_customer_by_phone(phone):
+    """Find a customer_id by phone number. WhatsApp customer_ids come in
+    two shapes — `<digits>@c.us` (normal) and `<digits>@lid` (privacy-
+    rotated id). The @lid id is a hash, NOT the phone number, so a phone
+    lookup needs to go via WAHA's chat list, where pushName / id mapping
+    is exposed. Strategy:
+      1. Normalize phone to digits-only.
+      2. Try DB: SELECT customer_id FROM customer_facts WHERE
+         customer_id LIKE '<digits>@%' (catches the @c.us shape).
+      3. If no DB hit, ask WAHA for the chat list and find an entry whose
+         numeric pushName / id contains the digits.
+      4. Return (customer_id_or_None, [matches]).
+    """
+    digits = _normalize_phone(phone)
+    if not digits or len(digits) < 7:
+        return None, []
+    # DB path — covers @c.us shape (the customer_id literally contains
+    # the phone digits before the @).
+    safe = digits.replace("'", "''")
+    sql = ("SELECT customer_id || E'\\t' || COALESCE(name,'') "
+           "FROM customer_facts "
+           f"WHERE customer_id LIKE '{safe}@%' "
+           "ORDER BY updated_at DESC LIMIT 3")
+    out, err = _psql(sql)
+    matches = []
+    if not err:
+        for ln in (out or "").splitlines():
+            parts = ln.split("\t")
+            if len(parts) >= 2:
+                matches.append({"customer_id": parts[0].strip(),
+                                "name": parts[1].strip()})
+    if len(matches) == 1:
+        return matches[0]["customer_id"], matches
+    if matches:
+        return None, matches
+    # WAHA fallback — @lid customer_ids are hashes; the only way to map
+    # phone -> @lid is via the chat list, where WAHA exposes either the
+    # phone-formatted pushName or an internal id object with `user`.
+    chats, _err = _waha_get("/api/default/chats?limit=200")
+    if isinstance(chats, list):
+        for c in chats:
+            cid = c.get("_serialized") or (c.get("id") or {}).get(
+                "_serialized") or ""
+            pn = (c.get("name") or "").strip()
+            pn_digits = _normalize_phone(pn)
+            # Match the phone digits against the chat's pushName-derived
+            # digits (which is the form `+971 50 976 7187` for unsaved
+            # contacts) or the @c.us-shaped customer_id.
+            if (pn_digits and pn_digits.endswith(digits)) or \
+               cid.startswith(digits + "@"):
+                matches.append({"customer_id": cid, "name": pn})
+    if len(matches) == 1:
+        return matches[0]["customer_id"], matches
+    return None, matches
+
+
 def behavioral_context(customer_id):
     """Active behavioural rules + notes for a customer. Used by drafts.
     Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
@@ -3276,16 +3348,33 @@ class Handler(BaseHTTPRequestHandler):
     def _refresh_facts(self, payload):
         """POST /refresh-facts — pull a customer's WAHA history and re-run
         Hermes extraction over the FULL conversation (not just one message).
-        Body: {customer_id|name}. Returns the refreshed customer_facts row +
-        the WAHA history summary. Operator-on-demand command."""
+        Body: {customer_id|name|phone}. Returns the refreshed customer_facts
+        row + WAHA history summary. Operator-on-demand command."""
         cid = (payload.get("customer_id") or "").strip()
         name_query = (payload.get("name") or "").strip()
+        phone_query = (payload.get("phone") or "").strip()
+        if not cid and phone_query:
+            resolved, matches = resolve_customer_by_phone(phone_query)
+            if resolved:
+                cid = resolved
+            elif matches:
+                # Ambiguous — show the operator the candidates so they can
+                # /refresh @lid<id> directly.
+                lines = ["⚠️ Multiple customers match that phone:"]
+                for m in matches[:5]:
+                    nm = m.get("name") or "(no name)"
+                    lines.append(f"   `{m['customer_id']}` — {nm}")
+                lines.append("Re-run /refresh with the @lid id.")
+                self._send(200, {"ok": False, "error": "ambiguous phone",
+                                 "telegram_text": "\n".join(lines)})
+                return
         if not cid and name_query:
             resolved, _ = resolve_customer_by_name(name_query)
             if resolved:
                 cid = resolved
         if not cid:
-            self._send(200, {"ok": False, "error": "customer_id or name required",
+            self._send(200, {"ok": False,
+                             "error": "customer_id, name, or phone required",
                              "telegram_text": "⚠️ Customer not found."})
             return
         try:
