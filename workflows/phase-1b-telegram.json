@@ -382,7 +382,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload \u2014\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf');\n\nconst wfData = $getWorkflowStaticData('global');\nif (!Array.isArray(wfData.pendingQueue)) wfData.pendingQueue = [];\nconst queue = wfData.pendingQueue;\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback \u2014 runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\n// BUG-FIX 2026-05-23: write-through cache + reconciliation.\n//\n// Case A \u2014 staticData missing (hourly-sweep follow-ups live in a\n// different workflow's staticData; phase-1b's queue never had them).\n// Hydrate phase-1b's queue so Set Awaiting Edit, Mark Sent, Mark\n// Skipped, and Process Text Reply's awaiting_edit lookup find the\n// draft via queue.find().\n//\n// Case B \u2014 staticData entry is STALE. Build Nudge Card pushes draftObj\n// with telegram_message_id: null; Save Nudge MsgID only updates Redis.\n// So the in-memory staticData entry has null msg_id even though Redis\n// has the real value (set after Telegram returns the post's message_id).\n// Without reconciliation, Prep Refine reads draft.telegram_message_id\n// from staticData -> null -> Edit Telegram (Refine) builds invalid JSON\n// 'message_id: ,' -> n8n NodeOperationError, refine path fails.\n//\n// Fix: always reconcile from Redis when it has fresher fields. Mutations\n// persist via the same staticData reference, so the next execution's\n// Prep Refine sees the reconciled values.\nif (redisDraft) {\n  if (!sdDraft && redisDraft.id) {\n    queue.push(redisDraft);\n  } else if (sdDraft) {\n    if (!sdDraft.telegram_message_id && redisDraft.telegram_message_id) {\n      sdDraft.telegram_message_id = redisDraft.telegram_message_id;\n    }\n    if (!sdDraft.telegram_chat_id && redisDraft.telegram_chat_id) {\n      sdDraft.telegram_chat_id = redisDraft.telegram_chat_id;\n    }\n  }\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data and look up the draft.\n// Phase 5 (pipeline-review) added nudge/snz/inf prefixes for pipeline\n// callbacks. Phase 2-3 of the pendingQueue migration added a Redis\n// fallback when staticData lost the draft (the 'DRAFT EXPIRED' race).\n// NOTE: this node now sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result, NOT the original Telegram payload \u2014\n// the original lives at $('Route Update Type').item.json.\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard');\n\nconst wfData = $getWorkflowStaticData('global');\nif (!Array.isArray(wfData.pendingQueue)) wfData.pendingQueue = [];\nconst queue = wfData.pendingQueue;\nconst sdDraft = pipeline ? null : queue.find(d => d.id === second);\n\n// Redis fallback \u2014 runs upstream as 'Redis Draft Lookup'. If staticData\n// missed the draft (the documented race), Redis usually has it.\n// $json on THIS node is the lookup result.\nlet redisDraft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) redisDraft = $json.draft;\n  } catch (e) { redisDraft = null; }\n}\n\n// BUG-FIX 2026-05-23: write-through cache + reconciliation.\n//\n// Case A \u2014 staticData missing (hourly-sweep follow-ups live in a\n// different workflow's staticData; phase-1b's queue never had them).\n// Hydrate phase-1b's queue so Set Awaiting Edit, Mark Sent, Mark\n// Skipped, and Process Text Reply's awaiting_edit lookup find the\n// draft via queue.find().\n//\n// Case B \u2014 staticData entry is STALE. Build Nudge Card pushes draftObj\n// with telegram_message_id: null; Save Nudge MsgID only updates Redis.\n// So the in-memory staticData entry has null msg_id even though Redis\n// has the real value (set after Telegram returns the post's message_id).\n// Without reconciliation, Prep Refine reads draft.telegram_message_id\n// from staticData -> null -> Edit Telegram (Refine) builds invalid JSON\n// 'message_id: ,' -> n8n NodeOperationError, refine path fails.\n//\n// Fix: always reconcile from Redis when it has fresher fields. Mutations\n// persist via the same staticData reference, so the next execution's\n// Prep Refine sees the reconciled values.\nif (redisDraft) {\n  if (!sdDraft && redisDraft.id) {\n    queue.push(redisDraft);\n  } else if (sdDraft) {\n    if (!sdDraft.telegram_message_id && redisDraft.telegram_message_id) {\n      sdDraft.telegram_message_id = redisDraft.telegram_message_id;\n    }\n    if (!sdDraft.telegram_chat_id && redisDraft.telegram_chat_id) {\n      sdDraft.telegram_chat_id = redisDraft.telegram_chat_id;\n    }\n  }\n}\n\nconst draft = sdDraft || redisDraft || null;\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: sdDraft ? 'staticData' : (redisDraft ? 'redis' : 'none'),\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -736,6 +736,30 @@
               },
               "renameOutput": true,
               "outputKey": "paylink"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "disregard-2026-05-24-act",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "disregard",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "disregard"
             }
           ]
         },
@@ -4378,6 +4402,72 @@
       }
     },
     {
+      "id": "disregard-btn-2026-05-24",
+      "name": "Hermes Disregard Btn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        3000
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/lead-analyze-disregard",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }} }",
+        "options": {
+          "timeout": 90000
+        }
+      }
+    },
+    {
+      "id": "disregard-reply-2026-05-24",
+      "name": "Send Disregard Btn Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6340,
+        3000
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\" }",
+        "options": {}
+      }
+    },
+    {
       "id": "515afd13-7a00-4b91-8a00-411cff7f02cd",
       "name": "Split Lead Cards",
       "type": "n8n-nodes-base.splitOut",
@@ -5923,6 +6013,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Hermes Disregard Btn",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -7168,6 +7265,17 @@
         [
           {
             "node": "Send Info Btn Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Disregard Btn": {
+      "main": [
+        [
+          {
+            "node": "Send Disregard Btn Reply",
             "type": "main",
             "index": 0
           }

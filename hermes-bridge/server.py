@@ -1187,6 +1187,129 @@ def extract_customer_facts(incoming_message, history):
             for k in ("name", "dates", "yachts", "party_size")}
 
 
+# --- pattern-recognition analyzer (used by /lead-analyze-disregard +
+#     /pipeline-analyze hourly importance ranker) ----------------------------
+ANALYZE_LEAD_TIMEOUT = int(os.environ.get("BRIDGE_ANALYZE_TIMEOUT", "20"))
+
+# UAE working hours (Asia/Dubai = UTC+4, no DST). Used by /pipeline-analyze
+# cron to skip overnight runs — keeps the Hermes spend in business hours.
+UAE_WORK_HOURS_START = int(os.environ.get("UAE_WORK_HOURS_START", "9"))
+UAE_WORK_HOURS_END = int(os.environ.get("UAE_WORK_HOURS_END", "21"))
+
+
+def _is_uae_working_hours(now_epoch=None):
+    """True if current wall-clock falls inside [START,END) Asia/Dubai. UAE has
+    no daylight savings so a flat +4 offset works year-round."""
+    if now_epoch is None:
+        now_epoch = time.time()
+    # gmtime returns UTC; +4h offset for Dubai
+    utc_hour = time.gmtime(now_epoch).tm_hour
+    dubai_hour = (utc_hour + 4) % 24
+    return UAE_WORK_HOURS_START <= dubai_hour < UAE_WORK_HOURS_END
+
+
+def hermes_analyze_lead(customer_id, history, facts, message_count=0,
+                        silent_hours=None):
+    """Pattern-recognize a chat. Returns:
+      {verdict, importance_score, reasoning, suggested_action, elapsed_ms}
+    verdict ∈ {'close','keep_open'} — is the lead still convertible?
+    importance_score ∈ 0..100 — how worth pursuing right now (0 if close).
+    reasoning: ≤25w explanation of the verdict + score.
+    suggested_action: ≤25w next play if keep_open (empty if close).
+
+    Returns None on Hermes timeout/error so callers can fall back to the
+    deterministic score_lead path (never auto-closes on bad output)."""
+    nm = (facts or {}).get("name") or _name_fallback(customer_id)
+    yachts = (facts or {}).get("yachts") or "(none discussed)"
+    dates = (facts or {}).get("dates") or "(no date)"
+    party = (facts or {}).get("party_size") or "(unknown)"
+    sh = (f"{silent_hours:.1f}h" if isinstance(silent_hours, (int, float))
+          else "(unknown)")
+    q = (
+        "TASK: You are analyzing a Dubriani yacht-charter sales conversation "
+        "to help the sales operator. Decide TWO things:\n"
+        "  (a) Is there still a way to CONVERT this customer? "
+        "(verdict: 'keep_open' if yes, 'close' if not)\n"
+        "  (b) How IMPORTANT is this lead RIGHT NOW for the operator's "
+        "attention? (importance_score: integer 0-100; "
+        "100 = drop-everything-and-reply, 0 = no chance, ignore)\n\n"
+        "Patterns:\n"
+        "  - Explicit 'not interested' / 'found another operator' / "
+        "'cancelled trip' / 'no longer needed' → CLOSE\n"
+        "  - Repeated price rejection with no flexibility shown over 3+ "
+        "messages → CLOSE\n"
+        "  - Tire-kicker shopping multiple operators, never commits, asks "
+        "for 5+ different yachts → CLOSE\n"
+        "  - Ghosted 14+ days after a clear rejection signal → CLOSE\n"
+        "  - B2B who asked for license terms but never sent docs after 2+ "
+        "follow-ups → CLOSE\n"
+        "  - Strong booking signals (dates fixed, group set, asked for "
+        "payment link, ready to pay) → KEEP_OPEN score 80-100\n"
+        "  - Negotiating actively, engaged, just price-sensitive → "
+        "KEEP_OPEN score 60-75\n"
+        "  - Quoted but ghosted briefly, no rejection → KEEP_OPEN score "
+        "45-60\n"
+        "  - First-time inquiry, hasn't fully replied yet → KEEP_OPEN "
+        "score 50-65\n"
+        "  - Cold lead (no engagement for weeks but no explicit reject) → "
+        "KEEP_OPEN score 20-35\n\n"
+        "Output ONLY a JSON object with these exact keys:\n"
+        '{"verdict":"keep_open","importance_score":0,'
+        '"reasoning":"","suggested_action":""}\n'
+        "  - verdict: 'keep_open' or 'close' (string)\n"
+        "  - importance_score: integer 0-100. MUST be 0 if verdict='close'.\n"
+        "  - reasoning: ≤25 words, ONE line explaining the verdict AND the "
+        "score together (e.g. 'price-rejected 2x with no counter — not "
+        "convertible')\n"
+        "  - suggested_action: ≤25 words, ONE line on the operator's next "
+        "play if verdict='keep_open'. Empty string if verdict='close'.\n\n"
+        f"--- CUSTOMER FACTS ---\n"
+        f"Name: {nm}\n"
+        f"Yachts discussed: {yachts}\n"
+        f"Date(s): {dates}\n"
+        f"Party size: {party}\n"
+        f"Message count: {message_count}\n"
+        f"Silent for: {sh}\n\n"
+        f"--- CONVERSATION ---\n{history or '(no history available)'}"
+    )
+    try:
+        rc, out, err, elapsed = run_hermes(q, timeout=ANALYZE_LEAD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log(f"hermes_analyze_lead: timeout {ANALYZE_LEAD_TIMEOUT}s "
+            f"cid={customer_id}")
+        return None
+    except Exception as e:
+        log("hermes_analyze_lead: error", repr(e))
+        return None
+    if rc != 0:
+        log(f"hermes_analyze_lead: rc={rc} cid={customer_id} "
+            f"err={(err or '')[:200]!r}")
+        return None
+    parsed, _ = extract_json(out)
+    if not isinstance(parsed, dict):
+        log(f"hermes_analyze_lead: no JSON cid={customer_id}")
+        return None
+    verdict = str(parsed.get("verdict") or "").strip().lower()
+    if verdict not in ("close", "keep_open"):
+        # Defensive: bad JSON should never trigger an auto-close.
+        verdict = "keep_open"
+    try:
+        score = int(parsed.get("importance_score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+    score = max(0, min(100, score))
+    if verdict == "close":
+        score = 0  # invariant
+    return {
+        "verdict": verdict,
+        "importance_score": score,
+        "reasoning": str(parsed.get("reasoning") or "").strip()[:300],
+        "suggested_action": str(
+            parsed.get("suggested_action") or "").strip()[:300],
+        "elapsed_ms": elapsed,
+    }
+
+
 def _merge_facts(cached, extracted):
     """Merge rule: a non-empty extracted field overwrites; an empty extracted
     field keeps the cached value — a failed/partial extraction never erases a
@@ -1412,6 +1535,10 @@ LABELS = frozenset({
     "NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD",
     "WAITING_FOR_PAYMENT", "CONFIRMED",
     "PAUSED_SPAM", "PAUSED_B2B", "PAUSED_PERSONAL",
+    # DISREGARDED — operator (or Hermes via [🛑 Disregard]) closed the lead
+    # as unconvertible. Hidden from /review entirely; not in pause_tail.
+    # Reopened only via explicit `/label <name> WARM` (or other).
+    "DISREGARDED",
 })
 
 # Signal regexes (compiled module-level).
@@ -1489,6 +1616,12 @@ SAMEDAY_INTERRUPT_TTL = int(os.environ.get("SAMEDAY_INTERRUPT_TTL", "14400"))
 HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200"))
 HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 
+# Hourly pipeline analyzer — Hermes-driven importance ranking over active
+# leads. Cap is per-run; the analyzer rotates via oldest-analyzed-first so
+# every lead gets a fresh score within ~ceil(N/cap) hours during working
+# hours. 20 calls/hour @ ~5s each = ~100s of Hermes time/hour (low spend).
+PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "20"))
+
 # Proactive follow-up engine — see docs/cowork-targeted-integration-plan.md
 # (follow-up engine section). Default ON; operator can flip to disable.
 FOLLOWUP_ENGINE_ENABLED = _envflag("FOLLOWUP_ENGINE_ENABLED", "true")
@@ -1509,6 +1642,11 @@ _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 _LABEL_RANK = {
     "NEW": 0, "COLD": 1, "WARM": 2, "HOT": 3,
     "NEEDS_ATTENTION": 4, "WAITING_FOR_PAYMENT": 5, "CONFIRMED": 6,
+    # DISREGARDED ranks ABOVE CONFIRMED so the auto-classifier's sticky-
+    # upward guard treats it as terminal — a stray HOT/WARM signal won't
+    # bounce a disregarded lead back into /review. Operator must explicitly
+    # /label them to reopen.
+    "DISREGARDED": 7,
 }
 
 # Signals strong enough to demote regardless of confidence dampening.
@@ -1901,6 +2039,11 @@ def score_lead(row, now_dt):
     Negative scores → PAUSED/snoozed tail."""
     score = 0
     label = row.get("label") or "NEW"
+    # DISREGARDED is terminal-closed — score deeply negative so they fall
+    # into the pause_tail (and render_review filters them out entirely
+    # before pause_tail builds, so they're never displayed at all).
+    if label == "DISREGARDED":
+        return -100000
     # CONFIRMED is a terminal/success state — short-circuit before any urgency
     # or damping math can take the score negative and dump them into the
     # paused tail. They render in their own ✅ section.
@@ -1933,6 +2076,14 @@ def score_lead(row, now_dt):
         score -= 10000
     if row.get("label_locked_active"):
         score -= 500
+
+    # Hermes importance — additive bonus within the label tier. Cap at +90
+    # so a HOT (base 800) with importance=100 reaches 890 — still well below
+    # NEEDS_ATTENTION (1000), preserving label-based sectioning while letting
+    # Hermes re-sort within each section by recency-of-value.
+    imp = row.get("importance_score")
+    if isinstance(imp, int):
+        score += min(90, max(0, imp))
 
     # urgency boosts
     cmsg = row.get("last_customer_message_at_seconds")  # silent secs
@@ -2015,7 +2166,12 @@ def read_lead_summary(filter_label=None):
         "COALESCE(to_char(last_booking_intent_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE(to_char(last_rejection_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE(last_rejection_kind,''), "
-        "COALESCE(recent_notes,'') "
+        "COALESCE(recent_notes,''), "
+        # Hermes importance fields (NULL until first /pipeline-analyze run).
+        "COALESCE(importance_score::text,''), "
+        "COALESCE(importance_reasoning,''), "
+        "COALESCE(suggested_action,''), "
+        "COALESCE(to_char(importance_analyzed_at,'YYYY-MM-DD HH24:MI:SSOF'),'') "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -2031,6 +2187,10 @@ def read_lead_summary(filter_label=None):
             mc = int((parts[6].strip() or "0"))
         except ValueError:
             mc = 0
+        try:
+            imp = int(parts[20].strip()) if len(parts) > 20 and parts[20].strip() else None
+        except ValueError:
+            imp = None
         row = {
             "customer_id": parts[0].strip(),
             "name": parts[1].strip(),
@@ -2053,6 +2213,11 @@ def read_lead_summary(filter_label=None):
             "last_rejection_at_seconds": _seconds_since(parts[17]),
             "last_rejection_kind": parts[18].strip(),
             "recent_notes": parts[19].strip(),
+            "importance_score": imp,
+            "importance_reasoning": parts[21].strip() if len(parts) > 21 else "",
+            "suggested_action": parts[22].strip() if len(parts) > 22 else "",
+            "importance_analyzed_at_seconds":
+                _seconds_since(parts[23]) if len(parts) > 23 else None,
         }
         rows.append(row)
     return rows
@@ -2116,6 +2281,11 @@ def render_review(scored, totals, mode="ondemand"):
     seen_ids = []
     for score, row in scored:
         label = row.get("label") or "NEW"
+        # DISREGARDED is terminal-closed — hide completely. Not in any
+        # section, not in pause_tail, not in totals. Operator can /label
+        # to reopen if they change their mind.
+        if label == "DISREGARDED":
+            continue
         # PAUSED_* always tail. CONFIRMED is success — keep on the report,
         # but in its own section without nudge buttons (handled below).
         if label.startswith("PAUSED_") or score < 0:
@@ -2160,6 +2330,17 @@ def render_review(scored, totals, mode="ondemand"):
         lines.append(f"*{sect['header']}* ({len(items)})")
         for i, (score, row) in enumerate(shown, 1):
             why = _why_line(row, label_key)
+            # Hermes importance — append score + suggestion when present.
+            imp = row.get("importance_score")
+            imp_bits = ""
+            if isinstance(imp, int):
+                imp_bits = f"\n🧠 Hermes: *{imp}/100*"
+                sug = (row.get("suggested_action") or "").strip()
+                if sug:
+                    imp_bits += f" — _{sug}_"
+                rea = (row.get("importance_reasoning") or "").strip()
+                if rea and not sug:
+                    imp_bits += f" — _{rea}_"
             lead_body = (
                 f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
@@ -2167,23 +2348,37 @@ def render_review(scored, totals, mode="ondemand"):
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
                 f"  ·  {why}"
+                f"{imp_bits}"
             )
             lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))
             sid = row["customer_id"]
             # CONFIRMED keeps Draft nudge (post-confirm messaging: boarding
             # details, thank-yous, upsells, re-engagement) but drops Snooze
-            # (no auto-nudges to suppress on a confirmed booking).
+            # (no auto-nudges to suppress on a confirmed booking) and
+            # Disregard (already-won deals don't need closing).
             if label_key == "CONFIRMED":
                 kb = [[
                     {"text": "💬 Draft message", "callback_data": f"nudge:{sid}"},
                     {"text": "ℹ️ Info",          "callback_data": f"inf:{sid}"},
                 ]]
             else:
-                kb = [[
-                    {"text": "💬 Draft nudge", "callback_data": f"nudge:{sid}"},
-                    {"text": "💤 Snooze 4h",   "callback_data": f"snz:{sid}:4h"},
-                    {"text": "ℹ️ Info",        "callback_data": f"inf:{sid}"},
-                ]]
+                # 2 rows of 2 — keeps the keyboard scannable. Disregard is
+                # the destructive action, parked alone on row 2 next to Info
+                # so the operator doesn't fat-finger it next to Draft nudge.
+                kb = [
+                    [
+                        {"text": "💬 Draft nudge",
+                         "callback_data": f"nudge:{sid}"},
+                        {"text": "💤 Snooze 4h",
+                         "callback_data": f"snz:{sid}:4h"},
+                    ],
+                    [
+                        {"text": "ℹ️ Info",
+                         "callback_data": f"inf:{sid}"},
+                        {"text": "🛑 Disregard",
+                         "callback_data": f"disregard:{sid}"},
+                    ],
+                ]
             keyboards.append(kb[0])
             # Per-lead card: section emoji prefix + lead body, plus its own kb.
             per_lead_messages.append({
@@ -2419,7 +2614,9 @@ class Handler(BaseHTTPRequestHandler):
                              "/refresh-facts",
                              "/draft-freshness",
                              "/autonomous-log",
-                             "/poll-payments"):
+                             "/poll-payments",
+                             "/lead-analyze-disregard",
+                             "/pipeline-analyze"):
             self._send(404, {"error": "not found"})
             return
         if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
@@ -2483,6 +2680,10 @@ class Handler(BaseHTTPRequestHandler):
             self._autonomous_log(payload)
         elif self.path == "/poll-payments":
             self._poll_payments(payload)
+        elif self.path == "/lead-analyze-disregard":
+            self._lead_analyze_disregard(payload)
+        elif self.path == "/pipeline-analyze":
+            self._pipeline_analyze(payload)
         else:
             self._draft(payload)
 
@@ -4281,6 +4482,224 @@ class Handler(BaseHTTPRequestHandler):
                              "draft_text": "", "label": "WARM",
                              "notes_for_zayn": "", "customer_name": ""})
 
+    def _lead_analyze_disregard(self, payload):
+        """POST /lead-analyze-disregard — operator pressed [🛑 Disregard] on a
+        /review card. Pulls full WAHA history, calls hermes_analyze_lead,
+        and:
+          - if verdict='close': flips label to DISREGARDED, logs to
+            autonomous_sends, returns operator-facing reasoning ('closed').
+          - if verdict='keep_open': leaves label alone, returns reasoning +
+            suggested_action ('kept open').
+        Hermes failure → returns degraded, never auto-closes."""
+        cid, err = self._resolve_target(payload)
+        if not cid:
+            self._send(200, {"ok": False, "telegram_text": err or
+                             "⚠️ customer_id required"})
+            return
+        try:
+            row = get_current_label_row(cid) or {}
+            cur_label = row.get("label") or "NEW"
+            facts = get_customer_facts(cid) or {}
+            mc = int(row.get("message_count") or facts.get("message_count")
+                     or 0)
+            silent_h = None
+            cs_out, _e = _psql(
+                "SELECT EXTRACT(EPOCH FROM (now() - "
+                "last_customer_message_at))::int FROM conversation_state "
+                f"WHERE customer_id = {_lit(cid)}")
+            try:
+                silent_h = (int((cs_out or "").strip().splitlines()[0])
+                            / 3600.0)
+            except (ValueError, IndexError):
+                silent_h = None
+
+            waha = waha_fetch_history(cid, limit=30)
+            history = (waha or {}).get("history") or ""
+
+            verdict_obj = hermes_analyze_lead(
+                cid, history, facts, message_count=mc,
+                silent_hours=silent_h)
+            if not verdict_obj:
+                self._send(200, {
+                    "ok": False, "degraded": True,
+                    "telegram_text": (
+                        "⚠️ Disregard analysis failed — Hermes timeout/error. "
+                        "No label change. Try again or close manually via "
+                        "`/label <name> DISREGARDED`.")})
+                return
+
+            verdict = verdict_obj["verdict"]
+            reasoning = (verdict_obj.get("reasoning") or "").strip()
+            suggested = (verdict_obj.get("suggested_action") or "").strip()
+            score = verdict_obj.get("importance_score", 0)
+            nm = facts.get("name") or _name_fallback(cid)
+
+            # Persist analysis snapshot regardless of verdict (drives future
+            # /info display and avoids re-spending Hermes on same chat).
+            upd = (
+                "UPDATE customer_facts SET "
+                f"disregard_verdict = {_lit(verdict)}, "
+                f"disregard_reasoning = {_lit(reasoning)}, "
+                "disregard_analyzed_at = now(), "
+                f"importance_score = {int(score)}, "
+                f"importance_reasoning = {_lit(reasoning)}, "
+                f"suggested_action = {_lit(suggested)}, "
+                "importance_analyzed_at = now() "
+                f"WHERE customer_id = {_lit(cid)}"
+            )
+            _psql(upd)
+
+            if verdict == "close":
+                # Auto-close. apply_label_transition writes the audit row.
+                apply_label_transition(
+                    cid, cur_label, "DISREGARDED",
+                    signal="hermes_disregard",
+                    evidence=(reasoning or "")[:240],
+                    message_count=mc,
+                    created_by="operator:disregard_button")
+                tx = (
+                    f"🛑 *DISREGARDED* — {nm}\n"
+                    f"_Hermes analysis:_ {reasoning or '(no reasoning)'}"
+                    f"\n\n→ label flipped {cur_label} → DISREGARDED. "
+                    "Hidden from /review.\n"
+                    f"_Undo with_ `/label {nm} WARM`")
+                self._send(200, {
+                    "ok": True, "verdict": "close",
+                    "label_before": cur_label, "label_after": "DISREGARDED",
+                    "reasoning": reasoning, "telegram_text": tx})
+            else:
+                tx = (
+                    f"🟢 *KEEP OPEN* — {nm}\n"
+                    f"_Hermes analysis:_ {reasoning or '(no reasoning)'}\n"
+                    f"_Importance score:_ {int(score)}/100"
+                    + (f"\n_Suggested play:_ {suggested}" if suggested else "")
+                    + f"\n\n→ label unchanged ({cur_label}). "
+                    "Use [💬 Draft nudge] to engage."
+                )
+                self._send(200, {
+                    "ok": True, "verdict": "keep_open",
+                    "label_before": cur_label, "label_after": cur_label,
+                    "importance_score": int(score),
+                    "reasoning": reasoning,
+                    "suggested_action": suggested,
+                    "telegram_text": tx})
+        except Exception as e:
+            log("lead_analyze_disregard ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True,
+                             "telegram_text":
+                             f"⚠️ Disregard endpoint error: {e}"})
+
+    def _pipeline_analyze(self, payload):
+        """POST /pipeline-analyze — hourly cron entry point. Walks active
+        leads (NEW/WARM/HOT/WAITING_FOR_PAYMENT/NEEDS_ATTENTION/COLD), runs
+        hermes_analyze_lead on each, writes importance_score+reasoning+
+        suggested_action to customer_facts. Bounded by PIPELINE_ANALYZE_CAP.
+
+        Skipped outside UAE working hours unless payload.force=true.
+        Returns summary: {analyzed, top_3, skipped_reason?}"""
+        force = bool(payload.get("force"))
+        cap = int(payload.get("cap") or PIPELINE_ANALYZE_CAP)
+        if not force and not _is_uae_working_hours():
+            self._send(200, {
+                "ok": True, "skipped": True,
+                "skipped_reason": "outside_uae_working_hours",
+                "telegram_text": ""})
+            return
+        try:
+            # Pull active leads (skip terminal/paused). Order by oldest
+            # importance_analyzed_at first so the cap rotates fairly across
+            # all leads instead of always re-scoring the same 20 each hour.
+            sql = (
+                "SELECT customer_id FROM customer_facts WHERE label IN ("
+                "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
+                "'WAITING_FOR_PAYMENT') "
+                "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
+                f"updated_at DESC LIMIT {int(cap)}"
+            )
+            out, err = _psql(sql)
+            if err:
+                self._send(200, {"ok": False, "error": str(err),
+                                 "telegram_text":
+                                 f"⚠️ Pipeline analyze DB error: {err}"})
+                return
+            cids = [ln.strip() for ln in (out or "").splitlines()
+                    if ln.strip()]
+            analyzed = 0
+            errors = 0
+            closed = []
+            top = []  # (score, cid, name, reasoning)
+            for cid in cids:
+                facts = get_customer_facts(cid) or {}
+                row = get_current_label_row(cid) or {}
+                mc = int(row.get("message_count") or
+                         facts.get("message_count") or 0)
+                cs_out, _e = _psql(
+                    "SELECT EXTRACT(EPOCH FROM (now() - "
+                    "last_customer_message_at))::int FROM conversation_state "
+                    f"WHERE customer_id = {_lit(cid)}")
+                try:
+                    silent_h = (int((cs_out or "").strip().splitlines()[0])
+                                / 3600.0)
+                except (ValueError, IndexError):
+                    silent_h = None
+                waha = waha_fetch_history(cid, limit=30)
+                history = (waha or {}).get("history") or ""
+                v = hermes_analyze_lead(cid, history, facts,
+                                        message_count=mc,
+                                        silent_hours=silent_h)
+                if not v:
+                    errors += 1
+                    continue
+                score = int(v.get("importance_score") or 0)
+                reasoning = (v.get("reasoning") or "").strip()
+                suggested = (v.get("suggested_action") or "").strip()
+                verdict = v.get("verdict")
+                _psql(
+                    "UPDATE customer_facts SET "
+                    f"importance_score = {score}, "
+                    f"importance_reasoning = {_lit(reasoning)}, "
+                    f"suggested_action = {_lit(suggested)}, "
+                    "importance_analyzed_at = now() "
+                    f"WHERE customer_id = {_lit(cid)}")
+                # Hourly cron does NOT auto-close — too aggressive. We only
+                # log a close-recommendation for operator review via the
+                # /review card's [🛑 Disregard] button.
+                if verdict == "close":
+                    closed.append((cid, facts.get("name") or
+                                   _name_fallback(cid), reasoning))
+                else:
+                    top.append((score, cid, facts.get("name") or
+                                _name_fallback(cid), reasoning))
+                analyzed += 1
+            top.sort(key=lambda t: t[0], reverse=True)
+            top3 = top[:3]
+            tx_lines = [
+                f"🧠 *Pipeline analysis* — {analyzed} lead(s) scored"
+                + (f", {errors} Hermes error(s)" if errors else "")
+            ]
+            if top3:
+                tx_lines.append("\n*Top priority:*")
+                for s, _c, nm, r in top3:
+                    tx_lines.append(f"  • *{nm}* ({s}/100) — {r}")
+            if closed:
+                tx_lines.append(
+                    f"\n_Hermes flagged {len(closed)} lead(s) as "
+                    "not-convertible — visible on /review with [🛑 Disregard] "
+                    "to confirm._")
+            self._send(200, {
+                "ok": True, "analyzed": analyzed, "errors": errors,
+                "close_recommended": len(closed),
+                "top_3": [{"customer_id": c, "name": nm,
+                           "importance_score": s, "reasoning": r}
+                          for s, c, nm, r in top3],
+                "telegram_text": "\n".join(tx_lines),
+            })
+        except Exception as e:
+            log("pipeline_analyze ERROR:", repr(e))
+            self._send(200, {"ok": False, "degraded": True,
+                             "telegram_text":
+                             f"⚠️ Pipeline analyze error: {e}"})
+
     def _resolve_target(self, payload):
         """Return (customer_id, error_text). On success: ('cid…@lid', None).
         On any miss: ('', '⚠️ ...'). Handles either:
@@ -4377,6 +4796,8 @@ class Handler(BaseHTTPRequestHandler):
                 "HOT": "🔥", "NEEDS_ATTENTION": "⚠️", "WARM": "♨️",
                 "NEW": "🌱", "COLD": "❄️", "PAUSED_SPAM": "🚫",
                 "PAUSED_B2B": "💼", "PAUSED_PERSONAL": "👤",
+                "WAITING_FOR_PAYMENT": "⏳", "CONFIRMED": "✅",
+                "DISREGARDED": "🛑",
             }.get(label, "•")
             # Use the last-4-digits fallback ("…4557") for unnamed customers
             # instead of "Unknown" — the operator can match the digits to the
@@ -4482,7 +4903,7 @@ class Handler(BaseHTTPRequestHandler):
                              "error": f"label must be one of {sorted(LABELS)}",
                              "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
                              "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
-                             "WAITING_FOR_PAYMENT, CONFIRMED, "
+                             "WAITING_FOR_PAYMENT, CONFIRMED, DISREGARDED, "
                              "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
             return
         cid, err = self._resolve_target(payload)
