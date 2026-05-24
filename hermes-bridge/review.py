@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""review.py — pipeline review render layer + customer-facts pure
+helpers + UAE working-hours gate.
+
+PURE pieces — no DB, no Hermes calls. The DB readers
+(read_lead_summary, mark_review_seen) and Hermes wrappers
+(refresh_customer_facts_from_waha, hermes_analyze_lead) stay in
+server.py for now since their call graphs are wider; they'll move
+when routes.py is extracted.
+
+This module's public surface (covered by test_score_lead.py,
+test_why_line.py, test_facts_extract_gate.py, test_merge_facts.py):
+
+  score_lead(row, now_dt)               priority ranker
+  render_review(scored, totals, mode)   full /review render
+  _why_line(row, label_key)             per-card guidance string
+  _fmt_dur(secs)                        human-readable duration
+  _name_fallback(customer_id)           …1234 display fallback
+  _facts_extract_gate(incoming_message) extraction-cost guard
+  _merge_facts(cached, extracted)       cache-vs-extracted merge
+  build_customer_header(facts)          context-header string
+  _is_uae_working_hours(now_epoch)      cron gate
+"""
+import os
+import re
+import time
+
+
+# --- yacht/facts-extraction keywords -------------------------------
+# yacht keywords worth gating extraction on — curated from
+# system-prompt.md §7.
+YACHT_NAMES = (
+    "satoshi", "enigma", "aurora", "azimut", "sunseeker", "ferretti",
+    "pershing", "benetti", "beneteau", "galeon", "riva", "princess",
+    "lamborghini", "sanlorenzo", "maiora", "baglietto", "elan", "elise",
+    "diana", "zenith", "bliss", "von dutch", "cabo", "belle", "monaco",
+    "cante", "carina", "haigan", "zirve", "luna", "notorious", "asya",
+    "zeta", "dolce vita", "tatti", "sapphire", "odysea", "royalty",
+    "mila", "athena", "skyfall", "finesse", "sofiya", "eclipse",
+    "royal mirage", "yacht",
+)
+
+_FACTS_DATE_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|"
+    r"march|april|june|july|august|september|october|november|december|"
+    r"mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|today|tomorrow|tonight|weekend|week|month)\b",
+    re.IGNORECASE)
+_FACTS_NAME_RE = re.compile(
+    r"\b(i'?m |i am |my name|this is |call me |name'?s )", re.IGNORECASE)
+_FACTS_BOOK_RE = re.compile(
+    r"\b(book|booking|reserve|charter|deposit|confirm|pay|payment|guests?|"
+    r"pax|people|persons?|birthday|proposal|anniversary|wedding|corporate)\b",
+    re.IGNORECASE)
+
+
+# --- /review render caps (Telegram 4096-char limit safe) ----------
+REVIEW_CAP_HOT = int(os.environ.get("REVIEW_CAP_HOT", "10"))
+REVIEW_CAP_NEEDS_ATTENTION = int(os.environ.get(
+    "REVIEW_CAP_NEEDS_ATTENTION", "10"))
+REVIEW_CAP_WARM = int(os.environ.get("REVIEW_CAP_WARM", "8"))
+REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
+
+# /review inline auto-heal — for customers with missing critical
+# facts (no name AND no yacht), refresh from WAHA history before
+# rendering. Bounded so /review latency stays under 10s even with a
+# stale cohort. 5 parallel refreshes × ~5s per Hermes extract =
+# ~5-7s wall-clock.
+REVIEW_INLINE_REFRESH_CAP = int(os.environ.get(
+    "REVIEW_INLINE_REFRESH_CAP", "5"))
+
+# UAE working hours (Asia/Dubai = UTC+4, no DST). Used by
+# /pipeline-analyze cron to skip overnight runs — keeps the Hermes
+# spend in business hours.
+UAE_WORK_HOURS_START = int(os.environ.get("UAE_WORK_HOURS_START", "9"))
+UAE_WORK_HOURS_END = int(os.environ.get("UAE_WORK_HOURS_END", "21"))
+
+
+def _is_uae_working_hours(now_epoch=None):
+    """True if current wall-clock falls inside [START,END) Asia/Dubai.
+    UAE has no daylight savings so a flat +4 offset works year-round."""
+    if now_epoch is None:
+        now_epoch = time.time()
+    # gmtime returns UTC; +4h offset for Dubai
+    utc_hour = time.gmtime(now_epoch).tm_hour
+    dubai_hour = (utc_hour + 4) % 24
+    return UAE_WORK_HOURS_START <= dubai_hour < UAE_WORK_HOURS_END
+
+
+# --- customer-facts pure helpers ----------------------------------
+
+def _facts_extract_gate(incoming_message):
+    """Heuristic: should this (non-first) message trigger a fresh extraction?
+    True if it plausibly carries a new fact — a digit, a known yacht keyword,
+    a date/time word, a self-introduction, or a booking keyword."""
+    m = (incoming_message or "").lower()
+    if not m:
+        return False
+    if any(ch.isdigit() for ch in m):
+        return True
+    if any(y in m for y in YACHT_NAMES):
+        return True
+    return bool(_FACTS_DATE_RE.search(m) or _FACTS_NAME_RE.search(m)
+                or _FACTS_BOOK_RE.search(m))
+
+
+def build_customer_header(facts):
+    """facts: {name,dates,yachts,party_size,message_count} -> header string.
+    Each optional line shows only when its fact is non-empty; the name line,
+    the message-count line and the divider are always present."""
+    f = facts or {}
+    name = str(f.get("name") or "").strip()
+    lines = ["\U0001F464 " + (name or "New contact")]
+    if str(f.get("dates") or "").strip():
+        lines.append("\U0001F4C5 Interested in: " + str(f["dates"]).strip())
+    if str(f.get("yachts") or "").strip():
+        lines.append("\U0001F6E5️ Looking at: " + str(f["yachts"]).strip())
+    if str(f.get("party_size") or "").strip():
+        lines.append("\U0001F465 Party size: " + str(f["party_size"]).strip())
+    try:
+        mc = int(f.get("message_count") or 0)
+    except (TypeError, ValueError):
+        mc = 0
+    lines.append("\U0001F522 Message #" + str(mc) + " in conversation")
+    lines.append("─" * 30)
+    return "\n".join(lines)
+
+def _merge_facts(cached, extracted):
+    """Merge rule: a non-empty extracted field overwrites; an empty extracted
+    field keeps the cached value — a failed/partial extraction never erases a
+    known fact."""
+    cached = cached or {}
+    out = {}
+    for k in ("name", "dates", "yachts", "party_size"):
+        ev = str((extracted or {}).get(k, "") or "").strip()
+        out[k] = ev or str(cached.get(k) or "")
+    return out
+
+
+# --- /review ranking + render -------------------------------------
+
+def score_lead(row, now_dt):
+    """Compute priority score per docs/pipeline-review-plan.md §2e step 3.
+    Pure function; deterministic. row is the dict shape from _read_lead_summary.
+    Negative scores → PAUSED/snoozed tail."""
+    score = 0
+    label = row.get("label") or "NEW"
+    # DISREGARDED is terminal-closed — score deeply negative so they fall
+    # into the pause_tail (and render_review filters them out entirely
+    # before pause_tail builds, so they're never displayed at all).
+    if label == "DISREGARDED":
+        return -100000
+    # CONFIRMED is a terminal/success state — short-circuit before any urgency
+    # or damping math can take the score negative and dump them into the
+    # paused tail. They render in their own ✅ section.
+    if label == "CONFIRMED":
+        return 5000
+    # WAITING_FOR_PAYMENT is high-priority: link sent, expecting payment soon.
+    # Above HOT (which is 800) so it surfaces at the top of /review with the
+    # operator-action signal 'check if payment arrived / nudge customer'.
+    if label == "WAITING_FOR_PAYMENT":
+        return 4000
+    if label == "NEEDS_ATTENTION":
+        score += 1000
+    elif label == "HOT":
+        score += 800
+    elif label == "WARM":
+        score += 500
+    elif label == "NEW":
+        score += 300
+    elif label == "COLD":
+        # "almost-bought" cold = had booking intent but no payment
+        if row.get("last_booking_intent_at"):
+            score += 100
+        kind = row.get("last_rejection_kind")
+        lra = row.get("last_rejection_at_seconds")  # seconds since rejection
+        if kind == "rejected_price" and lra is not None and lra > 30 * 86400:
+            score += 50
+        if kind == "rejected_timing":
+            score += 50  # always surfaceable if cold + rejected_timing
+    if label.startswith("PAUSED_"):
+        score -= 10000
+    if row.get("label_locked_active"):
+        score -= 500
+
+    # Hermes importance — additive bonus within the label tier. Cap at +90
+    # so a HOT (base 800) with importance=100 reaches 890 — still well below
+    # NEEDS_ATTENTION (1000), preserving label-based sectioning while letting
+    # Hermes re-sort within each section by recency-of-value.
+    imp = row.get("importance_score")
+    if isinstance(imp, int):
+        score += min(90, max(0, imp))
+
+    # urgency boosts
+    cmsg = row.get("last_customer_message_at_seconds")  # silent secs
+    orep = row.get("last_operator_reply_at_seconds")
+    we_owe = (cmsg is not None and orep is not None and cmsg < orep and cmsg < 99999999)
+    # "we owe a reply" really means: customer msg is more recent than our reply
+    # AND it's been >30min since they spoke.
+    if (cmsg is not None and cmsg < 99999999  # not epoch-fallback
+            and (orep is None or orep > cmsg)
+            and cmsg > 30 * 60):
+        score += 300
+    if label == "HOT" and cmsg is not None and cmsg > 2 * 3600:
+        score += 200
+    dates = (row.get("dates") or "").lower()
+    sameday = ("today" in dates or "tonight" in dates)
+    if sameday and (orep is None or (cmsg is not None and (orep > cmsg))):
+        score += 400
+    plink = row.get("last_payment_link_at_seconds")
+    ppromised = row.get("last_payment_promised_at_seconds")
+    if (plink is not None and ppromised is None and plink > 24 * 3600):
+        score += 150
+
+    # damping — keep nudge damping (don't keep re-pushing the same nudge
+    # for 24h after operator already drafted one), but DROP review-seen
+    # damping (that suppressed the only WARM lead just because the operator
+    # looked at the report a moment ago — the report should be consistent
+    # across consecutive /review calls).
+    nudge = row.get("last_nudge_drafted_at_seconds")
+    if nudge is not None and nudge < 24 * 3600:
+        score -= 100
+
+    return score
+
+def _fmt_dur(secs):
+    """Human-readable '9h', '24m', '3d' etc. None → '—'."""
+    if secs is None:
+        return "—"
+    if secs < 90:
+        return f"{int(secs)}s"
+    if secs < 90 * 60:
+        return f"{int(secs / 60)}m"
+    if secs < 36 * 3600:
+        return f"{int(secs / 3600)}h"
+    return f"{int(secs / 86400)}d"
+
+
+
+def render_review(scored, totals, mode="ondemand"):
+    """Return a dict with both the single-message rendering (kept for backward
+    compat) AND a per-lead-cards rendering so the workflow can post one message
+    per lead — each lead's 3-button inline keyboard then sits with that lead's
+    text, instead of stacking 6× at the bottom of one big report.
+
+    Returns:
+      {
+        telegram_text: <full single-message render — backward-compat header>,
+        inline_keyboards: <all rows stacked, backward-compat>,
+        per_lead_messages: [
+          {text: '...', inline_keyboard: [[{text:'Draft nudge',...}, ...]]},
+          ...
+        ],
+        header_text: <just the summary header, no lead lines>,
+        mark_seen_ids: [...],
+      }
+    """
+    sections = {
+        "WAITING_FOR_PAYMENT": {"items": [], "cap": 20,
+                            "header": "⏳ WAITING FOR PAYMENT — link sent, awaiting payment",
+                            "emoji": "⏳"},
+        "HOT":             {"items": [], "cap": REVIEW_CAP_HOT,
+                            "header": "🔥 HOT — ready to close",
+                            "emoji": "🔥"},
+        "NEEDS_ATTENTION": {"items": [], "cap": REVIEW_CAP_NEEDS_ATTENTION,
+                            "header": "⚠️ NEEDS ATTENTION",
+                            "emoji": "⚠️"},
+        "WARM":            {"items": [], "cap": REVIEW_CAP_WARM,
+                            "header": "♨️ WARM — worth nudging",
+                            "emoji": "♨️"},
+        "NEW":             {"items": [], "cap": 5,
+                            "header": "🌱 NEW — early conversations",
+                            "emoji": "🌱"},
+        "COLD":            {"items": [], "cap": REVIEW_CAP_COLD,
+                            "header": "❄️ COLD — re-engage candidates",
+                            "emoji": "❄️"},
+        "CONFIRMED":       {"items": [], "cap": 20,
+                            "header": "✅ CONFIRMED — booked / paid",
+                            "emoji": "✅"},
+    }
+    pause_tail = []
+    seen_ids = []
+    for score, row in scored:
+        label = row.get("label") or "NEW"
+        # DISREGARDED is terminal-closed — hide completely. Not in any
+        # section, not in pause_tail, not in totals. Operator can /label
+        # to reopen if they change their mind.
+        if label == "DISREGARDED":
+            continue
+        # PAUSED_* always tail. CONFIRMED is success — keep on the report,
+        # but in its own section without nudge buttons (handled below).
+        if label.startswith("PAUSED_") or score < 0:
+            pause_tail.append(row)
+            continue
+        if label not in sections:
+            continue
+        sections[label]["items"].append((score, row))
+        seen_ids.append(row["customer_id"])
+
+    # Sort NEW section by last_customer_message_at DESC NULLS LAST — most
+    # recently active customer first. Score-based tie-breaking was letting
+    # genuinely new contacts fall into the overflow behind older NEW leads.
+    # Other sections keep their score-based order (their boosts already
+    # encode recency via the "we owe a reply > 30min" rule).
+    def _recency_key(item):
+        secs = item[1].get("last_customer_message_at_seconds")
+        return (secs is None, secs if secs is not None else 0)
+    sections["NEW"]["items"].sort(key=_recency_key)
+
+    # ---- Single-message render (backward compat) ----------------------------
+    when = ("Scheduled review" if mode == "scheduled"
+            else "On-demand review")
+    header_lines = [f"📋 *Pipeline Review* — {when}",
+                    (f"{totals.get('total', 0)} active · "
+                     f"{totals.get('HOT', 0)} hot · "
+                     f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
+                     f"{totals.get('COLD', 0)} cold")]
+    lines = list(header_lines) + [""]
+    keyboards = []
+    per_lead_messages = []
+
+    for label_key in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
+                      "WARM", "NEW", "COLD", "CONFIRMED"):
+        sect = sections[label_key]
+        items = sect["items"]
+        if not items:
+            continue
+        cap = sect["cap"]
+        shown = items[:cap]
+        overflow = len(items) - len(shown)
+        lines.append(f"*{sect['header']}* ({len(items)})")
+        for i, (score, row) in enumerate(shown, 1):
+            why = _why_line(row, label_key)
+            # Hermes importance — append score + suggestion when present.
+            # Dedupe: if _why_line already used suggested_action (CONFIRMED/
+            # WAITING_FOR_PAYMENT path), don't repeat it on the 🧠 line —
+            # show the reasoning instead, or just the score alone.
+            imp = row.get("importance_score")
+            imp_bits = ""
+            if isinstance(imp, int):
+                imp_bits = f"\n🧠 Hermes: *{imp}/100*"
+                sug = (row.get("suggested_action") or "").strip()
+                rea = (row.get("importance_reasoning") or "").strip()
+                why_used_sug = (sug and why == sug)
+                if sug and not why_used_sug:
+                    imp_bits += f" — _{sug}_"
+                elif rea and why_used_sug:
+                    # Why-line already carries the suggestion; show the
+                    # 'why this score' reasoning on the 🧠 line instead.
+                    imp_bits += f" — _{rea}_"
+                elif rea:
+                    imp_bits += f" — _{rea}_"
+            lead_body = (
+                f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
+                f"{(row.get('yachts') or 'no yacht set')} · "
+                f"{(row.get('dates') or 'no date')} · "
+                f"msg #{row.get('message_count')}\n"
+                f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
+                f"  ·  {why}"
+                f"{imp_bits}"
+            )
+            lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))
+            sid = row["customer_id"]
+            # CONFIRMED keeps Draft nudge (post-confirm messaging: boarding
+            # details, thank-yous, upsells, re-engagement) but drops Snooze
+            # (no auto-nudges to suppress on a confirmed booking) and
+            # Disregard (already-won deals don't need closing).
+            if label_key == "CONFIRMED":
+                kb = [[
+                    {"text": "💬 Draft message", "callback_data": f"nudge:{sid}"},
+                    {"text": "ℹ️ Info",          "callback_data": f"inf:{sid}"},
+                ]]
+            else:
+                # 2 rows of 2 — keeps the keyboard scannable. Disregard is
+                # the destructive action, parked alone on row 2 next to Info
+                # so the operator doesn't fat-finger it next to Draft nudge.
+                kb = [
+                    [
+                        {"text": "💬 Draft nudge",
+                         "callback_data": f"nudge:{sid}"},
+                        {"text": "💤 Snooze 4h",
+                         "callback_data": f"snz:{sid}:4h"},
+                    ],
+                    [
+                        {"text": "ℹ️ Info",
+                         "callback_data": f"inf:{sid}"},
+                        {"text": "🛑 Disregard",
+                         "callback_data": f"disregard:{sid}"},
+                    ],
+                ]
+            keyboards.append(kb[0])
+            # Per-lead card: section emoji prefix + lead body, plus its own kb.
+            per_lead_messages.append({
+                "text": f"{sect['emoji']} *{label_key}*\n{lead_body}",
+                "inline_keyboard": kb,
+                "customer_id": sid,
+            })
+        if overflow > 0:
+            lines.append(
+                f"   _+{overflow} more — `/review {label_key.lower()}` to see all_"
+            )
+        lines.append("")
+
+    if pause_tail:
+        lines.append(f"⏸ Paused/snoozed: {len(pause_tail)} — `/info` to see.")
+
+    telegram_text = "\n".join(lines).strip()
+    header_text = "\n".join(header_lines).strip()
+    return {
+        "telegram_text": telegram_text,
+        "inline_keyboards": keyboards,
+        "header_text": header_text,
+        "per_lead_messages": per_lead_messages,
+        "mark_seen_ids": seen_ids,
+    }
+
+
+
+def _name_fallback(customer_id):
+    """Build a recognisable label from customer_id when the customer's name
+    is missing. Shows the last 4 digits prefixed with '…'. No country-code
+    guessing — @lid IDs aren't real E.164 numbers, and even @c.us IDs have
+    variable-length CCs that would mislabel."""
+    cid = (customer_id or "").strip()
+    digits = "".join(c for c in cid.split("@")[0] if c.isdigit())
+    if len(digits) < 4:
+        return "(unknown)"
+    return "…" + digits[-4:]
+
+def _why_line(row, label_key):
+    """Heuristic one-liner. Prefers Hermes' suggested_action when present
+    for CONFIRMED + WAITING_FOR_PAYMENT (where the generic line — e.g.
+    'share boarding details or upsell' — is often wrong because the
+    operator has already shared boarding / payment link), and falls
+    back to deterministic rules everywhere else."""
+    # For CONFIRMED/WAITING customers, suggested_action from Hermes is
+    # more accurate than the generic guidance (it knows what's already
+    # been said in the chat). Skip generic notes if we have it.
+    if label_key in ("CONFIRMED", "WAITING_FOR_PAYMENT"):
+        sug = (row.get("suggested_action") or "").strip()
+        if sug:
+            return sug
+    notes = []
+    if row.get("last_payment_link_at_seconds") is not None:
+        plink_h = int(row["last_payment_link_at_seconds"] / 3600)
+        if row.get("last_payment_promised_at_seconds") is None and plink_h > 24:
+            notes.append(f"payment link sent {plink_h}h ago, no commitment")
+    if row.get("last_booking_intent_at") and label_key == "COLD":
+        notes.append("almost-bought (hit booking intent before going cold)")
+    if (row.get("last_rejection_kind") == "rejected_price"
+            and label_key == "COLD"):
+        notes.append("lost on price — try different angle")
+    if (row.get("last_rejection_kind") == "rejected_timing"
+            and label_key == "COLD"):
+        notes.append("lost on timing — date may be relevant now")
+    if not notes:
+        if label_key == "HOT":
+            notes.append("hot signals — push toward booking")
+        elif label_key == "NEEDS_ATTENTION":
+            notes.append("we owe a reply")
+        elif label_key == "WARM":
+            notes.append("engaged — value-add nudge could move it")
+        elif label_key == "COLD":
+            notes.append("worth a soft re-engagement message")
+        elif label_key == "WAITING_FOR_PAYMENT":
+            notes.append("payment link sent — check if paid or nudge")
+        elif label_key == "CONFIRMED":
+            notes.append("booked / paid — share boarding details or upsell")
+        elif label_key == "NEW":
+            notes.append("new conversation")
+        else:
+            notes.append(label_key.lower().replace("_", " "))
+    return " · ".join(notes)
