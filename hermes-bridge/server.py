@@ -4484,24 +4484,64 @@ class Handler(BaseHTTPRequestHandler):
 
     def _lead_analyze_disregard(self, payload):
         """POST /lead-analyze-disregard — operator pressed [🛑 Disregard] on a
-        /review card. Pulls full WAHA history, calls hermes_analyze_lead,
-        and:
-          - if verdict='close': flips label to DISREGARDED, logs to
-            autonomous_sends, returns operator-facing reasoning ('closed').
-          - if verdict='keep_open': leaves label alone, returns reasoning +
-            suggested_action ('kept open').
+        /review card. Two modes:
+
+          - default: pulls full WAHA history, calls hermes_analyze_lead. If
+            verdict='close' → flips label to DISREGARDED. If verdict=
+            'keep_open' → returns reasoning + suggested_action AND a
+            [🛑 Close anyway] / [💬 Draft nudge] reply_markup so the
+            operator can override Hermes either direction without re-typing
+            commands.
+
+          - payload.force=true: skips Hermes, force-flips to DISREGARDED.
+            Used by the [🛑 Close anyway] override button from the
+            keep_open response above.
+
         Hermes failure → returns degraded, never auto-closes."""
         cid, err = self._resolve_target(payload)
         if not cid:
             self._send(200, {"ok": False, "telegram_text": err or
                              "⚠️ customer_id required"})
             return
+        force_close = bool(payload.get("force"))
         try:
             row = get_current_label_row(cid) or {}
             cur_label = row.get("label") or "NEW"
             facts = get_customer_facts(cid) or {}
+            nm = facts.get("name") or _name_fallback(cid)
             mc = int(row.get("message_count") or facts.get("message_count")
                      or 0)
+
+            # ---- force-override path — skip Hermes, just close ----
+            if force_close:
+                prev_reasoning = facts.get("disregard_reasoning") or ""
+                apply_label_transition(
+                    cid, cur_label, "DISREGARDED",
+                    signal="operator_override",
+                    evidence=(
+                        "operator override — Hermes had said keep_open. "
+                        f"Prior reasoning: {prev_reasoning[:180]}"),
+                    message_count=mc,
+                    created_by="operator:disregard_force")
+                _psql(
+                    "UPDATE customer_facts SET "
+                    "disregard_verdict = 'close', "
+                    "disregard_analyzed_at = now() "
+                    f"WHERE customer_id = {_lit(cid)}")
+                tx = (
+                    f"🛑 *DISREGARDED* — {nm}\n"
+                    f"_Operator override_ — closed despite Hermes "
+                    "keep_open.\n\n"
+                    f"→ label {cur_label} → DISREGARDED. Hidden from "
+                    f"/review.\n_Undo with_ `/label {nm} WARM`")
+                self._send(200, {
+                    "ok": True, "verdict": "close",
+                    "label_before": cur_label, "label_after": "DISREGARDED",
+                    "reasoning": "operator override",
+                    "telegram_text": tx})
+                return
+
+            # ---- default path — Hermes-analyze first ----
             silent_h = None
             cs_out, _e = _psql(
                 "SELECT EXTRACT(EPOCH FROM (now() - "
@@ -4525,14 +4565,13 @@ class Handler(BaseHTTPRequestHandler):
                     "telegram_text": (
                         "⚠️ Disregard analysis failed — Hermes timeout/error. "
                         "No label change. Try again or close manually via "
-                        "`/label <name> DISREGARDED`.")})
+                        f"`/label {nm} DISREGARDED`.")})
                 return
 
             verdict = verdict_obj["verdict"]
             reasoning = (verdict_obj.get("reasoning") or "").strip()
             suggested = (verdict_obj.get("suggested_action") or "").strip()
             score = verdict_obj.get("importance_score", 0)
-            nm = facts.get("name") or _name_fallback(cid)
 
             # Persist analysis snapshot regardless of verdict (drives future
             # /info display and avoids re-spending Hermes on same chat).
@@ -4573,16 +4612,28 @@ class Handler(BaseHTTPRequestHandler):
                     f"_Hermes analysis:_ {reasoning or '(no reasoning)'}\n"
                     f"_Importance score:_ {int(score)}/100"
                     + (f"\n_Suggested play:_ {suggested}" if suggested else "")
-                    + f"\n\n→ label unchanged ({cur_label}). "
-                    "Use [💬 Draft nudge] to engage."
+                    + f"\n\n→ label unchanged ({cur_label})."
+                    "\n\n_Disagree? Override below._"
                 )
+                # Override buttons. The operator can either force-close
+                # (against Hermes) or accept Hermes' advice by drafting a
+                # nudge immediately. Both stay one tap away.
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "🛑 Close anyway",
+                         "callback_data": f"disregard_force:{cid}"},
+                        {"text": "💬 Draft nudge",
+                         "callback_data": f"nudge:{cid}"},
+                    ]]
+                }
                 self._send(200, {
                     "ok": True, "verdict": "keep_open",
                     "label_before": cur_label, "label_after": cur_label,
                     "importance_score": int(score),
                     "reasoning": reasoning,
                     "suggested_action": suggested,
-                    "telegram_text": tx})
+                    "telegram_text": tx,
+                    "reply_markup": reply_markup})
         except Exception as e:
             log("lead_analyze_disregard ERROR:", repr(e))
             self._send(200, {"ok": False, "degraded": True,
