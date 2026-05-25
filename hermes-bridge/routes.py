@@ -2994,15 +2994,33 @@ def handle_nomod_webhook(headers, raw_body, send):
 def _process_nomod_charge_completed(raw_body, svix_id):
     """Background worker for handle_nomod_webhook — runs AFTER the
     200 OK has been flushed to Nomod. All DB writes, label transitions,
-    and Telegram notifications happen here. Broad try/except so a
-    worker error never crashes the bridge.
+    Telegram notifications, and CRM-trail notes happen here. Broad
+    try/except so a worker error never crashes the bridge.
 
-    Schema for autonomous_sends.notes matches the polling cron's
-    payment_received row shape exactly (snake_case fields) — downstream
-    consumers see one consistent schema regardless of origin.
+    3-layer customer match (same priority ladder as handle_poll_payments):
+      1. link_id — charge.link.id ↔ autonomous_sends.payment_link_sent.
+         Most reliable: maps the charge to the customer we ORIGINALLY
+         sent the link to, regardless of who actually paid (forwarded
+         link, friend pays for friend, etc.).
+      2. phone — payer phone resolves to a customer_facts row.
+      3. amount + time — autonomous_sends.payment_link_sent within
+         ±1 AED and ±30min/+5min of charge.created (last resort).
+
+    Payer-vs-customer mismatch (the 'Musawi paid for Qurbani' case):
+    when matched via link_id or amount_time AND payer phone/name
+    differs from the customer's known phone:
+      - Promote to CONFIRMED anyway (booking IS paid)
+      - Insert a row into customer_notes with full payer info so the
+        operator can act/save in CRM without digging into JSON
+      - Telegram shows ⚠️ + both parties' names
+
+    Schema for autonomous_sends.notes matches handle_poll_payments
+    exactly (snake_case + link_id + payer_mismatch fields).
     """
     try:
+        import datetime as _dt
         from server import (
+            _payer_mismatch,
             apply_label_transition,
             get_current_label_row,
             resolve_customer_by_phone,
@@ -3057,42 +3075,154 @@ def _process_nomod_charge_completed(raw_body, svix_id):
         created_at = (data.get("created")
                       or data.get("createdAt") or "")
 
-        # Match customer by phone.
+        # Link reference — Nomod's webhook charge mirrors the polling
+        # API shape: data.link.id IS the link_id we stored when
+        # nomod_create_link returned. Drives Layer 1 of the
+        # match-priority ladder (most reliable: maps charge ↔ the
+        # customer we originally sent the link to).
+        link_obj = data.get("link") or {}
+        link_id = (link_obj.get("id")
+                   if isinstance(link_obj, dict) else "") or ""
+
+        # ── 3-layer customer match ──
         customer_id = ""
         customer_name = ""
-        if payer_phone:
+        matched_via = ""
+
+        # Layer 1 — link_id (PRIMARY). Maps charge → original recipient
+        # of the payment link, regardless of who actually paid.
+        if link_id:
+            try:
+                lid_esc = link_id.replace("'", "''")
+                out, _err = _psql(
+                    "SELECT customer_id FROM autonomous_sends "
+                    "WHERE kind = 'payment_link_sent' "
+                    f"AND notes->>'link_id' = '{lid_esc}' "
+                    "ORDER BY id DESC LIMIT 1"
+                )
+                row_line = (out or "").strip().splitlines()
+                if row_line and row_line[0].strip():
+                    customer_id = row_line[0].strip()
+                    matched_via = "link_id"
+            except Exception as e:
+                log(f"nomod-webhook link_id match err: {e!r}")
+
+        # Layer 2 — phone (FALLBACK). The payer IS the customer.
+        if not customer_id and payer_phone:
             try:
                 resolved, _matches = resolve_customer_by_phone(payer_phone)
                 if resolved:
                     customer_id = resolved
+                    matched_via = "phone_webhook"
             except Exception as e:
                 log(f"nomod-webhook resolve_customer_by_phone err: "
                     f"{e!r}")
 
-        # If matched: get name + promote to CONFIRMED.
-        if customer_id:
+        # Layer 3 — amount + time fuzzy (LAST RESORT). No link_id,
+        # no phone match, but a payment_link_sent row matches amount
+        # within ±1 AED and time within charge_created ±30min/+5min.
+        if not customer_id and total_f > 0:
+            try:
+                if created_at:
+                    created_dt = _dt.datetime.fromisoformat(
+                        created_at.replace("Z", "+00:00"))
+                else:
+                    created_dt = _dt.datetime.now(_dt.timezone.utc)
+                created_iso = created_dt.isoformat()
+                out, _err = _psql(
+                    "SELECT customer_id FROM autonomous_sends "
+                    "WHERE kind = 'payment_link_sent' "
+                    f"AND ABS((notes->>'amount')::numeric - {total_f}) < 1 "
+                    f"AND sent_at BETWEEN "
+                    f"  '{created_iso}'::timestamptz "
+                    f"  - interval '30 minutes' "
+                    f"AND '{created_iso}'::timestamptz "
+                    f"  + interval '5 minutes' "
+                    "LIMIT 2"
+                )
+                lines = (out or "").strip().splitlines()
+                if len(lines) == 1 and lines[0].strip():
+                    customer_id = lines[0].strip()
+                    matched_via = "amount_time"
+            except Exception as e:
+                log(f"nomod-webhook amount_time match err: {e!r}")
+
+        # ── Payer-vs-customer mismatch detection ──
+        # Only meaningful when matched via link_id or amount_time
+        # (phone-match implies the payer IS the customer).
+        pay_mismatch = False
+        row = None
+        if customer_id and matched_via in ("link_id", "amount_time"):
             try:
                 row = get_current_label_row(customer_id) or {}
+                pay_mismatch = _payer_mismatch(
+                    {"phone_number": payer_phone}, row, None)
+            except Exception as e:
+                log(f"nomod-webhook payer_mismatch detect err: {e!r}")
+
+        # ── Promote matched customer to CONFIRMED ──
+        if customer_id:
+            try:
+                if row is None:
+                    row = get_current_label_row(customer_id) or {}
                 customer_name = row.get("name") or ""
                 prev_label = row.get("label") or "NEW"
                 if prev_label != "CONFIRMED":
                     apply_label_transition(
                         customer_id, prev_label, "CONFIRMED",
-                        "nomod-webhook:payment_received",
-                        f"charge {charge_id[:8]} via webhook",
+                        f"nomod-webhook:payment_received:{matched_via}",
+                        f"charge {charge_id[:8]} via webhook "
+                        f"(matched_via={matched_via}"
+                        + (", payer_mismatch=True" if pay_mismatch else "")
+                        + ")",
                         row.get("message_count", 0),
                         created_by="system:webhook")
                     log(f"nomod-webhook cid={customer_id!r} "
-                        f"{prev_label} -> CONFIRMED")
+                        f"{prev_label} -> CONFIRMED "
+                        f"matched_via={matched_via} "
+                        f"payer_mismatch={pay_mismatch}")
             except Exception as e:
                 log(f"nomod-webhook promote err: {e!r}")
 
-        # Audit row in autonomous_sends.
+        # ── customer_notes for CRM trail (payer-mismatch only) ──
+        # Preserves payer info inline so operator can act/save in CRM
+        # without digging into autonomous_sends JSON.
+        if pay_mismatch and customer_id:
+            payer_name_full = " ".join([
+                (customer.get("firstName")
+                 or customer.get("first_name") or "").strip(),
+                (customer.get("lastName")
+                 or customer.get("last_name") or "").strip(),
+            ]).strip()
+            payer_email = (customer.get("email") or "").strip()
+            note_text = (
+                f"💰 Payment of AED {total_f:g} received from "
+                f"{payer_name_full or '(no name)'}"
+                + (f" ({payer_phone}" if payer_phone else " (")
+                + (f" / {payer_email}" if payer_email else "")
+                + f"). Paid on behalf of customer "
+                f"(link matched via {matched_via}, "
+                f"charge {charge_id[:8] or '?'})."
+            )
+            try:
+                cid_e = customer_id.replace("'", "''")
+                _psql(
+                    "INSERT INTO customer_notes "
+                    "(customer_id, note_text, active) "
+                    f"VALUES ('{cid_e}', {_lit(note_text)}, true)"
+                )
+                log(f"nomod-webhook customer_notes row inserted "
+                    f"cid={customer_id} (payer-mismatch trail)")
+            except Exception as e:
+                log(f"nomod-webhook customer_notes insert err: {e!r}")
+
+        # ── Audit row in autonomous_sends — same schema as polling ──
         kind = ("payment_received" if customer_id
                 else "payment_received_unmatched")
         notes = {
             "charge_id": charge_id,
-            "matched_via": "phone_webhook" if customer_id else "unmatched",
+            "link_id": link_id,
+            "matched_via": matched_via or "unmatched",
             "total": total_f,
             "currency": currency,
             "payment_method": method,
@@ -3107,6 +3237,7 @@ def _process_nomod_charge_completed(raw_body, svix_id):
                 "email": (customer.get("email") or "").strip(),
                 "phone_number": payer_phone,
             },
+            "payer_mismatch": pay_mismatch,
             "summary": summary,
             "via": "webhook",
             "event_id": svix_id,
@@ -3122,9 +3253,19 @@ def _process_nomod_charge_completed(raw_body, svix_id):
         except Exception as e:
             log(f"nomod-webhook autonomous_sends insert err: {e!r}")
 
-        # Telegram notification to operator.
+        # ── Telegram notification — three branches ──
         try:
-            if customer_id:
+            payer_full = " ".join([
+                (customer.get("firstName")
+                 or customer.get("first_name") or "").strip(),
+                (customer.get("lastName")
+                 or customer.get("last_name") or "").strip(),
+            ]).strip()
+            payer_email = (customer.get("email") or "").strip()
+
+            if customer_id and not pay_mismatch:
+                # Clean match: payer is the customer (or matched without
+                # needing the payer-mismatch detection).
                 display = (customer_name or payer_phone
                            or customer_id or "(unknown)")
                 text = (
@@ -3134,23 +3275,39 @@ def _process_nomod_charge_completed(raw_body, svix_id):
                     f"Method: {method}\n"
                     f"Booking: {summary or '(no summary)'}\n"
                     f"→ promoted to ✅ CONFIRMED  "
-                    f"<i>(via webhook · {charge_id[:8] or 'no_id'})</i>"
+                    f"<i>(via {matched_via} · "
+                    f"{charge_id[:8] or 'no_id'})</i>"
+                )
+            elif customer_id and pay_mismatch:
+                # The Qurbani/Musawi case: link maps to customer, but
+                # payer is someone else. Confirm booking + surface
+                # payer info so operator can link both in CRM.
+                text = (
+                    f"💰 <b>PAYMENT RECEIVED</b>  "
+                    f"⚠️ payer ≠ customer\n"
+                    f"Customer: <b>{customer_name or customer_id}</b>\n"
+                    f"Paid by: <b>{payer_full or '(no name)'}</b> · "
+                    f"{payer_phone or '(no phone)'}"
+                    + (f" · {payer_email}" if payer_email else "")
+                    + f"\nAmount: AED {total_f:g}\n"
+                    f"Method: {method}\n"
+                    f"Booking: {summary or '(no summary)'}\n"
+                    f"→ promoted to ✅ CONFIRMED  "
+                    f"<i>(via {matched_via} · {charge_id[:8]})</i>\n\n"
+                    f"📋 Note saved to customer file: "
+                    f"payer info preserved for CRM."
                 )
             else:
-                payer_name = " ".join([
-                    (customer.get("firstName")
-                     or customer.get("first_name") or "").strip(),
-                    (customer.get("lastName")
-                     or customer.get("last_name") or "").strip(),
-                ]).strip()
+                # Truly unmatched (no link, no phone, no amount/time hit).
                 text = (
                     f"💰 <b>PAYMENT RECEIVED</b> (unmatched)\n"
                     f"Amount: AED {total_f:g}\n"
                     f"Method: {method}\n"
                     f"Time: {created_at or '?'}\n"
-                    f"From: {payer_name or '(no name)'} · "
+                    f"From: {payer_full or '(no name)'} · "
                     f"{payer_phone or '(no phone)'}\n"
-                    f"Reference: <code>{charge_id[:8] or '?'}...</code>\n\n"
+                    f"Reference: <code>"
+                    f"{charge_id[:8] or '?'}...</code>\n\n"
                     f"Check Nomod dashboard to identify customer + run "
                     f"<code>/label name CONFIRMED</code> manually."
                 )
