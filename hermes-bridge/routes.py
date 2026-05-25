@@ -2861,3 +2861,302 @@ def handle_feedback(payload, send):
 
 # (moved to routes.py — module-level resolve_target / update_last_analysis)
 # (moved to routes.py — handle_<name>(payload, self._send))
+
+
+# ============================================================================
+# Helper: Telegram admin notifications (fire directly from bridge,
+# bypassing n8n). Used by webhook handlers that need to push messages
+# without going through the workflow.
+# ============================================================================
+
+def _tg_send(text, parse_mode="HTML"):
+    """Fire one Telegram message to the operator chat. Same pattern as
+    cron-reminders.py / cron-daily-summary.py: ADMIN_TG_TOKEN +
+    ADMIN_CHAT_ID from .env. Fail-safe — logs on error, never raises.
+    Returns True on HTTP 2xx, False otherwise."""
+    token = os.environ.get("ADMIN_TG_TOKEN", "")
+    chat_id = os.environ.get("ADMIN_CHAT_ID", "")
+    if not (token and chat_id):
+        log("_tg_send: ADMIN_TG_TOKEN / ADMIN_CHAT_ID not configured")
+        return False
+    payload = json.dumps({
+        "chat_id": int(chat_id),
+        "text": text,
+        "parse_mode": parse_mode,
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return 200 <= r.status < 300
+    except Exception as e:
+        log(f"_tg_send err: {e!r}")
+        return False
+
+
+# ============================================================================
+# Group: webhooks — real-time event ingress from external services
+# ============================================================================
+
+def handle_nomod_webhook(headers, raw_body, send):
+    """POST /nomod-webhook — Nomod payment-webhook receiver. Replaces
+    the 2-min /poll-payments cron for real-time payment detection; the
+    cron stays running as a fallback (same Redis dedup key —
+    nomod_seen:<charge_id> — so they never double-notify).
+
+    Signature verification (svix HMAC-SHA256, mandatory):
+      Headers required: svix-id, svix-timestamp, svix-signature.
+      Timestamp must be within ±5 min of now (replay-attack window).
+      Signed string: '<svix-id>.<svix-timestamp>.<raw_body>'.
+      Key: base64-decode(NOMOD_WEBHOOK_SECRET stripped of 'whsec_').
+      Expected sig = base64(HMAC-SHA256(key, signed_string)).
+      Compare with each 'v1,<sig>' token in svix-signature (multiple
+      sigs allowed during key rotation; any match passes).
+
+    On valid signature: send 200 IMMEDIATELY, then handoff to a
+    background thread for processing. Nomod retries slow responses;
+    sub-100ms ACK is the goal. _send already flushes the wfile
+    (server.py:_send) so 200 hits the socket before this returns."""
+    import base64
+    import hashlib
+    import hmac
+    import threading
+    from server import NOMOD_WEBHOOK_SECRET
+
+    # --- 1. svix headers present? ---
+    svix_id = (headers.get("svix-id")
+               or headers.get("Svix-Id") or "")
+    svix_ts = (headers.get("svix-timestamp")
+               or headers.get("Svix-Timestamp") or "")
+    svix_sig = (headers.get("svix-signature")
+                or headers.get("Svix-Signature") or "")
+    if not (svix_id and svix_ts and svix_sig):
+        log("nomod-webhook missing svix headers")
+        send(400, {"error": "missing svix headers"})
+        return
+
+    # --- 2. timestamp freshness ---
+    try:
+        ts_int = int(svix_ts)
+    except ValueError:
+        send(400, {"error": "invalid svix-timestamp"})
+        return
+    now = int(time.time())
+    if abs(now - ts_int) > 300:
+        log(f"nomod-webhook stale timestamp lag={now-ts_int}s")
+        send(400, {"error": "stale timestamp"})
+        return
+
+    # --- 3. signature ---
+    secret = (NOMOD_WEBHOOK_SECRET or "").strip()
+    if not secret.startswith("whsec_"):
+        log("nomod-webhook NOMOD_WEBHOOK_SECRET not configured "
+            "(expected whsec_<base64>)")
+        send(500, {"error": "webhook secret not configured"})
+        return
+    try:
+        secret_bytes = base64.b64decode(secret[len("whsec_"):])
+    except Exception as e:
+        log(f"nomod-webhook secret decode err: {e!r}")
+        send(500, {"error": "webhook secret malformed"})
+        return
+    signed_msg = f"{svix_id}.{svix_ts}.{raw_body}".encode("utf-8")
+    expected_sig = base64.b64encode(
+        hmac.new(secret_bytes, signed_msg, hashlib.sha256).digest()
+    ).decode("ascii")
+    presented_sigs = [t[3:] for t in svix_sig.split(" ")
+                      if t.startswith("v1,")]
+    if not any(hmac.compare_digest(expected_sig, s)
+               for s in presented_sigs):
+        log(f"nomod-webhook BAD signature event_id={svix_id}")
+        send(400, {"error": "bad signature"})
+        return
+
+    # --- 4. 200 OK now, processing in background ---
+    send(200, {"ok": True})
+
+    # Hand processing to a daemon thread so the response is fully out
+    # the door before we touch DB / WAHA / Telegram. _send already
+    # flushed (server.py change in this commit) so the 200 should
+    # already be on the wire by the time threading.Thread().start()
+    # returns; this is belt + braces.
+    threading.Thread(
+        target=_process_nomod_charge_completed,
+        args=(raw_body, svix_id),
+        daemon=True,
+        name=f"nomod-process-{svix_id[:8]}",
+    ).start()
+
+
+def _process_nomod_charge_completed(raw_body, svix_id):
+    """Background worker for handle_nomod_webhook — runs AFTER the
+    200 OK has been flushed to Nomod. All DB writes, label transitions,
+    and Telegram notifications happen here. Broad try/except so a
+    worker error never crashes the bridge.
+
+    Schema for autonomous_sends.notes matches the polling cron's
+    payment_received row shape exactly (snake_case fields) — downstream
+    consumers see one consistent schema regardless of origin.
+    """
+    try:
+        from server import (
+            apply_label_transition,
+            get_current_label_row,
+            resolve_customer_by_phone,
+        )
+
+        try:
+            body = json.loads(raw_body or "{}")
+        except json.JSONDecodeError:
+            log("nomod-webhook valid sig but invalid JSON body")
+            return
+
+        event_type = body.get("type") or body.get("eventType") or ""
+        if event_type != "charge.completed":
+            log(f"nomod-webhook ignored event_type={event_type!r}")
+            return
+
+        # Dedup on Svix event id (handles Nomod retries).
+        _o, _err = _redis(["SET", f"nomod_webhook_seen:{svix_id}", "1",
+                           "EX", str(30 * 24 * 3600), "NX"])
+        if not _o or "OK" not in str(_o):
+            log(f"nomod-webhook event dedup HIT svix_id={svix_id}")
+            return
+
+        data = body.get("data") or {}
+        charge_id = (data.get("id") or "").strip()
+
+        # Cross-system dedup with polling cron (same key prefix).
+        if charge_id:
+            _o2, _ = _redis(["SET", f"nomod_seen:{charge_id}", "1",
+                             "EX", str(30 * 24 * 3600), "NX"])
+            if not _o2 or "OK" not in str(_o2):
+                log(f"nomod-webhook charge dedup HIT — polling cron "
+                    f"already handled charge_id={charge_id}")
+                return
+
+        # Extract fields (camelCase from Nomod webhook; tolerate
+        # snake_case too in case the API ever returns the polling shape).
+        customer = data.get("customer") or {}
+        payer_phone = (customer.get("phoneNumber")
+                       or customer.get("phone_number") or "").strip()
+        try:
+            total_f = float(data.get("total") or 0)
+        except (TypeError, ValueError):
+            total_f = 0.0
+        method = (data.get("paymentMethod")
+                  or data.get("payment_method") or "unknown")
+        items = data.get("items") or []
+        summary = ""
+        if items and isinstance(items[0], dict):
+            summary = items[0].get("name", "") or ""
+        currency = data.get("currency") or "AED"
+        created_at = (data.get("created")
+                      or data.get("createdAt") or "")
+
+        # Match customer by phone.
+        customer_id = ""
+        customer_name = ""
+        if payer_phone:
+            try:
+                resolved, _matches = resolve_customer_by_phone(payer_phone)
+                if resolved:
+                    customer_id = resolved
+            except Exception as e:
+                log(f"nomod-webhook resolve_customer_by_phone err: "
+                    f"{e!r}")
+
+        # If matched: get name + promote to CONFIRMED.
+        if customer_id:
+            try:
+                row = get_current_label_row(customer_id) or {}
+                customer_name = row.get("name") or ""
+                prev_label = row.get("label") or "NEW"
+                if prev_label != "CONFIRMED":
+                    apply_label_transition(
+                        customer_id, prev_label, "CONFIRMED",
+                        "nomod-webhook:payment_received",
+                        f"charge {charge_id[:8]} via webhook",
+                        row.get("message_count", 0),
+                        created_by="system:webhook")
+                    log(f"nomod-webhook cid={customer_id!r} "
+                        f"{prev_label} -> CONFIRMED")
+            except Exception as e:
+                log(f"nomod-webhook promote err: {e!r}")
+
+        # Audit row in autonomous_sends.
+        kind = ("payment_received" if customer_id
+                else "payment_received_unmatched")
+        notes = {
+            "charge_id": charge_id,
+            "matched_via": "phone_webhook" if customer_id else "unmatched",
+            "total": total_f,
+            "currency": currency,
+            "payment_method": method,
+            "created_at": created_at,
+            "payer_info": {
+                "first_name": (customer.get("firstName")
+                               or customer.get("first_name")
+                               or "").strip(),
+                "last_name": (customer.get("lastName")
+                              or customer.get("last_name")
+                              or "").strip(),
+                "email": (customer.get("email") or "").strip(),
+                "phone_number": payer_phone,
+            },
+            "summary": summary,
+            "via": "webhook",
+            "event_id": svix_id,
+        }
+        try:
+            sql = (
+                "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+                f"VALUES ({_lit(customer_id or 'unknown')}, "
+                f"{_lit(kind)}, "
+                f"{_lit(json.dumps(notes))}::jsonb)"
+            )
+            _psql(sql)
+        except Exception as e:
+            log(f"nomod-webhook autonomous_sends insert err: {e!r}")
+
+        # Telegram notification to operator.
+        try:
+            if customer_id:
+                display = (customer_name or payer_phone
+                           or customer_id or "(unknown)")
+                text = (
+                    f"💰 <b>PAYMENT RECEIVED</b>\n"
+                    f"Customer: <b>{display}</b>\n"
+                    f"Amount: AED {total_f:g}\n"
+                    f"Method: {method}\n"
+                    f"Booking: {summary or '(no summary)'}\n"
+                    f"→ promoted to ✅ CONFIRMED  "
+                    f"<i>(via webhook · {charge_id[:8] or 'no_id'})</i>"
+                )
+            else:
+                payer_name = " ".join([
+                    (customer.get("firstName")
+                     or customer.get("first_name") or "").strip(),
+                    (customer.get("lastName")
+                     or customer.get("last_name") or "").strip(),
+                ]).strip()
+                text = (
+                    f"💰 <b>PAYMENT RECEIVED</b> (unmatched)\n"
+                    f"Amount: AED {total_f:g}\n"
+                    f"Method: {method}\n"
+                    f"Time: {created_at or '?'}\n"
+                    f"From: {payer_name or '(no name)'} · "
+                    f"{payer_phone or '(no phone)'}\n"
+                    f"Reference: <code>{charge_id[:8] or '?'}...</code>\n\n"
+                    f"Check Nomod dashboard to identify customer + run "
+                    f"<code>/label name CONFIRMED</code> manually."
+                )
+            _tg_send(text, parse_mode="HTML")
+        except Exception as e:
+            log(f"nomod-webhook telegram notify err: {e!r}")
+    except Exception as e:
+        # Anything unhandled — never crash the daemon thread.
+        log(f"nomod-webhook worker EXC: {e!r}")

@@ -58,7 +58,7 @@ from labels import (  # noqa: F401
     _MONTH_NUM, _parse_booking_date,
 )
 from payments import (  # noqa: F401
-    NOMOD_API_KEY, NOMOD_API_BASE, PAYMENTS_ENABLED,
+    NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
     _normalize_phone_digits, _payer_mismatch,
     nomod_list_recent_charges, nomod_create_link,
 )
@@ -90,6 +90,7 @@ from routes import (  # noqa: F401
     handle_label_eval,
     handle_lead_analyze_disregard,
     handle_learn,
+    handle_nomod_webhook,
     handle_payment_link,
     handle_pipeline_analyze,
     handle_poll_payments,
@@ -1898,6 +1899,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        # Force the response onto the socket NOW — without this, bytes
+        # sit in BufferedWriter until the handler returns. Most callers
+        # don't notice, but handle_nomod_webhook needs Nomod to see the
+        # 200 BEFORE its background processing continues. Universal +
+        # harmless for normal handlers.
+        try:
+            self.wfile.flush()
+        except (OSError, BrokenPipeError):
+            # Client disconnected mid-response — don't crash any
+            # background work that may follow this send().
+            pass
 
     def do_GET(self):
         if self.path == "/health":
@@ -1921,16 +1933,36 @@ class Handler(BaseHTTPRequestHandler):
                              "/autonomous-log",
                              "/poll-payments",
                              "/lead-analyze-disregard",
-                             "/pipeline-analyze"):
+                             "/pipeline-analyze",
+                             "/nomod-webhook"):
             self._send(404, {"error": "not found"})
             return
-        if not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN:
+        # /nomod-webhook is the ONLY endpoint without X-Bridge-Token —
+        # auth is via svix HMAC signature (Nomod can't send our internal
+        # token). The handler MUST verify the signature itself.
+        if self.path != "/nomod-webhook" and (
+                not TOKEN or self.headers.get("X-Bridge-Token") != TOKEN):
             self._send(401, {"error": "unauthorized"})
             return
+        # Read raw body. Webhook needs raw text for HMAC verification —
+        # parsing JSON would alter byte order / whitespace and break
+        # the signature check. All other endpoints parse it as JSON
+        # below.
         try:
             n = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(n) or b"{}")
+            raw_body = (self.rfile.read(n).decode("utf-8")
+                        if n > 0 else "{}")
         except Exception as e:
+            self._send(400, {"error": f"bad request: {e}"})
+            return
+        # Webhook path: dispatch BEFORE json.loads to preserve raw bytes.
+        if self.path == "/nomod-webhook":
+            handle_nomod_webhook(
+                dict(self.headers), raw_body, self._send)
+            return
+        try:
+            payload = json.loads(raw_body) if raw_body else {}
+        except json.JSONDecodeError as e:
             self._send(400, {"error": f"bad request: {e}"})
             return
         if self.path == "/save-rule":

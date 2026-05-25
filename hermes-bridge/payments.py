@@ -19,6 +19,12 @@ from util import _envflag
 
 # --- credentials + feature flag --------------------------------------
 NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
+# Webhook signing secret (svix HMAC-SHA256). Format whsec_<base64>.
+# Operator pastes the value from Nomod dashboard after creating the
+# webhook. Empty string means webhook endpoint will return 500
+# ("secret not configured") on every signed request — bridge advertises
+# the endpoint but refuses to process events.
+NOMOD_WEBHOOK_SECRET = os.environ.get("NOMOD_WEBHOOK_SECRET", "")
 NOMOD_API_BASE = os.environ.get(
     "NOMOD_API_BASE", "https://api.nomod.com/v1").rstrip("/")
 PAYMENTS_ENABLED = _envflag("PAYMENTS_ENABLED", "true")
