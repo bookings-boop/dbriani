@@ -1399,20 +1399,29 @@ def handle_draft_followup(payload, send):
         silence_hours = payload.get("silence_hours")
         if silence_window in GHOST_RECOVERY_WINDOWS:
             # Proactive engine path — anchor to the verified ghost-recovery
-            # phrasing for this exact window. Suppress upsells.
+            # phrasing for this exact window. Hard-rules directive because
+            # the prior soft directive was getting ignored: production bug
+            # 2026-05-25 showed Hermes returning balloon decor tips +
+            # jetski offers + Zenith 64 specs as "ghost-recovery" drafts.
             phrase = GHOST_RECOVERY_PHRASES[silence_window]
             shrs = (f"{silence_hours:.1f}"
                     if isinstance(silence_hours, (int, float)) else "a while")
             directive = (
-                f"This is a PROACTIVE GHOST-RECOVERY follow-up — NOT a "
-                f"fresh sale. The customer has been silent for {shrs} "
-                f"hours (window: {silence_window}). Use the verified "
-                f"ghost-recovery phrasing for THIS window from your "
-                f"system prompt — specifically use: \"{phrase}\" (you may "
-                f"light-touch personalize but keep the phrase intact). "
-                f"DO NOT pitch add-ons, upsells, perks, or new options. "
-                f"DO NOT apologize for the silence. Send ONE short "
-                f"message, max 1 sentence."
+                f"This is a ghost-recovery message only. The customer has "
+                f"been silent for {shrs} hours (window: {silence_window}). "
+                f"Use ONLY the verified ghost-recovery phrase for this "
+                f"silence window from your system prompt — specifically: "
+                f"\"{phrase}\". You MAY light-touch personalize the phrase "
+                f"itself (e.g. use their name if known) but the structure "
+                f"and intent must stay intact.\n\n"
+                f"HARD RULES — VIOLATING ANY MAKES THE DRAFT UNUSABLE:\n"
+                f"- Do NOT mention add-ons, features, upsells, perks, "
+                f"yacht specs, capacity, decor, jetski, balloon, or any "
+                f"new information about the product.\n"
+                f"- Do NOT apologize for the silence.\n"
+                f"- Do NOT pitch alternatives, dates, or pricing.\n"
+                f"- Do NOT ask multiple questions.\n"
+                f"- Send ONE short message. Max one sentence. That is all."
             )
         else:
             # Legacy fallback — generic label-aware follow-up, used by
@@ -2330,10 +2339,12 @@ def handle_followup_action(payload, send):
 
 def handle_draft_freshness(payload, send):
     """POST /draft-freshness — check if a follow-up draft has gone stale
-    (customer replied after the draft was generated). Returns
-    {ok, stale: bool, is_followup, draft_ts, last_msg_ts, customer_id,
-     draft_id, last_msg_preview, customer_name}. Fail-safe: returns
-    stale=false on any error so Send chain isn't blocked by bridge issues."""
+    (customer replied OR operator replied after the draft was generated).
+    Returns
+    {ok, stale: bool, stale_reason, is_followup, draft_ts, last_msg_ts,
+     customer_id, draft_id, last_msg_preview, customer_name}. Fail-safe:
+    returns stale=false on any error so Send chain isn't blocked by
+    bridge issues."""
     from server import _draft_get, waha_fetch_history
     did = (payload.get("draft_id") or "").strip()
     if not did:
@@ -2355,22 +2366,36 @@ def handle_draft_freshness(payload, send):
         cid = d.get("customer_phone", "")
         draft_ts = d.get("timestamp", "")
         cid_e = (cid or "").replace("'", "''")
-        # Get customer's last_customer_message_at as epoch seconds
+        # Get BOTH last_customer_message_at AND last_operator_reply_at as
+        # epoch seconds. A proactive follow-up is stale if EITHER fired
+        # after the draft was generated:
+        #   - customer messaged → the chat has moved on, this card is stale
+        #   - operator replied manually → we already responded, this card
+        #     is now an unsolicited upsell (the production bug we hit
+        #     2026-05-25: customer says "Okay", operator replies "take
+        #     your time! 😊", queued proactive card later sends as an
+        #     unsolicited Zenith 64 specs upsell).
         out, _err = _psql(
             "SELECT EXTRACT(EPOCH FROM last_customer_message_at), "
-            "to_char(last_customer_message_at, 'YYYY-MM-DD HH24:MI:SS') "
+            "to_char(last_customer_message_at, 'YYYY-MM-DD HH24:MI:SS'), "
+            "COALESCE(EXTRACT(EPOCH FROM last_operator_reply_at), 0) "
             f"FROM conversation_state WHERE customer_id = '{cid_e}'"
         )
         last_msg_epoch = 0.0
         last_msg_str = ""
+        last_op_epoch = 0.0
         for line in (out or "").strip().splitlines():
             parts = line.split("|")
-            if len(parts) >= 2:
+            if len(parts) >= 3:
                 try:
                     last_msg_epoch = float(parts[0].strip())
                 except ValueError:
                     last_msg_epoch = 0.0
                 last_msg_str = parts[1].strip()
+                try:
+                    last_op_epoch = float(parts[2].strip())
+                except ValueError:
+                    last_op_epoch = 0.0
             break
         # Parse draft.timestamp (ISO string) → epoch seconds
         from datetime import datetime as _dt
@@ -2381,8 +2406,17 @@ def handle_draft_freshness(payload, send):
                     draft_ts.replace("Z", "+00:00")).timestamp()
             except Exception:
                 draft_epoch = 0.0
-        stale = (last_msg_epoch > 0 and draft_epoch > 0
-                 and last_msg_epoch > draft_epoch)
+        # Stale if EITHER condition holds. Operator-reply check is the
+        # primary defense against unsolicited upsells when the operator
+        # manually replied before getting to the queued follow-up card.
+        stale_by_customer = (last_msg_epoch > 0 and draft_epoch > 0
+                             and last_msg_epoch > draft_epoch)
+        stale_by_op = (last_op_epoch > 0 and draft_epoch > 0
+                       and last_op_epoch > draft_epoch)
+        stale = stale_by_customer or stale_by_op
+        stale_reason = ("op_replied" if stale_by_op
+                        else ("customer_replied" if stale_by_customer
+                              else None))
         # If stale, also fetch the customer's last message body via WAHA
         # so the alert can show what was said.
         last_preview = ""
@@ -2395,12 +2429,15 @@ def handle_draft_freshness(payload, send):
                     cust_name = waha["push_name"]
         send(200, {
             "ok": True, "stale": stale, "is_followup": True,
+            "stale_reason": stale_reason,
             "draft_id": did, "customer_id": cid,
             "customer_name": cust_name,
             "draft_ts": draft_ts, "last_msg_ts": last_msg_str,
             "last_msg_preview": last_preview,
             "lag_seconds": int(last_msg_epoch - draft_epoch)
                            if (last_msg_epoch and draft_epoch) else 0,
+            "lag_seconds_op": int(last_op_epoch - draft_epoch)
+                              if (last_op_epoch and draft_epoch) else 0,
         })
     except Exception as e:
         log("draft_freshness EXC:", repr(e))

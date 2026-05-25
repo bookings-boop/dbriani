@@ -1284,6 +1284,11 @@ PIPELINE_ANALYZE_WORKERS = int(os.environ.get("PIPELINE_ANALYZE_WORKERS", "5"))
 # (follow-up engine section). Default ON; operator can flip to disable.
 FOLLOWUP_ENGINE_ENABLED = _envflag("FOLLOWUP_ENGINE_ENABLED", "true")
 FOLLOWUP_BATCH_LIMIT = int(os.environ.get("FOLLOWUP_BATCH_LIMIT", "10"))
+# Max proactive follow-ups sent BEFORE the customer responds. After
+# this many sent in a row without engagement, the engine treats the
+# customer as exhausted and skips them. Resets to 0 on the next
+# customer_message event. Set via env to tune without redeploy.
+FOLLOWUP_CAP = int(os.environ.get("FOLLOWUP_CAP", "2"))
 
 # /review report rendering caps (Telegram 4096-char limit safe).
 # (moved to review.py — re-exported at top of file)
@@ -1488,10 +1493,15 @@ def upsert_conversation_state(customer_id, event):
     if event == "customer_message":
         sql = (
             "INSERT INTO conversation_state "
-            "(customer_id, last_customer_message_at, updated_at) "
-            f"VALUES ('{cid}', now(), now()) "
+            "(customer_id, last_customer_message_at, followup_count, "
+            "updated_at) "
+            f"VALUES ('{cid}', now(), 0, now()) "
             "ON CONFLICT (customer_id) DO UPDATE "
-            "SET last_customer_message_at = now(), updated_at = now()"
+            # Reset followup_count to 0 — customer engaged, the
+            # proactive-followup cap resets for the next silence.
+            "SET last_customer_message_at = now(), "
+            "    followup_count = 0, "
+            "    updated_at = now()"
         )
     elif event == "operator_reply":
         sql = (
@@ -1505,8 +1515,9 @@ def upsert_conversation_state(customer_id, event):
     elif event == "nudge_drafted":
         sql = (
             "INSERT INTO conversation_state "
-            "(customer_id, last_nudge_drafted_at, updated_at) "
-            f"VALUES ('{cid}', now(), now()) "
+            "(customer_id, last_nudge_drafted_at, followup_count, "
+            "updated_at) "
+            f"VALUES ('{cid}', now(), 1, now()) "
             "ON CONFLICT (customer_id) DO UPDATE "
             "SET last_nudge_drafted_at = now(), "
             "    reengage_attempts = conversation_state.reengage_attempts + "
@@ -1514,6 +1525,9 @@ def upsert_conversation_state(customer_id, event):
             "            AND conversation_state.last_customer_message_at "
             "                < now() - interval '24 hours' "
             "           THEN 1 ELSE 0 END, "
+            # Increment cap counter — bounds the proactive engine to
+            # FOLLOWUP_CAP unsolicited follow-ups per silence window.
+            "    followup_count = conversation_state.followup_count + 1, "
             "    updated_at = now()"
         )
     else:
@@ -1554,7 +1568,11 @@ def scan_followup_eligibility():
         "(cs.last_operator_reply_at > cs.last_customer_message_at) AS we_replied, "
         "(cf.label_locked_until > now()) AS locked, "
         "COALESCE(cm.mode, 'approval'), "
-        "(cs.last_nudge_drafted_at > cs.last_customer_message_at) AS already_drafted "
+        "(cs.last_nudge_drafted_at > cs.last_customer_message_at) AS already_drafted, "
+        # Cap counter — proactive engine bounds itself to FOLLOWUP_CAP
+        # unsolicited follow-ups before exhausting; resets on customer
+        # message (see upsert_conversation_state).
+        "COALESCE(cs.followup_count, 0) "
         "FROM conversation_state cs "
         "LEFT JOIN customer_facts cf USING (customer_id) "
         "LEFT JOIN LATERAL ("
@@ -1567,6 +1585,7 @@ def scan_followup_eligibility():
         "       OR cs.last_operator_reply_at < cs.last_customer_message_at) "
         "  AND now() - cs.last_customer_message_at > interval '30 minutes' "
         "  AND now() - cs.last_customer_message_at < interval '7 days' "
+        "  AND COALESCE(cs.followup_count, 0) < " + str(FOLLOWUP_CAP) + " "
         "ORDER BY cs.last_customer_message_at ASC "
         "LIMIT 80"
     )
@@ -1577,7 +1596,7 @@ def scan_followup_eligibility():
     candidates = []
     for line in (out or "").strip().splitlines():
         parts = line.split("|")
-        if len(parts) < 8:
+        if len(parts) < 9:
             continue
         cid = parts[0].strip()
         if not cid:
@@ -1590,12 +1609,20 @@ def scan_followup_eligibility():
         locked = parts[5].strip().lower() == "t"
         mode = parts[6].strip()
         already_drafted = parts[7].strip().lower() == "t"
+        try:
+            followup_count = int(parts[8].strip() or "0")
+        except (ValueError, IndexError):
+            followup_count = 0
         # Skip-gates (Python-side; SQL already filtered the timing band)
         if locked:
             continue
         if mode == "autonomous":
             continue
         if already_drafted:
+            continue
+        # Defensive Python-side gate — SQL already filters, but keep this
+        # for any future code path that bypasses scan_followup_eligibility.
+        if followup_count >= FOLLOWUP_CAP:
             continue
         # Skip if a normal customer-message draft is still pending operator
         # action (Redis flag set by Send Draft to Telegram).
