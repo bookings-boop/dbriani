@@ -199,13 +199,28 @@ def _draft_save(draft):
     'superseded' so operator's Telegram queue never accumulates stale
     cards for the same customer. The workflow's Queue & Format JS does
     the same on staticData; this keeps Redis (the persistent source of
-    truth) aligned. Without this, /queue-driven callers + staticData
-    snapshots diverge and old pending entries linger forever (operator
-    bug 2026-05-26: customer 206583732662385@lid had 5 pending cards)."""
+    truth) aligned.
+
+    Canonical-cid resolution: the customer_phone in the draft may come
+    in under either @lid or @c.us — we canonicalize via merged_into so
+    the per-customer ZSET and supersede sweep operate on ONE identity.
+    Production bug 2026-05-26: Émilie had duplicate customer_facts rows
+    (137813169274972@lid + 224167731408910@lid); drafts queued under
+    cid A while Send fetched from cid B → wrong-version + double-send.
+    Without this canonicalize, the fix would not survive a single
+    multi-cid customer."""
     if not isinstance(draft, dict):
         return False, "draft must be an object"
     did = (draft.get("id") or "").strip()
-    cid = (draft.get("customer_phone") or "").strip()
+    cid_raw = (draft.get("customer_phone") or "").strip()
+    cid = canonicalize_cid(cid_raw)
+    if cid != cid_raw:
+        # Mutate the draft so downstream consumers (Send, Edit, etc.)
+        # also see the canonical cid. Otherwise WAHA-send addresses
+        # the non-canonical phone format.
+        draft["customer_phone"] = cid
+        log(f"_draft_save canonicalized cid {cid_raw!r} -> {cid!r} "
+            f"for draft {did}")
     if not did or not cid:
         return False, "id + customer_phone required"
     ts = int(time.time() * 1000)
@@ -873,9 +888,49 @@ def caps_status_text():
 # (moved to review.py — re-exported at top of file)
 
 
+def canonicalize_cid(cid):
+    """Resolve a customer_id to its canonical form via the
+    customer_facts.merged_into pointer (migration 006).
+
+    Returns the canonical cid the system should read/write under. If
+    the row has merged_into NULL, the cid IS canonical and is returned
+    unchanged. If the row doesn't exist (new customer), returns the
+    input unchanged. Follows at most 3 hops defensively — production
+    should only ever have 1-hop chains.
+
+    Fail-open: any DB hiccup returns the input cid so a transient
+    error doesn't reroute writes to '' or stale targets."""
+    if not cid:
+        return cid
+    current = cid
+    for _ in range(3):
+        cid_e = current.replace("'", "''")
+        try:
+            out, err = _psql(
+                "SELECT COALESCE(merged_into,'') FROM customer_facts "
+                f"WHERE customer_id = '{cid_e}'", timeout=5)
+        except Exception as e:
+            log(f"canonicalize_cid err for {cid!r}: {e!r}")
+            return current
+        if err:
+            return current
+        line = (out or "").strip()
+        if not line:
+            return current  # no row → input cid is its own canonical
+        target = (line.splitlines()[0] or "").strip()
+        if not target:
+            return current  # merged_into NULL → already canonical
+        current = target
+    return current
+
+
 def get_customer_facts(customer_id):
     """The customer_facts row as a dict, or None if absent / on error.
-    Degrades to None so the header logic never breaks over a DB read."""
+    Degrades to None so the header logic never breaks over a DB read.
+
+    Resolves through merged_into pointer so a read for a non-canonical
+    cid returns the canonical row's facts."""
+    customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
     sql = ("SELECT name, dates, yachts, party_size, message_count "
            f"FROM customer_facts WHERE customer_id = '{cid}'")
@@ -901,7 +956,12 @@ def get_customer_facts(customer_id):
 def upsert_customer_facts(customer_id, name, facts):
     """UPSERT a customer_facts row. INSERT -> message_count 1; ON CONFLICT ->
     message_count = existing + 1 (atomic in SQL — no read-modify-write race).
-    Returns (new_message_count, None) or (None, error)."""
+    Returns (new_message_count, None) or (None, error).
+
+    Resolves through merged_into so writes always land on the canonical
+    row — the duplicate's data path automatically heals when the next
+    message arrives under its old cid."""
+    customer_id = canonicalize_cid(customer_id)
     sql = (
         "INSERT INTO customer_facts (customer_id, name, dates, yachts, "
         "party_size, message_count, updated_at) VALUES ("
@@ -1459,7 +1519,10 @@ def compute_label(latest_message, facts):
 
 
 def get_current_label_row(customer_id):
-    """Read label state + a few denorm fields. Returns dict or None."""
+    """Read label state + a few denorm fields. Returns dict or None.
+    Resolves merged_into so a read for a non-canonical cid returns
+    the canonical row's label state."""
+    customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
     sql = (
         "SELECT label, "
@@ -1493,7 +1556,10 @@ def get_current_label_row(customer_id):
 
 def apply_label_transition(customer_id, from_label, to_label, signal,
                            evidence, message_count, created_by="system"):
-    """UPDATE customer_facts.label + INSERT customer_label_history."""
+    """UPDATE customer_facts.label + INSERT customer_label_history.
+    Resolves merged_into so the label always lands on the canonical
+    row regardless of which cid the caller used."""
+    customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
     upd = (
         f"UPDATE customer_facts SET label = {_lit(to_label)}, "
@@ -1515,7 +1581,10 @@ def upsert_conversation_state(customer_id, event):
     """Per-event timestamp updater. event ∈ {customer_message, operator_reply,
     nudge_drafted, draft_posted}. Atomic UPSERT via ON CONFLICT.
     draft_posted is Redis-only (sets the draft:posted:<id> flag the
-    sameday-interrupt check reads — no DB row needed)."""
+    sameday-interrupt check reads — no DB row needed).
+    Resolves merged_into so all timing state lands on the canonical
+    customer's row."""
+    customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
     if event == "draft_posted":
         _redis(["SET", f"draft:posted:{customer_id}", "1", "EX", "86400"])
