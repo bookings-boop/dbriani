@@ -25,6 +25,26 @@ NOMOD_API_KEY = os.environ.get("NOMOD_API_KEY", "")
 # ("secret not configured") on every signed request — bridge advertises
 # the endpoint but refuses to process events.
 NOMOD_WEBHOOK_SECRET = os.environ.get("NOMOD_WEBHOOK_SECRET", "")
+
+# Minimum payment in AED that counts as a real deposit (not a test).
+# Production bug 2026-05-26: Qurbani got a 1 AED test payment from a
+# friend (Musawi) → /poll-payments + /nomod-webhook auto-promoted him
+# to CONFIRMED → bot then treated him as a paid customer → confusion
+# when customer said "i didnt pay". Set floor: 1 AED tests log only,
+# don't promote. Real deposits start at AED 500 (10% of cheapest
+# real charter). Operator can tune via env if needed.
+CONFIRM_PROMOTION_MIN_AED = float(
+    os.environ.get("CONFIRM_PROMOTION_MIN_AED", "500"))
+
+
+def is_real_deposit(total_aed):
+    """True if total looks like a real deposit (not a test). Below the
+    threshold, payment is logged + notified but customer label is NOT
+    promoted to CONFIRMED."""
+    try:
+        return float(total_aed or 0) >= CONFIRM_PROMOTION_MIN_AED
+    except (TypeError, ValueError):
+        return False
 NOMOD_API_BASE = os.environ.get(
     "NOMOD_API_BASE", "https://api.nomod.com/v1").rstrip("/")
 PAYMENTS_ENABLED = _envflag("PAYMENTS_ENABLED", "true")

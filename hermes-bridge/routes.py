@@ -722,16 +722,28 @@ def handle_poll_payments(payload, send):
         entry["customer_name"] = customer_name
 
         if customer_id:
-            # Promote to CONFIRMED (operator's terminal-state rule).
+            # Promote to CONFIRMED only if the payment is a REAL
+            # deposit (≥ CONFIRM_PROMOTION_MIN_AED). 1 AED tests get
+            # logged + notified but don't flip the label — production
+            # bug 2026-05-26: Qurbani's friend sent a 1 AED test via
+            # the forwarded link → bot saw label=CONFIRMED → treated
+            # him as paid → trust-killing confusion.
             try:
+                from server import is_real_deposit as _is_real_deposit
                 cid_e = customer_id.replace("'", "''")
                 prev_row = row or get_current_label_row(customer_id)
                 prev_label = (prev_row or {}).get("label") or "NEW"
-                if prev_label != "CONFIRMED":
+                if not _is_real_deposit(total_f):
+                    log(f"poll-payments cid={customer_id!r} "
+                        f"BELOW deposit threshold "
+                        f"AED {total_f:.2f} — logged only, "
+                        f"label unchanged ({prev_label})")
+                elif prev_label != "CONFIRMED":
                     apply_label_transition(
                         customer_id, prev_label, "CONFIRMED",
                         "poll-payments:payment_received",
-                        f"charge {charge_id[:8]} matched_via={matched_via}",
+                        f"charge {charge_id[:8]} matched_via={matched_via} "
+                        f"total=AED{total_f:.0f}",
                         (prev_row or {}).get("message_count", 0),
                         created_by="system")
                     log(f"poll-payments cid={customer_id!r} "
@@ -3166,16 +3178,27 @@ def _process_nomod_charge_completed(raw_body, svix_id):
         # ── Promote matched customer to CONFIRMED ──
         if customer_id:
             try:
+                from server import is_real_deposit as _is_real_deposit
                 if row is None:
                     row = get_current_label_row(customer_id) or {}
                 customer_name = row.get("name") or ""
                 prev_label = row.get("label") or "NEW"
-                if prev_label != "CONFIRMED":
+                if not _is_real_deposit(total_f):
+                    # Below deposit threshold — log only, keep label.
+                    # Same policy as poll-payments path. Operator still
+                    # gets the Telegram notification so they know a
+                    # test payment landed; just no auto-confirm.
+                    log(f"nomod-webhook cid={customer_id!r} "
+                        f"BELOW deposit threshold AED "
+                        f"{total_f:.2f} — logged only, "
+                        f"label unchanged ({prev_label})")
+                elif prev_label != "CONFIRMED":
                     apply_label_transition(
                         customer_id, prev_label, "CONFIRMED",
                         f"nomod-webhook:payment_received:{matched_via}",
                         f"charge {charge_id[:8]} via webhook "
-                        f"(matched_via={matched_via}"
+                        f"(matched_via={matched_via}, "
+                        f"total=AED{total_f:.0f}"
                         + (", payer_mismatch=True" if pay_mismatch else "")
                         + ")",
                         row.get("message_count", 0),

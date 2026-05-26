@@ -59,6 +59,7 @@ from labels import (  # noqa: F401
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
+    CONFIRM_PROMOTION_MIN_AED, is_real_deposit,
     _normalize_phone_digits, _payer_mismatch,
     nomod_list_recent_charges, nomod_create_link,
 )
@@ -1760,6 +1761,17 @@ def scan_followup_eligibility():
     if not FOLLOWUP_ENGINE_ENABLED:
         return []
     # Single SELECT pulls everything we need; LATERAL pick of latest mode.
+    #
+    # Active-negotiation suppression — production bug 2026-05-26
+    # (Qurbani 15:23): the engine fired a generic morning-slot pitch
+    # 1h47m into an active payment-link negotiation, derailing the
+    # deal and confusing the customer. Two new gates:
+    #   1. Skip labels where conversation is post-quote, paused, or
+    #      terminal — WAITING_FOR_PAYMENT, CONFIRMED, PAUSED_*,
+    #      DISREGARDED. Operator handles these manually.
+    #   2. Skip if we sent a payment_link in the last 24h. Paylink
+    #      means the customer is processing a specific offer — a
+    #      generic ghost-recovery is off-topic.
     sql = (
         "SELECT cs.customer_id, "
         "COALESCE(cf.name, ''), "
@@ -1786,6 +1798,17 @@ def scan_followup_eligibility():
         "  AND now() - cs.last_customer_message_at > interval '30 minutes' "
         "  AND now() - cs.last_customer_message_at < interval '7 days' "
         "  AND COALESCE(cs.followup_count, 0) < " + str(FOLLOWUP_CAP) + " "
+        # Active-negotiation suppression — labels operator handles.
+        "  AND (cf.label IS NULL OR cf.label NOT IN ("
+        "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
+        "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
+        "       'DISREGARDED')) "
+        # Active-negotiation suppression — paylink in last 24h.
+        "  AND NOT EXISTS ("
+        "       SELECT 1 FROM autonomous_sends a "
+        "       WHERE a.customer_id = cs.customer_id "
+        "         AND a.kind = 'payment_link_sent' "
+        "         AND a.sent_at > now() - interval '24 hours') "
         "ORDER BY cs.last_customer_message_at ASC "
         "LIMIT 80"
     )
