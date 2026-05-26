@@ -1923,7 +1923,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n  entry.status = 'pending';\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : '',\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id\n} };\n"
+        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n  entry.status = 'pending';\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  // FIX 2026-05-27: include messages + draft_text so the downstream\n  // 'Sync Refine To Redis' node can POST them to /queue update,\n  // keeping Redis aligned with staticData. Without this, Send button\n  // reads stale Redis content and sends the pre-refine message.\n  messages: msgs,\n  draft_text: msgs.join('\\n\\n'),\n  notes: parsed.notes_for_zayn || (entry ? entry.notes : ''),\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : '',\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id\n} };\n"
       },
       "id": "a58240a9-95dc-42eb-bf1e-afcce3a9efa4",
       "name": "Parse Refine",
@@ -5806,6 +5806,44 @@
           "name": "Hermes Bridge"
         }
       }
+    },
+    {
+      "id": "sync-refine-redis-2026-05-27",
+      "name": "Sync Refine To Redis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4600,
+        1900
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"action\": \"update\",\n  \"draft_id\": {{ JSON.stringify($json.draft_id) }},\n  \"fields\": {\n    \"messages\": {{ JSON.stringify($json.messages) }},\n    \"draft_text\": {{ JSON.stringify($json.draft_text) }},\n    \"notes\": {{ JSON.stringify($json.notes || \"\") }},\n    \"messages_sent_count\": 0,\n    \"status\": \"pending\",\n    \"refined_at\": {{ JSON.stringify(new Date().toISOString()) }}\n  }\n}",
+        "options": {
+          "timeout": 8000
+        }
+      }
     }
   ],
   "connections": {
@@ -6495,7 +6533,7 @@
       "main": [
         [
           {
-            "node": "Edit Telegram (Refine)",
+            "node": "Sync Refine To Redis",
             "type": "main",
             "index": 0
           }
@@ -7729,6 +7767,17 @@
         [
           {
             "node": "Apply Improvement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Refine To Redis": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (Refine)",
             "type": "main",
             "index": 0
           }
