@@ -208,7 +208,12 @@ def _draft_save(draft):
     (137813169274972@lid + 224167731408910@lid); drafts queued under
     cid A while Send fetched from cid B → wrong-version + double-send.
     Without this canonicalize, the fix would not survive a single
-    multi-cid customer."""
+    multi-cid customer.
+
+    Instrumentation: log every save with id+cid+status+msg_count so
+    journalctl alone is sufficient to diagnose race conditions
+    (double-send, edit-not-applied, draft-expired) post-mortem
+    without needing n8n execution_data retention."""
     if not isinstance(draft, dict):
         return False, "draft must be an object"
     did = (draft.get("id") or "").strip()
@@ -221,6 +226,13 @@ def _draft_save(draft):
         draft["customer_phone"] = cid
         log(f"_draft_save canonicalized cid {cid_raw!r} -> {cid!r} "
             f"for draft {did}")
+    msgs = draft.get("messages") or []
+    msg_count = len(msgs) if isinstance(msgs, list) else 0
+    preview = ""
+    if msgs and isinstance(msgs, list) and msgs[0]:
+        preview = str(msgs[0])[:60].replace("\n", " / ")
+    log(f"DRAFT_SAVE id={did} cid={cid} status={draft.get('status','?')} "
+        f"msgs={msg_count} preview={preview!r}")
     if not did or not cid:
         return False, "id + customer_phone required"
     ts = int(time.time() * 1000)
@@ -276,7 +288,12 @@ def _draft_get(did):
 
 def _draft_update(did, fields):
     """Read-modify-write. Returns (draft|None, err|None).
-    Single-threaded Redis makes this atomic-enough for our load."""
+    Single-threaded Redis makes this atomic-enough for our load.
+
+    Instrumentation: every status transition is logged with prior +
+    new status. status→sent is the critical one — log line gives
+    operator + post-mortem a deterministic anchor to correlate with
+    WAHA send events when diagnosing double-sends or edit-races."""
     if not did:
         return None, "draft_id required"
     d, err = _draft_get(did)
@@ -284,6 +301,8 @@ def _draft_update(did, fields):
         return None, err
     if not d:
         return None, "draft not found"
+    prior_status = d.get("status", "?")
+    cid = d.get("customer_phone", "?")
     d.update(fields or {})
     # status side-effect on the active set
     if "status" in (fields or {}):
@@ -295,6 +314,19 @@ def _draft_update(did, fields):
                      "EX", str(QUEUE_TTL)])
     if err:
         return None, err
+    # Log transitions — focus on status changes (signal-rich) and
+    # mark messages/text edits (the refine path overwrites these
+    # and races have caused production bugs).
+    field_keys = list((fields or {}).keys())
+    new_status = d.get("status", "?")
+    if "status" in (fields or {}) and new_status != prior_status:
+        log(f"DRAFT_UPDATE id={did} cid={cid} status={prior_status}"
+            f"->{new_status} fields={field_keys}")
+    elif "messages" in (fields or {}) or "draft_text" in (fields or {}):
+        msgs = d.get("messages") or []
+        msg_count = len(msgs) if isinstance(msgs, list) else 0
+        log(f"DRAFT_UPDATE id={did} cid={cid} CONTENT_CHANGED "
+            f"msgs={msg_count} fields={field_keys}")
     return d, None
 
 
