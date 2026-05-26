@@ -28,6 +28,9 @@ import subprocess  # noqa: F401 — used by handler bodies via late deps
 import time
 import urllib.error  # noqa: F401
 import urllib.request  # noqa: F401
+import uuid  # noqa: F401 — used by handle_* bodies (Phase G regression
+            # fix: was at server.py module top before the refactor;
+            # routes.py inherited the use sites but not the import)
 
 from db import _psql, _lit, _redis  # noqa: F401
 from util import log  # noqa: F401

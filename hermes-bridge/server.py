@@ -192,7 +192,16 @@ def _byc_key(cid):
 
 def _draft_save(draft):
     """Write draft JSON, set TTL, update active set + per-customer ZSET.
-    Returns (ok, err)."""
+    Returns (ok, err).
+
+    Auto-supersede: when saving a NEW pending draft for a customer who
+    already has prior pending drafts in Redis, flip those priors to
+    'superseded' so operator's Telegram queue never accumulates stale
+    cards for the same customer. The workflow's Queue & Format JS does
+    the same on staticData; this keeps Redis (the persistent source of
+    truth) aligned. Without this, /queue-driven callers + staticData
+    snapshots diverge and old pending entries linger forever (operator
+    bug 2026-05-26: customer 206583732662385@lid had 5 pending cards)."""
     if not isinstance(draft, dict):
         return False, "draft must be an object"
     did = (draft.get("id") or "").strip()
@@ -206,6 +215,26 @@ def _draft_save(draft):
         return False, err
     status = (draft.get("status") or "pending")
     if status == "pending":
+        # Auto-supersede prior pendings for the same customer.
+        try:
+            existing_out, _xe = _redis(
+                ["ZRANGE", _byc_key(cid), "0", "-1"])
+            for other_id in (existing_out or "").splitlines():
+                other_id = other_id.strip()
+                if not other_id or other_id == did:
+                    continue
+                other, _ge = _draft_get(other_id)
+                if other and other.get("status") == "pending":
+                    other["status"] = "superseded"
+                    _redis(["SET", _draft_key(other_id),
+                            json.dumps(other),
+                            "EX", str(QUEUE_TTL)])
+                    _redis(["SREM", DRAFTS_ACTIVE, other_id])
+                    log(f"_draft_save auto-superseded prior pending "
+                        f"{other_id} for cid={cid}")
+        except Exception as e:
+            # Defensive: never block the new save on a cleanup failure.
+            log(f"_draft_save supersede sweep err: {e!r}")
         _redis(["SADD", DRAFTS_ACTIVE, did])
     else:
         _redis(["SREM", DRAFTS_ACTIVE, did])
