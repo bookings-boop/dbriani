@@ -139,10 +139,75 @@ def _merge_facts(cached, extracted):
 
 # --- /review ranking + render -------------------------------------
 
+# High-value yacht class — 100+ ft, premium tier. Bookings on these
+# yachts represent significantly higher revenue per charter, so they
+# get a sorting bonus regardless of label (operator: "+972 54-209-0578
+# with AK Royalty 136 should be on top").
+LARGE_YACHTS = frozenset({
+    "ak royalty", "mila", "cante", "luna", "notorious", "sapphire",
+    "athena", "skyfall", "tatti", "odysea", "royal mirage", "asya",
+    "finesse", "carina", "haigan",
+})
+
+
+def _yacht_size_bonus(yachts_str):
+    """Return +200 if any yacht in the comma-separated string is in
+    LARGE_YACHTS (100+ ft tier), else 0. Case-insensitive substring
+    match — yacht names in customer_facts vary in formatting."""
+    y = (yachts_str or "").lower()
+    if not y:
+        return 0
+    return 200 if any(name in y for name in LARGE_YACHTS) else 0
+
+
+def _booking_urgency_bonus(dates_str):
+    """Return urgency bonus by booking-date proximity. Operator's #1
+    sorting concern: bookings happening NOW must surface above bookings
+    months out, regardless of label.
+
+      today / tomorrow → +600  (drop-everything)
+      within 3 days    → +400
+      within 7 days    → +200
+      else             → 0
+
+    Past dates return 0 — _label_eval already demotes them to COLD via
+    the date_passed signal."""
+    d = _parse_booking_date(dates_str)
+    if not d:
+        return 0
+    import datetime as _dt
+    today = _dt.date.today()
+    days_until = (d - today).days
+    if days_until < 0:
+        return 0  # past date — already handled by label demotion
+    if days_until <= 1:
+        return 600
+    if days_until <= 3:
+        return 400
+    if days_until <= 7:
+        return 200
+    return 0
+
+
+# Re-export from labels (already imported via server's re-export chain
+# but be explicit here so score_lead is self-contained).
+from labels import _parse_booking_date  # noqa: E402
+
+
 def score_lead(row, now_dt):
     """Compute priority score per docs/pipeline-review-plan.md §2e step 3.
     Pure function; deterministic. row is the dict shape from _read_lead_summary.
-    Negative scores → PAUSED/snoozed tail."""
+    Negative scores → PAUSED/snoozed tail.
+
+    Sorting layers (highest priority first):
+      1. CONFIRMED terminal short-circuit (5000)
+      2. label base (NEEDS_ATTENTION 1000, HOT 800, etc.) — except
+         WAITING_FOR_PAYMENT which is 4000 base + bonuses
+      3. urgency_by_booking_date: today/tomorrow +600, ≤3d +400, ≤7d +200
+      4. yacht_size_bonus: large yacht (100+ ft) +200
+      5. urgency_by_silence (we_owe_reply, HOT silent >2h, same-day, etc.)
+      6. importance_score from Hermes (0-90 within tier)
+    """
     score = 0
     label = row.get("label") or "NEW"
     # DISREGARDED is terminal-closed — score deeply negative so they fall
@@ -155,12 +220,14 @@ def score_lead(row, now_dt):
     # paused tail. They render in their own ✅ section.
     if label == "CONFIRMED":
         return 5000
-    # WAITING_FOR_PAYMENT is high-priority: link sent, expecting payment soon.
-    # Above HOT (which is 800) so it surfaces at the top of /review with the
-    # operator-action signal 'check if payment arrived / nudge customer'.
+    # WAITING_FOR_PAYMENT base — high but no longer short-circuit, so
+    # urgency + yacht-size bonuses can stack. A WAITING_FOR_PAYMENT
+    # booking tomorrow (+600) for a large yacht (+200) reaches 4800 —
+    # second only to CONFIRMED. Operator: "+44 7547 600306
+    # WAITING_FOR_PAYMENT for booking tomorrow should be top".
     if label == "WAITING_FOR_PAYMENT":
-        return 4000
-    if label == "NEEDS_ATTENTION":
+        score += 4000
+    elif label == "NEEDS_ATTENTION":
         score += 1000
     elif label == "HOT":
         score += 800
@@ -182,6 +249,15 @@ def score_lead(row, now_dt):
         score -= 10000
     if row.get("label_locked_active"):
         score -= 500
+
+    # Booking-date urgency — applies to ALL active labels including
+    # WAITING_FOR_PAYMENT. A tomorrow-booking outranks a months-out
+    # booking regardless of label-tier base.
+    score += _booking_urgency_bonus(row.get("dates") or "")
+
+    # Yacht-size bonus — large premium yacht (100+ ft tier) gets +200
+    # so high-value bookings surface above identical-label peers.
+    score += _yacht_size_bonus(row.get("yachts") or "")
 
     # Hermes importance — additive bonus within the label tier. Cap at +90
     # so a HOT (base 800) with importance=100 reaches 890 — still well below
