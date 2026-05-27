@@ -237,11 +237,71 @@ def _draft_save(draft):
     if not did or not cid:
         return False, "id + customer_phone required"
     ts = int(time.time() * 1000)
+    status = (draft.get("status") or "pending")
+    # Stale-context detection — production bug 2026-05-27: when a
+    # new draft is built shortly after a prior draft was sent OR
+    # while a prior pending draft exists, the new draft's
+    # conversation_history may not include those prior Dubriani
+    # messages (WAHA sync latency for sent / Build Prompt timing
+    # for still-pending). The new draft then looks stale to the
+    # operator (repeats or contradicts the prior message).
+    # Auto-enrich conversation_history with the missing bodies and
+    # flag stale_risk so downstream (refine, /review, Telegram
+    # card) can surface the situation. Done BEFORE the Redis SET
+    # so the persisted draft reflects the enrichment. Done BEFORE
+    # the supersede sweep so we can still see prior pending drafts
+    # in their original state.
+    if status == "pending":
+        try:
+            history_str = draft.get("conversation_history") or ""
+            cutoff_ms = ts - 5 * 60 * 1000  # 5 min lookback
+            existing_out, _xe = _redis(
+                ["ZRANGEBYSCORE", _byc_key(cid),
+                 str(cutoff_ms), str(ts)])
+            missing = []
+            for other_id in (existing_out or "").splitlines():
+                other_id = other_id.strip()
+                if not other_id or other_id == did:
+                    continue
+                other, _ge = _draft_get(other_id)
+                if not other:
+                    continue
+                o_status = other.get("status", "")
+                if o_status not in ("pending", "sent"):
+                    continue
+                o_msgs = other.get("messages") or []
+                o_body = (o_msgs[0] if o_msgs else "") \
+                    or other.get("draft_text", "")
+                o_body = (o_body or "").strip()
+                if not o_body:
+                    continue
+                # 40-char fingerprint — refine may have edited the
+                # tail but the head stays.
+                fp = o_body[:40]
+                if fp and fp not in history_str:
+                    missing.append((other_id, o_status, o_body))
+            if missing:
+                extras = []
+                for (oid, ostat, obody) in missing:
+                    tag = ("just sent — may not yet show in WAHA"
+                           if ostat == "sent"
+                           else "pending — operator hasn't approved")
+                    extras.append(f"\nDubriani ({tag}): {obody}")
+                draft["conversation_history"] = (
+                    history_str + "".join(extras))
+                draft["stale_risk"] = True
+                draft["stale_risk_drafts"] = [
+                    oid for (oid, _, _) in missing]
+                log(f"DRAFT_SAVE STALE_RISK id={did} cid={cid} "
+                    f"missing_from_history="
+                    f"{[oid for (oid,_,_) in missing]}")
+        except Exception as e:
+            # Never block save on enrichment failure.
+            log(f"_draft_save stale-detect err: {e!r}")
     _, err = _redis(["SET", _draft_key(did), json.dumps(draft),
                      "EX", str(QUEUE_TTL)])
     if err:
         return False, err
-    status = (draft.get("status") or "pending")
     if status == "pending":
         # Auto-supersede prior pendings for the same customer.
         try:
@@ -304,24 +364,35 @@ def _draft_update(did, fields):
         return None, "draft not found"
     prior_status = d.get("status", "?")
     cid = d.get("customer_phone", "?")
-    # Revival guard — production bug 2026-05-27: operator's Refine
-    # on a stale card writes status=pending onto a draft that was
-    # auto-superseded seconds earlier (because a newer draft came
-    # in), so two drafts end up active for the same customer →
-    # double-send. A draft that's been superseded, sent, or
-    # disregarded is CLOSED — it MUST NOT flip back to pending.
-    # Refuse the transition and surface a clear error so the n8n
-    # flow fails loudly instead of silently corrupting state.
+    # Revival guard + transparent redirect — production bug
+    # 2026-05-27: operator's Refine on a stale card was rejected,
+    # n8n then fell through to unknown-command handler ("Nothing
+    # sent"). New behavior: when the rejected transition is
+    # superseded->pending, find the newest pending draft for the
+    # same customer and apply the refine to THAT draft instead.
+    # Operator's edit lands on the right card with no error
+    # surface. Falls back to clear error only if no live pending
+    # draft exists.
     if "status" in (fields or {}) \
             and (fields["status"] or "") == "pending" \
             and prior_status in ("superseded", "sent", "disregarded"):
+        newer, _ler = _draft_latest_for_customer(cid, "pending")
+        newer_did = (newer or {}).get("id") if newer else None
+        if newer_did and newer_did != did:
+            log(f"DRAFT_UPDATE REDIRECT cid={cid} "
+                f"{did} ({prior_status}) -> {newer_did} (pending) "
+                f"fields={list((fields or {}).keys())}")
+            # Recurse onto the live draft. Safe because newer_did is
+            # in 'pending' state — the guard above won't re-fire.
+            return _draft_update(newer_did, fields)
         log(f"DRAFT_UPDATE REJECTED id={did} cid={cid} "
             f"refusing revival {prior_status}->pending "
+            f"(no newer pending draft for cid) "
             f"fields={list((fields or {}).keys())}")
         return None, (
-            f"draft is {prior_status}; cannot revive. "
-            f"A newer draft has superseded this one — "
-            f"refine the active draft instead.")
+            f"draft is {prior_status} and no newer pending draft "
+            f"exists for this customer. Refine cannot be applied — "
+            f"send a fresh message or use /draft to regenerate.")
     d.update(fields or {})
     # status side-effect on the active set
     if "status" in (fields or {}):
