@@ -809,22 +809,58 @@ def behavioral_context(customer_id):
         notes = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
     # Pre-formatted block for drop-in at the end of Build Prompt's system
     # prompt. Empty string when no context exists — safe to concatenate.
+    #
+    # Framing matters — production bug 2026-05-27 (operator complaint
+    # "rules don't work properly"): previously this block was titled
+    # "## Behavioral context (live — operator feedback)" which Hermes
+    # treated as informational context. Result: ignored. New framing
+    # is explicitly authoritative — rules are mandates that OVERRIDE
+    # earlier prompt guidance when in conflict, and each violation
+    # is shown to be operator-rejection-worthy.
     blocks = []
     if glb:
-        blocks.append("### Global rules (always apply)")
-        blocks.extend(["- " + r for r in glb])
+        blocks.append("### 🚨 OPERATOR-FEEDBACK RULES — MUST FOLLOW")
+        blocks.append("Every rule below is a CORRECTION the operator "
+                      "made to a past draft. If your new draft "
+                      "violates any of them, the operator will REJECT "
+                      "the draft and re-type the same feedback again. "
+                      "Apply ALL of them, exactly as written.")
+        blocks.append("")
+        # Number them for unambiguous reference.
+        for i, r in enumerate(glb, 1):
+            blocks.append(f"{i}. {r}")
     if sc:
         if blocks:
             blocks.append("")
-        blocks.append("### Scenario rules")
-        blocks.extend(["- [%s] %s" % (s["scenario"], s["rule"]) for s in sc])
+        blocks.append("### SCENARIO RULES (apply when scenario matches)")
+        for s in sc:
+            blocks.append("- [%s] %s" % (s["scenario"], s["rule"]))
     if notes:
         if blocks:
             blocks.append("")
-        blocks.append("### Notes for THIS customer")
-        blocks.extend(["- " + n for n in notes])
-    formatted = ("## Behavioral context (live — operator feedback)\n"
-                 + "\n".join(blocks)) if blocks else ""
+        blocks.append("### 📌 NOTES FOR THIS SPECIFIC CUSTOMER")
+        blocks.append("These notes are about THIS customer only — "
+                      "reference them when drafting.")
+        for n in notes:
+            blocks.append("- " + n)
+    if blocks:
+        bar = "=" * 60
+        header_lines = [
+            bar,
+            "## ⚠️ MANDATORY RULES — APPLY BEFORE ANY OTHER GUIDANCE",
+            bar,
+            "",
+            "The following rules come from the operator correcting "
+            "your past drafts. They OVERRIDE every other piece of "
+            "guidance above when in conflict. Failure to follow them "
+            "= the operator rejects your draft and retypes the same "
+            "feedback. Re-read these rules every single time before "
+            "composing.",
+            "",
+        ]
+        formatted = "\n".join(header_lines) + "\n".join(blocks)
+    else:
+        formatted = ""
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
 
@@ -877,15 +913,34 @@ def fetch_behavior_rules(customer_id):
 
 
 def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
-    """INSERT a behavior_rule, INACTIVE by default — captured rules require
-    operator approval (active=true) before they shape drafts. Returns
-    (rule_id, None) or (None, error)."""
+    """INSERT a behavior_rule. Active flag depends on origin:
+      - created_via='edit_feedback'  → active=TRUE (operator's draft
+        edit is their primary feedback mechanism; they expect the
+        next draft to follow the rule immediately).
+      - any other source             → active=FALSE (pending approval
+        via /rules — same as before, for rules captured by Hermes
+        learning loops where operator hasn't seen them yet).
+
+    Production bug 2026-05-27 (operator complaint "rules don't work
+    properly"): 49 rules were saved over 48h via edit_feedback,
+    every single one stuck at active=false because the operator
+    never knew about the approval step. Result: feedback loop
+    silently broken, operator kept retyping the same corrections.
+
+    Cap-protection: edit_feedback rules still go through
+    feedback_apply_cap at the caller — old rules get deactivated
+    when FEEDBACK_MAX_GLOBAL is exceeded, so auto-activation
+    doesn't unbounded-grow the rule set.
+
+    Returns (rule_id, None) or (None, error)."""
+    auto_active = (created_via == "edit_feedback")
     sql = (
         "INSERT INTO behavior_rules "
         "(rule_text, scope, scope_value, created_via, reasoning, active) VALUES ("
         + ", ".join([_lit(rule_text), _lit(scope), _lit(scope_value),
                      _lit(created_via), _lit(reasoning)])
-        + ", false) RETURNING id"
+        + (", true" if auto_active else ", false")
+        + ") RETURNING id"
     )
     try:
         out, err = _psql(sql)

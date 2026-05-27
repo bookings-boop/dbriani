@@ -367,7 +367,7 @@ def handle_customer_facts(payload, send):
             addendum = _build_behavioral_addendum(cid)
             send(200, {"ok": True, "extracted": False,
                              "message_count": mc,
-                             "customer_header": hdr + addendum,
+                             "customer_header": hdr,
                              "behavioral_addendum": addendum})
             return
         do_extract = (cached is None) or _facts_extract_gate(msg)
@@ -404,7 +404,7 @@ def handle_customer_facts(payload, send):
             f"behavioral_rules_attached={'yes' if addendum else 'no'}")
         send(200, {"ok": True, "extracted": bool(do_extract),
                          "message_count": mc,
-                         "customer_header": hdr + addendum,
+                         "customer_header": hdr,
                          "behavioral_addendum": addendum})
     except Exception as e:
         log("customer_facts ERROR:", repr(e))
@@ -423,7 +423,7 @@ def handle_customer_facts(payload, send):
         addendum = _build_behavioral_addendum(cid)
         send(200, {"ok": True, "extracted": False, "degraded": True,
                          "message_count": mc,
-                         "customer_header": hdr + addendum,
+                         "customer_header": hdr,
                          "behavioral_addendum": addendum})
 
 # (moved to routes.py — handle_<name>(payload, self._send))
