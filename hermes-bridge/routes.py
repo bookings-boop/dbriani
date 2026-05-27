@@ -1577,6 +1577,7 @@ def handle_pipeline_analyze(payload, send):
     from server import (
         PIPELINE_ANALYZE_CAP,
         PIPELINE_ANALYZE_WORKERS,
+        _has_recent_payment_link_sent,
         _is_uae_working_hours,
         _name_fallback,
         get_current_label_row,
@@ -1649,6 +1650,33 @@ def handle_pipeline_analyze(payload, send):
                 reasoning_ = (v_.get("reasoning") or "").strip()
                 suggested_ = (v_.get("suggested_action") or "").strip()
                 verdict_ = v_.get("verdict")
+                # Active-paylink override — production bug 2026-05-27:
+                # operator reported Hermes recommending "nudge"/"follow
+                # up" for customers we just sent a payment link to,
+                # which is the opposite of useful. If we sent a paylink
+                # in the last 24h, REPLACE any nudge-style suggestion
+                # with a wait directive. The customer is processing the
+                # link; pinging them would push them away.
+                if _has_recent_payment_link_sent(cid, hours=24):
+                    sa_low = suggested_.lower()
+                    if any(k in sa_low for k in (
+                            "nudge", "follow up", "follow-up",
+                            "follow-through", "check in", "check-in",
+                            "ghost", "ping", "remind", "re-engage",
+                            "reach out", "send a message",
+                            "send message", "drop a message")):
+                        log(f"pipeline-analyze cid={cid} OVERRIDE "
+                            f"suggested_action (paylink <24h): "
+                            f"was={suggested_!r}")
+                        suggested_ = (
+                            "WAIT — paylink sent <24h ago. "
+                            "Don't nudge; let the customer process "
+                            "the link. Operator will see the "
+                            "payment land via webhook.")
+                        reasoning_ = (
+                            reasoning_ +
+                            " [Override: recent paylink, no nudge.]"
+                        ).strip()
                 _psql(
                     "UPDATE customer_facts SET "
                     f"importance_score = {score_}, "

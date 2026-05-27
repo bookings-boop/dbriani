@@ -304,6 +304,24 @@ def _draft_update(did, fields):
         return None, "draft not found"
     prior_status = d.get("status", "?")
     cid = d.get("customer_phone", "?")
+    # Revival guard — production bug 2026-05-27: operator's Refine
+    # on a stale card writes status=pending onto a draft that was
+    # auto-superseded seconds earlier (because a newer draft came
+    # in), so two drafts end up active for the same customer →
+    # double-send. A draft that's been superseded, sent, or
+    # disregarded is CLOSED — it MUST NOT flip back to pending.
+    # Refuse the transition and surface a clear error so the n8n
+    # flow fails loudly instead of silently corrupting state.
+    if "status" in (fields or {}) \
+            and (fields["status"] or "") == "pending" \
+            and prior_status in ("superseded", "sent", "disregarded"):
+        log(f"DRAFT_UPDATE REJECTED id={did} cid={cid} "
+            f"refusing revival {prior_status}->pending "
+            f"fields={list((fields or {}).keys())}")
+        return None, (
+            f"draft is {prior_status}; cannot revive. "
+            f"A newer draft has superseded this one — "
+            f"refine the active draft instead.")
     d.update(fields or {})
     # status side-effect on the active set
     if "status" in (fields or {}):
