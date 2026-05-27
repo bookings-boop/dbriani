@@ -1252,13 +1252,21 @@ def handle_review(payload, send):
                          "inline_keyboards": []})
 
 def handle_info(payload, send):
-    """POST /info — operator-readable single-lead summary. Returns
-    markdown text shaped for human reading (no raw signal names, no
-    internal IDs unless useful). Fail-open, always 200."""
+    """POST /info — operator-readable single-lead DOSSIER. Returns the
+    most detailed customer view we can construct without sending
+    WhatsApp messages. Expanded 2026-05-27 from a thin "last 5
+    customer messages" view to a full dossier (status, request,
+    Hermes score+reasoning, recent quotes, paylinks, drafts,
+    behavior rules, full timeline). Fail-open, always 200.
+
+    Output is multi-block; if total exceeds Telegram's 4096-char
+    limit, response also includes `telegram_chunks` (array of strings)
+    so n8n can post sequential messages."""
     from server import (
         _fmt_dur,
         _humanize_signal,
         _name_fallback,
+        behavioral_context,
         get_current_label_row,
         waha_fetch_history,
     )
@@ -1382,46 +1390,216 @@ def handle_info(payload, send):
         if last_op_dt:
             lines.append(f"   ↳ Last operator reply: {last_op_dt}")
 
-        # Last 5 customer messages from WAHA — gives operator the actual
-        # quotes so they can decide quickly without opening WhatsApp.
+        # ━━━ Pipeline-analyze score + Hermes reasoning + suggested action
+        out, _err = _psql(
+            "SELECT COALESCE(importance_score,0), "
+            "COALESCE(importance_reasoning,''), "
+            "COALESCE(suggested_action,''), "
+            "COALESCE(to_char(importance_analyzed_at,"
+            "'YYYY-MM-DD HH24:MI'),'') "
+            "FROM customer_facts "
+            f"WHERE customer_id = '{cid_e}'"
+        )
+        importance_score = 0
+        importance_reasoning = ""
+        suggested_action = ""
+        importance_at = ""
+        for ln in (out or "").strip().splitlines():
+            parts = ln.split("|")
+            if len(parts) >= 4:
+                try:
+                    importance_score = int(parts[0].strip())
+                except (ValueError, IndexError):
+                    importance_score = 0
+                importance_reasoning = parts[1].strip()
+                suggested_action = parts[2].strip()
+                importance_at = parts[3].strip()
+                break
+        if importance_score or importance_reasoning or suggested_action:
+            lines.append("")
+            lines.append(f"   🧠 *Hermes lead-analysis*"
+                         f" (score {importance_score}/100)"
+                         + (f" _as of {importance_at}_" if importance_at
+                            else ""))
+            if importance_reasoning:
+                lines.append(f"      _Reasoning:_ {importance_reasoning}")
+            if suggested_action:
+                lines.append(f"      _Suggested:_ {suggested_action}")
+
+        # ━━━ Recent paylinks (autonomous_sends, last 14d)
+        out, _err = _psql(
+            "SELECT to_char(sent_at,'YYYY-MM-DD HH24:MI'), "
+            "COALESCE(detail,'') "
+            "FROM autonomous_sends "
+            f"WHERE customer_id = '{cid_e}' "
+            "AND kind = 'payment_link_sent' "
+            "AND sent_at > now() - interval '14 days' "
+            "ORDER BY sent_at DESC LIMIT 5"
+        )
+        paylinks = []
+        for ln in (out or "").strip().splitlines():
+            parts = ln.split("|", 1)
+            if len(parts) >= 2:
+                paylinks.append((parts[0].strip(), parts[1].strip()))
+        if paylinks:
+            lines.append("")
+            lines.append("   💳 *Payment links sent:*")
+            for dt, detail in paylinks:
+                # Extract just AED amount if present, drop link tokens
+                shown = detail[:120] if detail else ""
+                lines.append(f"      • _{dt}_ — {shown}")
+
+        # ━━━ Recent drafts (Redis bycustomer ZSET — last 5)
         try:
-            waha = waha_fetch_history(cid, limit=20)
+            byc_out, _e = _redis(["ZREVRANGE",
+                                  f"drafts:bycustomer:{cid}",
+                                  "0", "4"])
+            draft_ids = [x.strip() for x in (byc_out or "").splitlines()
+                         if x.strip()]
+            draft_lines = []
+            for did in draft_ids:
+                d, _ = _redis(["GET", f"draft:{did}"])
+                if not d:
+                    continue
+                try:
+                    dj = json.loads(d)
+                except Exception:
+                    continue
+                status_ = dj.get("status", "?")
+                msgs_ = dj.get("messages") or []
+                body_ = (msgs_[0] if msgs_ else
+                         dj.get("draft_text", ""))[:120]
+                # ts portion of draft_id is ms-since-epoch
+                try:
+                    ts_ms = int(did.split("_", 1)[0])
+                    import datetime as _dt
+                    when = _dt.datetime.fromtimestamp(
+                        ts_ms / 1000).strftime("%H:%M")
+                except (ValueError, AttributeError):
+                    when = "?"
+                stale = "⚠️" if dj.get("stale_risk") else ""
+                draft_lines.append(
+                    f"      • [{status_}] _{when}_ {stale} "
+                    f"\"{body_}\"")
+            if draft_lines:
+                lines.append("")
+                lines.append("   📝 *Recent drafts:*")
+                lines.extend(draft_lines)
+        except Exception as _de:
+            log("info drafts err:", repr(_de))
+
+        # ━━━ Full conversation tail — last 10 messages, BOTH sides
+        # (operator wants to see Dubriani's own replies, not just
+        # customer messages)
+        try:
+            waha = waha_fetch_history(cid, limit=30)
             hist_lines = (waha.get("history") or "").split("\n")
-            cust_lines = [ln for ln in hist_lines
-                          if ln.startswith("Customer ")]
-            if cust_lines:
-                lines.append("\n   💬 *Last customer messages:*")
-                for ln in cust_lines[-5:]:
-                    # Normalize to: "      • (1h ago) "text"
-                    # Source format: 'Customer (1h ago): "body"'
+            tail = [ln for ln in hist_lines if ln.strip()][-10:]
+            if tail:
+                lines.append("")
+                lines.append("   💬 *Last 10 messages (both sides):*")
+                for ln in tail:
                     try:
-                        # WAHA format: 'Customer (1h ago): "body"'.
-                        # ts already includes "ago", don't append it.
-                        ts = ln.split("(", 1)[1].split(")", 1)[0]
-                        body = ln.split('"', 1)[1].rstrip('"')
-                        lines.append(f"      • _({ts})_ \"{body[:200]}\"")
+                        if ln.startswith("Customer ") \
+                                or ln.startswith("Dubriani "):
+                            who = "👤" if ln.startswith("Customer ") \
+                                else "🛥️"
+                            ts = ln.split("(", 1)[1].split(")", 1)[0]
+                            body = ln.split('"', 1)[1].rstrip('"')
+                            lines.append(
+                                f"      {who} _({ts})_ "
+                                f"\"{body[:200]}\"")
+                        else:
+                            lines.append(f"      • {ln[:240]}")
                     except (IndexError, ValueError):
                         lines.append(f"      • {ln[:240]}")
         except Exception as _e:
             log("info WAHA history err:", repr(_e))
 
-        # notes
+        # notes (per-customer)
         if notes:
-            lines.append("\n   📝 *Notes:*")
+            lines.append("")
+            lines.append("   📌 *Per-customer notes:*")
             for note_text, dt in notes:
                 lines.append(f"      • {note_text}  _({dt})_")
 
-        # human-readable timeline
-        if timeline:
-            lines.append("\n   📅 *Recent activity:*")
-            for sig, ev, dt, by in timeline:
-                pretty = _humanize_signal(sig, ev, by)
-                if pretty:
-                    lines.append(f"      • {pretty}  _({dt})_")
+        # ━━━ Behavior rules — global active + this customer's notes
+        try:
+            ctx = behavioral_context(cid) or {}
+            gl = ctx.get("global") or []
+            sc = ctx.get("scenario") or []
+            if gl or sc:
+                lines.append("")
+                lines.append(f"   📐 *Active behavior rules: "
+                             f"{len(gl)} global, {len(sc)} scenario*"
+                             f" (in Hermes prompt)")
+                # Top 5 global rules shown (rest in Hermes prompt only)
+                for r in gl[:5]:
+                    lines.append(f"      • {r[:140]}")
+                if len(gl) > 5:
+                    lines.append(f"      • _+ {len(gl)-5} more rules_")
+        except Exception as _re:
+            log("info behavioral err:", repr(_re))
+
+        # full timeline (expanded from 5 to 10)
+        out, _err = _psql(
+            "SELECT signal, COALESCE(evidence,''), "
+            "to_char(created_at,'YYYY-MM-DD HH24:MI'), "
+            "COALESCE(created_by,'system') "
+            "FROM customer_label_history "
+            f"WHERE customer_id = '{cid_e}' "
+            "ORDER BY id DESC LIMIT 10"
+        )
+        full_timeline = []
+        for line in (out or "").strip().splitlines():
+            parts = line.split("|")
+            if len(parts) >= 4:
+                full_timeline.append((parts[0].strip(), parts[1].strip(),
+                                      parts[2].strip(), parts[3].strip()))
+        if full_timeline:
+            lines.append("")
+            lines.append("   📅 *Label history (last 10):*")
+            for sig, ev, dt, by in full_timeline:
+                pretty = _humanize_signal(sig, ev, by) or sig
+                lines.append(f"      • {pretty}  _({dt})_")
+
+        # ━━━ Identity layer — show merged_into if this is a non-canonical
+        # cid (e.g., operator landed on @c.us but the canonical is @lid)
+        out, _err = _psql(
+            "SELECT merged_into FROM customer_facts "
+            f"WHERE customer_id = '{cid_e}' AND merged_into IS NOT NULL"
+        )
+        merged_into = (out or "").strip().splitlines()
+        if merged_into and merged_into[0].strip():
+            lines.append("")
+            lines.append(f"   🔗 _This customer was merged into_ "
+                         f"`{merged_into[0].strip()}`")
+
+        # Single payload — split into <4000 char chunks if too long for
+        # one Telegram message (Telegram limit is 4096, leave headroom).
+        full_text = "\n".join(lines)
+        chunks = []
+        if len(full_text) <= 4000:
+            chunks = [full_text]
+        else:
+            buf = []
+            cur_len = 0
+            for line in lines:
+                add = len(line) + 1
+                if cur_len + add > 3800 and buf:
+                    chunks.append("\n".join(buf))
+                    buf = [line]
+                    cur_len = add
+                else:
+                    buf.append(line)
+                    cur_len += add
+            if buf:
+                chunks.append("\n".join(buf))
 
         send(200, {
             "ok": True, "customer_id": cid,
-            "telegram_text": "\n".join(lines),
+            "telegram_text": chunks[0] if chunks else full_text,
+            "telegram_chunks": chunks,
         })
     except Exception as e:
         log("info ERROR:", repr(e))
@@ -1429,6 +1607,293 @@ def handle_info(payload, send):
                          "telegram_text": "⚠️ Info failed — bridge error."})
 
 # (moved to routes.py — handle_<name>(payload, self._send))
+
+
+def handle_assist(payload, send):
+    """POST /assist — free-text operator assistant. Operator types a
+    natural-language question/command in Telegram (no slash prefix);
+    n8n routes it here. Hermes classifies the intent + extracts the
+    customer name; we resolve the customer and execute.
+
+    Body: {text: "what is the status of William?"}
+    Returns: {ok, intent, customer_id?, telegram_text, action_taken}
+
+    Supported intents:
+      - status_query: "what is the status of X?" / "tell me about X"
+        → returns /info-style dossier
+      - draft_nudge: "draft a nudge to X" / "follow up with X"
+        → returns Hermes-drafted follow-up text (operator can
+          approve in Telegram before send)
+      - send_paylink: "send a payment link to X for AED 5000"
+        → creates Nomod link, returns URL (operator pastes manually
+          OR a future flow can auto-send)
+      - find_customer: "show me all paid customers this week"
+        / "who's HOT right now?" → database query
+      - help: anything else → suggest the supported intents
+    """
+    from hermes_calls import run_hermes, extract_json
+    from server import (
+        canonicalize_cid,
+        get_current_label_row,
+        get_customer_facts,
+        resolve_customer_by_name,
+    )
+    text = (payload.get("text") or "").strip()
+    if not text:
+        send(200, {"ok": False, "error": "text required",
+                         "telegram_text": "⚠️ I didn't catch your "
+                         "message — try again."})
+        return
+
+    # ━━━ 1. Hermes intent classifier
+    q = (
+        "You are an operator-assistant intent classifier for "
+        "Dubriani Yachts. The operator just typed a free-text "
+        "message in Telegram. Classify it into exactly ONE intent "
+        "and extract any parameters. Return ONLY a JSON object — "
+        "no preamble, no code fences.\n\n"
+        "INTENTS:\n"
+        "- status_query: operator wants to know the current state "
+        "of a customer (label, recent activity, what was last said).\n"
+        "  Examples: 'what is the status of William?', 'tell me "
+        "about Luke', 'where are we with Madawi?', 'any update "
+        "on Qurbani?'\n"
+        "- draft_nudge: operator wants a follow-up message drafted "
+        "for a customer.\n"
+        "  Examples: 'draft a nudge to William', 'follow up with "
+        "Luke about the Bliss', 'send a check-in to Madawi'.\n"
+        "- send_paylink: operator wants a payment link created.\n"
+        "  Examples: 'send a payment link to Luke for AED 5000', "
+        "'create paylink for Madawi 3500'.\n"
+        "- find_customer: operator wants a list/search.\n"
+        "  Examples: 'who's HOT right now?', 'show paid customers "
+        "this week', 'list pending payment links'.\n"
+        "- help: anything else, or unclear.\n\n"
+        "Output JSON schema:\n"
+        "{\"intent\": \"status_query\"|\"draft_nudge\"|"
+        "\"send_paylink\"|\"find_customer\"|\"help\","
+        " \"customer_name\": \"...\" (empty if N/A),"
+        " \"amount_aed\": <number or null>,"
+        " \"detail\": \"...\" (extra context or filter, e.g. "
+        "'about the Bliss this weekend' for draft_nudge),"
+        " \"reasoning\": \"one short sentence explaining the "
+        "classification\"}\n\n"
+        f"OPERATOR MESSAGE: {text!r}\n\n"
+        "Return JSON only."
+    )
+    try:
+        rc, stdout, stderr, elapsed_ms = run_hermes(q, timeout=60)
+        parsed, _raw = extract_json(stdout)
+        verdict = parsed or {}
+        log(f"/assist hermes rc={rc} elapsed={elapsed_ms}ms "
+            f"intent={verdict.get('intent', '?')!r}")
+    except Exception as e:
+        log(f"/assist hermes err: {e!r}")
+        send(200, {"ok": False, "error": "classifier failed",
+                         "telegram_text": "⚠️ I couldn't understand "
+                         "that — try `/info <name>` or "
+                         "`/draft <name>`."})
+        return
+
+    intent = (verdict.get("intent") or "help").lower()
+    cust_name = (verdict.get("customer_name") or "").strip()
+    detail = (verdict.get("detail") or "").strip()
+    amount = verdict.get("amount_aed")
+
+    # ━━━ 2. Resolve customer (if name was extracted)
+    cid = None
+    name_matches = []
+    if cust_name and intent in (
+            "status_query", "draft_nudge", "send_paylink"):
+        cid, matches = resolve_customer_by_name(cust_name)
+        name_matches = matches or []
+        if not cid and not name_matches:
+            send(200, {
+                "ok": False, "intent": intent,
+                "telegram_text": (
+                    f"🤔 I couldn't find a customer matching "
+                    f"*{cust_name}*. Try the full name as it "
+                    f"appears on /review.")
+            })
+            return
+        if not cid and len(name_matches) > 1:
+            opts = "\n".join(
+                f"   • {m.get('name') or m.get('customer_id')}"
+                for m in name_matches[:6])
+            send(200, {
+                "ok": False, "intent": intent,
+                "needs_disambiguation": True,
+                "matches": name_matches,
+                "telegram_text": (
+                    f"🔎 Several customers match *{cust_name}*. "
+                    f"Be more specific:\n{opts}")
+            })
+            return
+
+    # ━━━ 3. Dispatch by intent
+    if intent == "status_query":
+        # Reuse handle_info by calling it with a captured-send closure.
+        captured = {}
+
+        def _cap(_status, body):
+            captured["body"] = body
+
+        handle_info({"customer_id": cid}, _cap)
+        body = captured.get("body", {}) or {}
+        text_out = body.get("telegram_text") or "(no info)"
+        chunks = body.get("telegram_chunks") or [text_out]
+        send(200, {
+            "ok": True, "intent": "status_query",
+            "customer_id": cid,
+            "telegram_text": chunks[0],
+            "telegram_chunks": chunks,
+            "action_taken": "Pulled customer dossier."
+        })
+        return
+
+    if intent == "draft_nudge":
+        # Delegate to handle_draft_followup. Hint the directive with
+        # operator's `detail` so Hermes can use it as a steering note.
+        captured = {}
+
+        def _cap(_status, body):
+            captured["body"] = body
+
+        df_payload = {"customer_id": cid}
+        if detail:
+            df_payload["operator_hint"] = detail
+        handle_draft_followup(df_payload, _cap)
+        body = captured.get("body", {}) or {}
+        drafted = body.get("draft_text") \
+            or body.get("telegram_text") or "(empty)"
+        send(200, {
+            "ok": True, "intent": "draft_nudge",
+            "customer_id": cid,
+            "telegram_text": (
+                f"📝 *Drafted nudge for*"
+                f" `{cid}`:\n\n{drafted}\n\n"
+                f"_Reply with 'send' to push to WhatsApp, "
+                f"or edit and reply with the new text._"),
+            "draft_text": drafted,
+            "action_taken": "Hermes drafted a follow-up."
+        })
+        return
+
+    if intent == "send_paylink":
+        if not amount or amount <= 0:
+            send(200, {
+                "ok": False, "intent": "send_paylink",
+                "telegram_text": (
+                    "💳 I need an amount. Try: "
+                    "*'send paylink to Luke for AED 5000'*.")
+            })
+            return
+        # Delegate to handle_payment_link
+        captured = {}
+
+        def _cap(_status, body):
+            captured["body"] = body
+
+        pl_payload = {"customer_id": cid, "amount": float(amount),
+                      "summary": detail or "Yacht charter"}
+        handle_payment_link(pl_payload, _cap)
+        body = captured.get("body", {}) or {}
+        url = body.get("link_url") or ""
+        if url:
+            send(200, {
+                "ok": True, "intent": "send_paylink",
+                "customer_id": cid, "amount_aed": float(amount),
+                "link_url": url,
+                "telegram_text": (
+                    f"💳 *Paylink created* — "
+                    f"AED {float(amount):,.0f}\n{url}\n\n"
+                    f"_Reply with 'send' to push to WhatsApp._"),
+                "action_taken": "Nomod paylink created."
+            })
+        else:
+            err_msg = body.get("error") or "unknown error"
+            send(200, {
+                "ok": False, "intent": "send_paylink",
+                "telegram_text": (
+                    f"⚠️ Paylink creation failed: {err_msg}")
+            })
+        return
+
+    if intent == "find_customer":
+        # Lightweight DB query — return top 10 matching customers.
+        # 'detail' is the filter language ("HOT", "paid this week", etc.)
+        filter_clause = ""
+        d_low = detail.lower()
+        if "hot" in d_low:
+            filter_clause = "label = 'HOT'"
+        elif "paid" in d_low or "confirmed" in d_low:
+            filter_clause = "label = 'CONFIRMED'"
+        elif "waiting" in d_low or "payment" in d_low:
+            filter_clause = "label = 'WAITING_FOR_PAYMENT'"
+        elif "warm" in d_low:
+            filter_clause = "label = 'WARM'"
+        elif "cold" in d_low:
+            filter_clause = "label = 'COLD'"
+        elif "new" in d_low:
+            filter_clause = "label = 'NEW'"
+        else:
+            filter_clause = ("label IN ('HOT','WARM','NEEDS_ATTENTION',"
+                             "'WAITING_FOR_PAYMENT')")
+        out, _err = _psql(
+            "SELECT customer_id, COALESCE(name,'(unnamed)'), label, "
+            "COALESCE(yachts,''), COALESCE(dates,'') "
+            "FROM customer_facts "
+            f"WHERE {filter_clause} "
+            "AND (merged_into IS NULL) "
+            "ORDER BY updated_at DESC LIMIT 15"
+        )
+        rows = [ln.split("|") for ln in (out or "").splitlines()
+                if "|" in ln]
+        if not rows:
+            send(200, {
+                "ok": True, "intent": "find_customer",
+                "telegram_text": (
+                    f"🔍 No customers matched filter "
+                    f"_{detail or 'active leads'}_.")
+            })
+            return
+        lines_out = [f"🔍 *Customers matching {detail or 'active'}*"
+                     f" ({len(rows)} hits):"]
+        for r in rows[:15]:
+            if len(r) < 5:
+                continue
+            nm = r[1].strip()
+            lab = r[2].strip()
+            y = r[3].strip()[:40]
+            d = r[4].strip()[:30]
+            lines_out.append(
+                f"   • *{nm}* [{lab}] — "
+                + (f"{y} · " if y else "")
+                + (f"{d}" if d else ""))
+        send(200, {
+            "ok": True, "intent": "find_customer",
+            "telegram_text": "\n".join(lines_out),
+            "match_count": len(rows),
+            "action_taken": f"Listed {len(rows)} customers."
+        })
+        return
+
+    # help / fallback
+    send(200, {
+        "ok": True, "intent": "help",
+        "telegram_text": (
+            "💬 I understand these patterns:\n\n"
+            "• *Status*: _'what is the status of William?'_, "
+            "_'tell me about Luke'_\n"
+            "• *Nudge*: _'draft a nudge to Madawi'_, "
+            "_'follow up with Luke'_\n"
+            "• *Paylink*: _'send paylink to Luke for AED 5000'_\n"
+            "• *Search*: _'who's HOT right now?'_, "
+            "_'show waiting payment'_\n\n"
+            "_I'm not sure what you wanted — try one of the above "
+            "phrasings._")
+    })
+
 
 def handle_draft_followup(payload, send):
     """POST /draft-followup — generate a follow-up draft via Hermes.

@@ -73,6 +73,7 @@ from review import (  # noqa: F401
     score_lead, _fmt_dur, render_review, _name_fallback, _why_line,
 )
 from routes import (  # noqa: F401
+    handle_assist,
     handle_autonomous_log,
     handle_autosend_check,
     handle_autosend_state,
@@ -2426,7 +2427,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/label-eval", "/conversation-state",
                              "/hourly-sweep",
                              "/review", "/draft-followup",
-                             "/info", "/label", "/snooze",
+                             "/info", "/assist", "/label", "/snooze",
                              "/queue",
                              "/followup-action",
                              "/refresh-facts",
@@ -2502,6 +2503,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_draft_followup(payload, self._send)
         elif self.path == "/info":
             handle_info(payload, self._send)
+        elif self.path == "/assist":
+            handle_assist(payload, self._send)
         elif self.path == "/label":
             handle_label(payload, self._send)
         elif self.path == "/snooze":
