@@ -148,6 +148,117 @@ DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
 # SESSION_RE / FENCE_RE moved to hermes_calls.py (re-exported above).
 VALID_SCOPES = ("global", "customer", "scenario", "tier")
 
+# --- Telegram Bot API (best-effort card edits) ----------------------------
+# Used by _draft_save's auto-supersede path to disable inline buttons +
+# mark superseded cards in the operator's Telegram. Also by the
+# /recover-draft endpoint to push a lost draft back to Telegram (e.g.,
+# William 2026-05-27: draft was created but n8n's Send branch died in
+# a bridge restart mid-execution).
+# Token comes from env (TELEGRAM_BOT_TOKEN). Absence makes the helpers
+# no-op so the bridge stays functional in dev / token-rotation windows.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+_TELEGRAM_API = "https://api.telegram.org/bot"
+
+
+def _tg_post(method, body, timeout=8):
+    """POST to Telegram Bot API. Returns (resp_dict_or_None, err_str_or_None).
+    Non-raising — every caller can ignore the error for best-effort UX."""
+    if not TELEGRAM_BOT_TOKEN:
+        return None, "TELEGRAM_BOT_TOKEN not configured"
+    try:
+        req = urllib.request.Request(
+            _TELEGRAM_API + TELEGRAM_BOT_TOKEN + "/" + method,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            detail = "?"
+        return None, f"HTTP {e.code}: {detail}"
+    except Exception as e:
+        return None, repr(e)
+
+
+def tg_disable_card_buttons(chat_id, message_id):
+    """Clear inline buttons on a Telegram message. Used to disable
+    the Approve/Edit/Reject buttons on a superseded draft card so
+    the operator can't accidentally approve a stale card after a
+    newer one came in. Returns (ok, err)."""
+    if not (chat_id and message_id):
+        return False, "missing chat_id/message_id"
+    r, err = _tg_post("editMessageReplyMarkup",
+                      {"chat_id": chat_id,
+                       "message_id": int(message_id),
+                       "reply_markup": {"inline_keyboard": []}})
+    return (r is not None), err
+
+
+def tg_prepend_superseded_marker(chat_id, message_id, body_text):
+    """Edit a Telegram message's text/caption to prepend
+    '⚠️ SUPERSEDED' + strike through the original body, so the
+    operator visually distinguishes stale cards from active ones.
+    Tries editMessageCaption first (for media); falls back to
+    editMessageText (for text-only). Returns (ok, err)."""
+    if not (chat_id and message_id):
+        return False, "missing chat_id/message_id"
+    safe_body = (body_text or "")[:3500]
+    new_text = (
+        "⚠️ <b>SUPERSEDED</b> — a newer draft replaced this card.\n\n"
+        "<s>" + _md_escape_html(safe_body) + "</s>"
+    )
+    # Try caption first (the draft card may be a media-with-caption)
+    r, err = _tg_post("editMessageCaption",
+                      {"chat_id": chat_id,
+                       "message_id": int(message_id),
+                       "caption": new_text,
+                       "parse_mode": "HTML"})
+    if r is not None:
+        return True, None
+    # Fall back to text edit
+    r2, err2 = _tg_post("editMessageText",
+                        {"chat_id": chat_id,
+                         "message_id": int(message_id),
+                         "text": new_text,
+                         "parse_mode": "HTML"})
+    return (r2 is not None), (err2 or err)
+
+
+def tg_send_recovery_notice(chat_id, draft_id, body_text, customer_name,
+                            customer_id):
+    """Push a one-shot recovery message to the operator's Telegram for
+    a draft that exists in Redis but never reached Telegram (e.g.,
+    n8n Send branch killed by a bridge restart). The card is
+    intentionally informational — no inline buttons — because re-
+    wiring approve/edit/reject callbacks would require touching the
+    n8n workflow. Operator can copy/paste the body manually or
+    /draft to regenerate."""
+    text = (
+        "🔧 <b>Lost draft recovered</b>\n"
+        f"Customer: <b>{_md_escape_html(customer_name or customer_id)}</b>\n"
+        f"Draft id: <code>{_md_escape_html(draft_id)}</code>\n\n"
+        f"<b>Body Hermes produced:</b>\n"
+        f"<i>{_md_escape_html(body_text or '(empty)')}</i>\n\n"
+        "<i>Send this manually if still relevant, or /draft "
+        f"{_md_escape_html(customer_id)} to regenerate.</i>"
+    )
+    r, err = _tg_post("sendMessage",
+                      {"chat_id": chat_id, "text": text,
+                       "parse_mode": "HTML"})
+    return (r is not None), err
+
+
+def _md_escape_html(s):
+    """Minimal HTML escape for Telegram parse_mode=HTML — &, <, > only.
+    parse_mode=HTML accepts unescaped quotes; tags must be balanced."""
+    return (str(s or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
 # --- customer facts (feature-header) ---------------------------------------
 FACTS_EXTRACT_TIMEOUT = int(os.environ.get("BRIDGE_FACTS_TIMEOUT", "15"))
 # yacht keywords worth gating extraction on — curated from system-prompt.md §7
@@ -320,6 +431,30 @@ def _draft_save(draft):
                     _redis(["SREM", DRAFTS_ACTIVE, other_id])
                     log(f"_draft_save auto-superseded prior pending "
                         f"{other_id} for cid={cid}")
+                    # Best-effort Telegram card cleanup — disable the
+                    # superseded card's buttons + mark it visually so
+                    # the operator can't approve a stale card. Any TG
+                    # API error is logged + ignored (never blocks the
+                    # save). Production bug 2026-05-27 (Luke double-
+                    # drafts in Telegram).
+                    try:
+                        tg_chat = other.get("telegram_chat_id")
+                        tg_msg = other.get("telegram_message_id")
+                        if tg_chat and tg_msg and TELEGRAM_BOT_TOKEN:
+                            tg_disable_card_buttons(tg_chat, tg_msg)
+                            prior_body = ""
+                            o_msgs = other.get("messages") or []
+                            if o_msgs:
+                                prior_body = str(o_msgs[0])
+                            elif other.get("draft_text"):
+                                prior_body = str(other.get("draft_text"))
+                            tg_prepend_superseded_marker(
+                                tg_chat, tg_msg, prior_body)
+                            log(f"_draft_save TG-edited superseded "
+                                f"card msg={tg_msg} cid={cid}")
+                    except Exception as _tge:
+                        log(f"_draft_save TG-edit err for "
+                            f"{other_id}: {_tge!r}")
         except Exception as e:
             # Defensive: never block the new save on a cleanup failure.
             log(f"_draft_save supersede sweep err: {e!r}")
