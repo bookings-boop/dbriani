@@ -270,9 +270,39 @@ def handle_queue(payload, send):
         send(200, {"ok": ok, "error": err})
         return
 
+    if action == "claim-send":
+        # Atomic send-claim. Use Redis SET NX EX so the FIRST caller
+        # wins; subsequent concurrent callers get ok=False and must
+        # skip the WAHA send. Production bug 2026-05-27: operator
+        # double-tapped [✅ Send] OR a parallel Telegram-callback
+        # retry fired two execs against the same draft_id. Both read
+        # draft.messages_sent_count = 0 before either incremented,
+        # so both passed the check-then-set guard in Prepare Send →
+        # customer got 2 sends. This claim closes the race at
+        # workflow start — Prepare Send calls /queue?action=claim-send
+        # before fanning items.
+        did = (payload.get("draft_id") or "").strip()
+        ttl = int(payload.get("ttl") or 60)
+        if not did:
+            send(200, {"ok": False, "error": "draft_id required"})
+            return
+        key = f"draft:send_claim:{did}"
+        out, err = _redis(["SET", key, "1", "NX", "EX", str(ttl)])
+        # _redis returns the raw text "OK" on success, "" on
+        # already-set (NX). On error, err is set.
+        claimed = bool(out and out.strip().upper() == "OK")
+        if claimed:
+            log(f"send-claim WON did={did} ttl={ttl}s")
+        else:
+            log(f"send-claim BLOCKED did={did} "
+                f"(another exec is already sending)")
+        send(200, {"ok": claimed, "error": err,
+                         "draft_id": did, "ttl": ttl})
+        return
+
     send(200, {"ok": False,
                      "error": ("action must be save|get|update|mark|"
-                               "latest-for-customer|drop")})
+                               "latest-for-customer|drop|claim-send")})
 
 
 # ============================================================================
