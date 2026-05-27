@@ -406,7 +406,7 @@ def handle_refresh_facts(payload, send):
                          "telegram_text": "⚠️ Customer not found."})
         return
     try:
-        waha = waha_fetch_history(cid, limit=30)
+        waha = waha_fetch_history(cid, limit=100)
         if waha.get("err"):
             send(200, {"ok": False, "error": waha["err"],
                              "telegram_text": f"⚠️ WAHA fetch failed: {waha['err']}"})
@@ -1639,7 +1639,7 @@ def handle_pipeline_analyze(payload, send):
                            / 3600.0)
                 except (ValueError, IndexError):
                     sh_ = None
-                waha_ = waha_fetch_history(cid, limit=30)
+                waha_ = waha_fetch_history(cid, limit=100)
                 history_ = (waha_ or {}).get("history") or ""
                 v_ = hermes_analyze_lead(cid, history_, facts_,
                                          message_count=mc_,
@@ -1831,7 +1831,7 @@ def handle_lead_analyze_disregard(payload, send):
         except (ValueError, IndexError):
             silent_h = None
 
-        waha = waha_fetch_history(cid, limit=30)
+        waha = waha_fetch_history(cid, limit=100)
         history = (waha or {}).get("history") or ""
 
         verdict_obj = hermes_analyze_lead(

@@ -1262,7 +1262,7 @@ def refresh_customer_facts_from_waha(customer_id):
     /review (auto-heal for empty critical facts), and /pipeline-analyze
     (hourly cron — refresh-before-score)."""
     try:
-        waha = waha_fetch_history(customer_id, limit=30)
+        waha = waha_fetch_history(customer_id, limit=100)
         if (waha or {}).get("err") or not (waha or {}).get("count"):
             return None
         extracted = extract_customer_facts(
