@@ -1158,7 +1158,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const await_amt = queue.find(x => x.status === 'awaiting_amount');\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await_amt.status = 'pending';  // release lock; downstream sets link_sent\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\nreturn { json: { action: 'ack', admin_chat_id: adminChatId,\n  ack_text: '\u26a0\ufe0f Nothing sent. Commands: /send <chatId> <text>, /lead <name> <phone> <details>, /auto (reply to a card), /manual, /caps, /rules, /feedback <text>. Or reply to a draft card with refinement feedback.' } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\nconst data = $getWorkflowStaticData('global');\nconst queue = data.pendingQueue || [];\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      for (let _i = queue.length - 1; _i >= 0; _i--) {\n        if (queue[_i].telegram_message_id === r2.message_id) { d2 = queue[_i]; break; }\n      }\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const await_amt = queue.find(x => x.status === 'awaiting_amount');\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await_amt.status = 'pending';  // release lock; downstream sets link_sent\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst awaiting = queue.find(x => x.status === 'awaiting_edit');\nif (awaiting && text) {\n  awaiting.status = 'pending';          // release the edit lock; refine redraws\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  let d = null;\n  for (let _i = queue.length - 1; _i >= 0; _i--) {\n    if (queue[_i].telegram_message_id === r.message_id) { d = queue[_i]; break; }\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    d.status = 'pending';\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (Z) FALLBACK \u2014 non-command, non-reply free-text from operator -> /assist endpoint for natural-language routing\n//     (status queries, draft nudges, paylink creation, customer search). Empty text still acks.\nif (!text || !text.trim()) {\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: '\u26a0\ufe0f Empty message.' } };\n}\nreturn { json: { action: 'assist_query', query_text: text, admin_chat_id: adminChatId } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -1508,6 +1508,31 @@
               },
               "renameOutput": true,
               "outputKey": "paylink_amount"
+            },
+            {
+              "outputKey": "assist_query",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "assist-2026-05-27",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "assist_query",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true
             }
           ]
         },
@@ -5844,6 +5869,74 @@
           "timeout": 8000
         }
       }
+    },
+    {
+      "id": "hermes-assist-2026-05-27",
+      "name": "Hermes Assist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        3400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/assist",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($json.query_text) }}\n}",
+        "options": {
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "send-assist-reply-2026-05-27",
+      "name": "Send Assist Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6320,
+        3400
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Process Text Reply').item.json.admin_chat_id }},\n  \"text\": {{ JSON.stringify($json.telegram_text || '(no response)') }},\n  \"parse_mode\": \"Markdown\"\n}",
+        "options": {
+          "timeout": 30000
+        }
+      }
     }
   ],
   "connections": {
@@ -6336,6 +6429,13 @@
         [
           {
             "node": "Build Paylink From Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hermes Assist",
             "type": "main",
             "index": 0
           }
@@ -7778,6 +7878,17 @@
         [
           {
             "node": "Edit Telegram (Refine)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hermes Assist": {
+      "main": [
+        [
+          {
+            "node": "Send Assist Reply",
             "type": "main",
             "index": 0
           }
