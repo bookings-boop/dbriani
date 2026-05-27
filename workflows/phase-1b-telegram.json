@@ -4313,7 +4313,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "7537d13c-0938-4557-a165-eafbdc1d0269",
@@ -4657,7 +4660,10 @@
         "options": {
           "timeout": 12000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "149c66c0-2076-4037-9ad3-498d8dec0215",
@@ -4695,7 +4701,10 @@
         "options": {
           "timeout": 12000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "6eb32698-98b8-4ae7-aee1-73330bc747f2",
@@ -4891,7 +4900,10 @@
         "options": {
           "timeout": 15000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
