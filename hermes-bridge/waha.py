@@ -34,6 +34,88 @@ _WAHA_PUSHNAME_TTL = 300  # seconds
 _WAHA_SYSTEM_NAMES = ("WhatsApp Business", "Dubriani admin chat")
 
 
+def _waha_post(path, body, timeout=30):
+    """POST against WAHA REST API. Returns
+    (parsed_json_or_None, err_str_or_None). Always non-raising.
+    Used for sendText / sendImage / sendFile / etc."""
+    if not (WAHA_API_KEY and WAHA_BASE):
+        return None, "WAHA_API_KEY/WAHA_BASE not configured"
+    try:
+        req = urllib.request.Request(
+            WAHA_BASE + path,
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={"X-Api-Key": WAHA_API_KEY,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            detail = "?"
+        return None, f"WAHA HTTP {e.code}: {detail}"
+    except Exception as e:
+        return None, f"WAHA POST failed: {e!r}"
+
+
+def waha_send_file(customer_id, file_url, caption="", filename=None):
+    """POST /api/sendFile — send a generic file (PDF, doc, etc.) to a
+    WhatsApp customer. Pass file_url (publicly fetchable) or a
+    local /-prefixed path for files served by the bridge.
+    Returns (ok, err)."""
+    if not customer_id or not file_url:
+        return False, "customer_id and file_url required"
+    body = {
+        "session": "default",
+        "chatId": customer_id,
+        "file": {"url": file_url},
+        "caption": caption or "",
+    }
+    if filename:
+        body["file"]["filename"] = filename
+    resp, err = _waha_post("/api/sendFile", body)
+    if err:
+        return False, err
+    return True, None
+
+
+def waha_send_image(customer_id, image_url, caption=""):
+    """POST /api/sendImage — send an image with optional caption.
+    Returns (ok, err)."""
+    if not customer_id or not image_url:
+        return False, "customer_id and image_url required"
+    body = {
+        "session": "default",
+        "chatId": customer_id,
+        "file": {"url": image_url},
+        "caption": caption or "",
+    }
+    resp, err = _waha_post("/api/sendImage", body)
+    if err:
+        return False, err
+    return True, None
+
+
+def waha_send_text(customer_id, text):
+    """POST /api/sendText — send a plain text message. Used by the
+    /send-file fallback path when WAHA's CORE tier refuses media
+    sends (422 'Plus version' error): we degrade gracefully by
+    sending the customer a text message containing the Drive link.
+    Returns (ok, err)."""
+    if not customer_id or not text:
+        return False, "customer_id and text required"
+    body = {
+        "session": "default",
+        "chatId": customer_id,
+        "text": text,
+    }
+    resp, err = _waha_post("/api/sendText", body)
+    if err:
+        return False, err
+    return True, None
+
+
 def _waha_get(path, timeout=12):
     """GET against WAHA REST API. Returns
     (parsed_json_or_None, err_str_or_None). Always non-raising — the

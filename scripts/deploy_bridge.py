@@ -36,6 +36,11 @@ ROOT = Path(__file__).resolve().parent.parent
 BRIDGE_DIR = ROOT / "hermes-bridge"
 WORKFLOW_PATH = ROOT / "workflows" / "phase-1b-telegram.json"
 MASTER_PROMPT = BRIDGE_DIR / "system-prompt.md"
+# Drive-link registry — appended to the system prompt at deploy time
+# so Hermes sees the 85+ available files inline. Kept as a separate
+# file (docs/file-registry.md) so it can be edited without bumping
+# the system-prompt and to keep the prompt focused on rules vs data.
+FILE_REGISTRY = ROOT / "docs" / "file-registry.md"
 SERVER_PY = BRIDGE_DIR / "server.py"
 WORKFLOW_ID = "azPIy9OcDwiPV5uY"
 N8N_CONTAINER = "n8n-n8n-1"
@@ -229,6 +234,8 @@ def main():
     # 0. local sanity — master file + workflow exist
     if not MASTER_PROMPT.exists():
         die(f"master prompt missing: {MASTER_PROMPT}")
+    if not FILE_REGISTRY.exists():
+        die(f"file registry missing: {FILE_REGISTRY}")
     if not WORKFLOW_PATH.exists():
         die(f"workflow JSON missing: {WORKFLOW_PATH}")
     if not SERVER_PY.exists():
@@ -237,8 +244,20 @@ def main():
     if len(prompt_text) < 1000:
         die(f"master prompt suspiciously short ({len(prompt_text)} chars) — "
             "refusing to deploy")
+    registry_text = FILE_REGISTRY.read_text()
+    if len(registry_text) < 100:
+        die(f"file registry suspiciously short ({len(registry_text)} chars) — "
+            "refusing to deploy")
+    # Append the registry to the prompt at deploy time so Hermes
+    # sees both as one system message. Kept separate on disk so the
+    # registry can be edited without bumping system-prompt.md.
+    combined_prompt = (
+        prompt_text + "\n\n---\n\n# FILE REGISTRY\n" + registry_text)
     print(f"1. master prompt loaded: {len(prompt_text):,} chars, "
           f"{prompt_text.count(chr(10))+1} lines")
+    print(f"   + file registry: {len(registry_text):,} chars, "
+          f"{registry_text.count(chr(10))+1} lines "
+          f"(combined: {len(combined_prompt):,} chars)")
 
     # 1. back up box bridge files
     ssh_run(f'cd ~/hermes-bridge && cp server.py server.py.bak.{ts} && '
@@ -268,8 +287,14 @@ def main():
                    f"~/hermes-bridge/{mod.name}", f"upload-{mod.name}")
     ssh_upload(prompt_text.encode(),
                "~/hermes-bridge/system-prompt.md", "upload-prompt")
+    # The bridge reads file-registry.md at runtime (handle_send_file
+    # via _load_file_registry). Upload it alongside the system prompt
+    # so /send-file resolves keys to Drive URLs without an extra hop.
+    ssh_upload(registry_text.encode(),
+               "~/hermes-bridge/file-registry.md", "upload-registry")
     print(f"4. uploaded {len(modules)} module(s) "
-          f"({', '.join(m.name for m in modules)}) + system-prompt.md")
+          f"({', '.join(m.name for m in modules)}) "
+          f"+ system-prompt.md + file-registry.md")
 
     # 4. compile-check every uploaded module on the box.
     mod_paths = " ".join(f"~/hermes-bridge/{m.name}" for m in modules)
@@ -280,13 +305,14 @@ def main():
         die(f"bridge modules failed to compile on the box:\n{err[:400]}")
     print(f"5. all {len(modules)} module(s) compile on the box")
 
-    # 5. inject master prompt into all 4 workflow Set nodes + rewrite the
-    # local workflow JSON so the on-disk file always matches what's live
-    # (single source of truth — the local file is no longer where humans
-    # edit the prompt; the master is). The pretty-printed copy preserves
-    # n8n's two-space indent for diff readability.
+    # 5. inject master prompt + file registry into all 4 workflow Set
+    # nodes + rewrite the local workflow JSON so the on-disk file
+    # always matches what's live (single source of truth — humans
+    # edit MASTER_PROMPT + FILE_REGISTRY; deploy builds the combined
+    # text). The pretty-printed copy preserves n8n's two-space indent
+    # for diff readability.
     patched_data, patched_names = inject_prompt_into_workflow(
-        prompt_text, WORKFLOW_PATH)
+        combined_prompt, WORKFLOW_PATH)
     new_pretty = json.dumps(patched_data, indent=2) + "\n"
     # Skip-n8n-restart optimization: if the workflow JSON content is
     # byte-identical to what's already on disk, the n8n side hasn't

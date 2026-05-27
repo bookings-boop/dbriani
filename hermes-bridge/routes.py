@@ -1668,14 +1668,32 @@ def handle_assist(payload, send):
         "- find_customer: operator wants a list/search.\n"
         "  Examples: 'who's HOT right now?', 'show paid customers "
         "this week', 'list pending payment links'.\n"
+        "- send_file: operator wants to send a media file from the "
+        "library to a customer's WhatsApp.\n"
+        "  Examples: 'send the drinks menu to Luke', 'send food "
+        "menu to Madawi', 'send dubai harbour map to William', "
+        "'forward yacht brochure to Hassan'.\n"
+        "  Extract: customer_name + file_key (a short snake_case "
+        "slug matching the file's name, e.g. 'drinks_menu', "
+        "'food_menu', 'dubai_harbour_map', 'yacht_brochure', "
+        "'satoshi_70'). Best-guess the slug; if operator says 'the "
+        "menu' default to 'drinks_menu' unless 'food' is mentioned.\n"
+        "- list_files: operator wants to see what files are in the "
+        "library.\n"
+        "  Examples: 'what files do we have?', 'list files', 'show "
+        "available menus', 'what can I send?'.\n"
         "- help: anything else, or unclear.\n\n"
         "Output JSON schema:\n"
         "{\"intent\": \"status_query\"|\"draft_nudge\"|"
-        "\"send_paylink\"|\"find_customer\"|\"help\","
+        "\"send_paylink\"|\"send_file\"|\"list_files\"|"
+        "\"find_customer\"|\"help\","
         " \"customer_name\": \"...\" (empty if N/A),"
         " \"amount_aed\": <number or null>,"
+        " \"file_key\": \"...\" (snake_case slug for send_file, "
+        "else empty),"
         " \"detail\": \"...\" (extra context or filter, e.g. "
-        "'about the Bliss this weekend' for draft_nudge),"
+        "'about the Bliss this weekend' for draft_nudge; the "
+        "caption text for send_file if operator said one),"
         " \"reasoning\": \"one short sentence explaining the "
         "classification\"}\n\n"
         f"OPERATOR MESSAGE: {text!r}\n\n"
@@ -1699,12 +1717,14 @@ def handle_assist(payload, send):
     cust_name = (verdict.get("customer_name") or "").strip()
     detail = (verdict.get("detail") or "").strip()
     amount = verdict.get("amount_aed")
+    file_key = (verdict.get("file_key") or "").strip()
 
     # ━━━ 2. Resolve customer (if name was extracted)
     cid = None
     name_matches = []
     if cust_name and intent in (
-            "status_query", "draft_nudge", "send_paylink"):
+            "status_query", "draft_nudge", "send_paylink",
+            "send_file"):
         cid, matches = resolve_customer_by_name(cust_name)
         name_matches = matches or []
         if not cid and not name_matches:
@@ -1817,6 +1837,70 @@ def handle_assist(payload, send):
                 "telegram_text": (
                     f"⚠️ Paylink creation failed: {err_msg}")
             })
+        return
+
+    if intent == "send_file":
+        if not file_key:
+            send(200, {
+                "ok": False, "intent": "send_file",
+                "telegram_text": (
+                    "📁 I need to know which file. Try: "
+                    "*'send the drinks menu to Luke'*. "
+                    "Use *'list files'* to see what's available.")
+            })
+            return
+        captured = {}
+
+        def _cap(_status, body):
+            captured["body"] = body
+
+        sf_payload = {"customer_id": cid, "file_key": file_key}
+        if detail:
+            sf_payload["caption"] = detail
+        handle_send_file(sf_payload, _cap)
+        body = captured.get("body", {}) or {}
+        if body.get("ok"):
+            send(200, {
+                "ok": True, "intent": "send_file",
+                "customer_id": cid, "file_key": file_key,
+                "file_url": body.get("file_url"),
+                "telegram_text": (
+                    f"📤 *Sent* `{body.get('filename', file_key)}` "
+                    f"to *{cust_name or cid}* on WhatsApp."
+                    + (f"\n_Caption:_ {detail}" if detail else "")),
+                "action_taken": body.get("action_taken"),
+            })
+        else:
+            err_msg = body.get("error") or "unknown error"
+            # If the key didn't match, list available files to help
+            try:
+                lib = _list_library_files()
+                avail = ", ".join(f"`{f['key']}`"
+                                  for f in lib[:10]) or "(empty)"
+            except Exception:
+                avail = "(can't read library)"
+            send(200, {
+                "ok": False, "intent": "send_file",
+                "telegram_text": (
+                    f"⚠️ Couldn't send: {err_msg}\n\n"
+                    f"Available files: {avail}")
+            })
+        return
+
+    if intent == "list_files":
+        captured = {}
+
+        def _cap(_status, body):
+            captured["body"] = body
+
+        handle_list_files({}, _cap)
+        body = captured.get("body", {}) or {}
+        send(200, {
+            "ok": True, "intent": "list_files",
+            "telegram_text": body.get("telegram_text"),
+            "file_count": body.get("count"),
+            "action_taken": "Listed file library.",
+        })
         return
 
     if intent == "find_customer":
@@ -3901,3 +3985,353 @@ def _process_nomod_charge_completed(raw_body, svix_id):
     except Exception as e:
         # Anything unhandled — never crash the daemon thread.
         log(f"nomod-webhook worker EXC: {e!r}")
+
+
+# ============================================================================
+# Group: file sending (WAHA media — Drive-URL pass-through)
+# ============================================================================
+#
+# File registry: docs/file-registry.md holds 85+ pre-curated Google
+# Drive shareable links (yacht brochures, catering menus, route maps,
+# itineraries, etc.). We parse it at startup into FILE_REGISTRY
+# {key: drive_share_url}, then on every send convert the share URL to
+# Drive's direct-download URL so WAHA can fetch raw bytes (the /view
+# share URL returns HTML preview, not the file).
+#
+# Hermes detects file-need via system-prompt rules and emits
+# should_send_file + file_key in its JSON output. The workflow card
+# builder adds a [📎 Send File] button; operator taps it; n8n posts
+# {customer_id, file_key, caption} to /send-file. Bridge fetches Drive
+# URL via WAHA (RemoteFile path — no /tmp download), logs to
+# autonomous_sends.
+
+import re as _re
+import mimetypes  # noqa: F401 — used by extension-based mime guess
+
+REGISTRY_PATH = os.environ.get(
+    "FILE_REGISTRY_PATH",
+    os.path.expanduser("~/hermes-bridge/file-registry.md"))
+
+# Parsed at first call; cached for lifetime of process. The registry
+# is small (~10KB) so we don't bother with a TTL — operator restarts
+# the bridge if they update the file.
+_FILE_REGISTRY_CACHE = None
+_FILE_REGISTRY_BY_CATEGORY = None  # {category: [keys]}
+
+# Drive's /view?usp=sharing returns HTML; need the
+# /uc?export=download&id=<ID> form for raw bytes.
+_DRIVE_FILE_ID_RE = _re.compile(
+    r"/file/d/([A-Za-z0-9_-]+)/")
+
+# WhatsApp's document attachment ceiling is 100MB. Anything bigger
+# fails at WhatsApp-API level; we pre-check via HEAD so the operator
+# sees a clear error in Telegram instead of an opaque WAHA failure
+# minutes later.
+MAX_FILE_BYTES = 100 * 1024 * 1024
+
+
+def _load_file_registry():
+    """Parse docs/file-registry.md into {key: drive_share_url}. Also
+    builds _FILE_REGISTRY_BY_CATEGORY for grouped /list-files output.
+    Idempotent + cached."""
+    global _FILE_REGISTRY_CACHE, _FILE_REGISTRY_BY_CATEGORY
+    if _FILE_REGISTRY_CACHE is not None:
+        return _FILE_REGISTRY_CACHE
+    registry = {}
+    by_cat = {}
+    current_cat = "uncategorized"
+    try:
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                stripped = line.strip()
+                # Category headers
+                if stripped.startswith("## "):
+                    current_cat = stripped[3:].strip()
+                    by_cat.setdefault(current_cat, [])
+                    continue
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # key: https://...
+                m = _re.match(r"^([a-z0-9_-]+):\s*(https?://\S+)\s*$",
+                              stripped)
+                if not m:
+                    continue
+                key = m.group(1).strip()
+                url = m.group(2).strip()
+                registry[key] = url
+                by_cat.setdefault(current_cat, []).append(key)
+    except FileNotFoundError:
+        log(f"file registry not found at {REGISTRY_PATH} — "
+            f"/send-file will return errors")
+    except Exception as e:
+        log(f"file registry parse error: {e!r}")
+    _FILE_REGISTRY_CACHE = registry
+    _FILE_REGISTRY_BY_CATEGORY = by_cat
+    log(f"file registry: {len(registry)} entries loaded from "
+        f"{REGISTRY_PATH}")
+    return registry
+
+
+def _drive_url_to_direct(share_url):
+    """Convert a Drive share URL to the direct-download URL WAHA can
+    fetch as raw bytes. Returns (direct_url, file_id) or (None, None)
+    if the URL doesn't look like a Drive share link.
+
+    `confirm=t` bypasses the Drive 'virus scan warning' interstitial
+    HTML page that Drive serves for files >~25MB on the standard
+    /uc?export=download path. Without it, WAHA would fetch the HTML
+    warning page instead of the file bytes and the send would fail."""
+    m = _DRIVE_FILE_ID_RE.search(share_url or "")
+    if not m:
+        return None, None
+    file_id = m.group(1)
+    return (
+        f"https://drive.google.com/uc?export=download&id={file_id}"
+        f"&confirm=t",
+        file_id)
+
+
+def _head_file_size(url, timeout=15):
+    """HEAD the given URL and return (size_bytes_or_None, err_or_None).
+    Drive sometimes returns Content-Length, sometimes doesn't (e.g.
+    when it would redirect to a confirmation page). When size can't
+    be determined, return (None, None) and let the caller decide
+    whether to proceed."""
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            cl = r.headers.get("Content-Length")
+            if cl and cl.isdigit():
+                return int(cl), None
+            return None, None
+    except urllib.error.HTTPError as e:
+        # Some Drive variants 403/302 on HEAD but allow GET fine.
+        # Treat as "size unknown" rather than failure — WAHA will
+        # surface a real error if the GET also fails.
+        return None, f"HEAD HTTP {e.code}"
+    except Exception as e:
+        return None, f"HEAD failed: {e!r}"
+
+
+def _mime_for_key(file_key):
+    """Best-effort mime detection from a registry key. Keys ending in
+    -video / containing 'video' get mp4; everything else defaults to
+    application/pdf (the registry is mostly PDFs)."""
+    k = (file_key or "").lower()
+    if "video" in k or k.endswith("-mp4"):
+        return "video/mp4"
+    return "application/pdf"
+
+
+def _is_video_mime(mime):
+    return (mime or "").startswith("video/")
+
+
+def _is_image_mime(mime):
+    return (mime or "").startswith("image/")
+
+
+def _filename_for_key(file_key, mime):
+    """e.g. 'sunseeker-satoshi-70' + 'application/pdf' ->
+    'sunseeker-satoshi-70.pdf'."""
+    ext = {
+        "application/pdf": ".pdf",
+        "video/mp4": ".mp4",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+    }.get(mime, "")
+    return f"{file_key}{ext}"
+
+
+def handle_send_file(payload, send):
+    """POST /send-file — send a registered Google Drive file to a
+    WhatsApp customer via WAHA (RemoteFile URL pass-through, no
+    /tmp staging).
+
+    Body: {customer_id, file_key, caption?}
+      file_key matches a key in docs/file-registry.md
+
+    Returns {ok, error?, file_key, filename, file_url?, drive_id?}.
+    Logs the send to autonomous_sends (kind='file_sent') for audit
+    and Hermes deduplication ('did we already send this file?').
+    """
+    from server import canonicalize_cid
+    from waha import waha_send_file, waha_send_image, waha_send_text
+    cid = canonicalize_cid(
+        (payload.get("customer_id") or "").strip())
+    if not cid:
+        send(200, {"ok": False, "error": "customer_id required"})
+        return
+    file_key = (payload.get("file_key") or "").strip()
+    caption = (payload.get("caption") or "").strip()
+    if not file_key:
+        send(200, {"ok": False, "error": "file_key required"})
+        return
+
+    registry = _load_file_registry()
+    share_url = registry.get(file_key)
+    if not share_url:
+        # Be helpful — surface a few near-matches
+        suggestions = [k for k in registry
+                       if file_key.lower() in k.lower()
+                       or k.lower() in file_key.lower()][:5]
+        send(200, {
+            "ok": False,
+            "error": f"file_key {file_key!r} not in registry",
+            "suggestions": suggestions,
+        })
+        return
+
+    direct_url, drive_id = _drive_url_to_direct(share_url)
+    if not direct_url:
+        send(200, {
+            "ok": False,
+            "error": f"registry url for {file_key!r} doesn't look like "
+                     f"a Drive share link: {share_url[:80]}",
+        })
+        return
+
+    # Size pre-check (best-effort). WhatsApp document ceiling is
+    # 100MB; if Drive reveals a larger size on HEAD, abort early
+    # with a clear error so the operator doesn't wait for WAHA to
+    # silently fail. When HEAD can't determine size (Drive often
+    # 302s/403s on HEAD), proceed and let WAHA enforce.
+    file_size, _herr = _head_file_size(direct_url)
+    if file_size is not None and file_size > MAX_FILE_BYTES:
+        send(200, {
+            "ok": False,
+            "error": (f"file too large: {file_size / 1024 / 1024:.1f}MB "
+                      f"exceeds WhatsApp's 100MB document limit"),
+            "file_key": file_key,
+            "file_size_bytes": file_size,
+            "max_bytes": MAX_FILE_BYTES,
+        })
+        log(f"send-file ABORT (oversize) cid={cid} key={file_key!r} "
+            f"size={file_size}")
+        return
+
+    mime = _mime_for_key(file_key)
+    filename = _filename_for_key(file_key, mime)
+    # Image-mime → /api/sendImage path so it renders inline in
+    # WhatsApp. Video and PDF go through /api/sendFile (which still
+    # produces native WhatsApp document/video previews).
+    is_image = _is_image_mime(mime)
+
+    if is_image:
+        ok, err = waha_send_image(cid, direct_url, caption)
+    else:
+        ok, err = waha_send_file(cid, direct_url, caption, filename)
+
+    # ━━━ CORE-tier fallback ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # WAHA's CORE (free) tier returns HTTP 422 with a "Plus version"
+    # message for any media send — regardless of engine (WEBJS or
+    # NOWEB). When this fires, degrade gracefully by sending the
+    # customer a regular text message containing the Drive share URL
+    # (which IS supported on CORE via /api/sendText). Customer still
+    # gets the file — just one tap further than a native attachment.
+    # When the operator later upgrades to WAHA Plus, this fallback
+    # automatically goes dormant because the media send succeeds first.
+    fallback_used = False
+    if not ok and err and (
+            "Plus version" in err or "422" in err):
+        # Build a friendly link-message in Maria's voice. We use the
+        # Drive SHARE URL (not the direct-download form) because the
+        # share URL opens in Drive's mobile preview, which renders
+        # PDFs natively on iOS and Android. share_url already comes
+        # from registry.get(file_key) at the top of this handler.
+        link_msg_parts = []
+        if caption:
+            link_msg_parts.append(caption.strip())
+        else:
+            # Auto-caption from file_key
+            link_msg_parts.append(f"here's the {file_key.replace('-', ' ')} 📎")
+        link_msg_parts.append(share_url)
+        link_msg = "\n\n".join(link_msg_parts)
+        log(f"send-file FALLBACK cid={cid} key={file_key!r} "
+            f"(CORE-tier 422) → sending as text link")
+        fb_ok, fb_err = waha_send_text(cid, link_msg)
+        if fb_ok:
+            ok = True
+            err = None
+            fallback_used = True
+        else:
+            # Both paths failed — surface the original WAHA error.
+            log(f"send-file FALLBACK FAILED cid={cid} "
+                f"sendText err={fb_err!r}")
+
+    if not ok:
+        log(f"send-file FAIL cid={cid} key={file_key!r} "
+            f"drive_id={drive_id} err={err!r}")
+        send(200, {
+            "ok": False, "error": err,
+            "file_key": file_key, "file_url": direct_url,
+        })
+        return
+
+    # Log to autonomous_sends so Hermes can see we've already sent
+    # this file (dedup via files_sent in customer-facts). The kind
+    # distinguishes native attachments from link-fallback so we can
+    # measure how often the fallback fires. notes is jsonb — must be
+    # valid JSON cast to ::jsonb, not a plain string.
+    try:
+        kind = "file_sent_link" if fallback_used else "file_sent"
+        notes_obj = {
+            "file_key": file_key,
+            "filename": filename,
+            "caption": caption[:200],
+            "fallback_used": fallback_used,
+        }
+        _psql(
+            "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+            f"VALUES ({_lit(cid)}, {_lit(kind)}, "
+            f"{_lit(json.dumps(notes_obj))}::jsonb)")
+    except Exception as _e:
+        log(f"send-file autonomous_log err: {_e!r}")
+
+    log(f"send-file OK cid={cid} key={file_key!r} "
+        f"mime={mime} fallback={fallback_used} "
+        f"caption={(caption or '')[:40]!r}")
+    send(200, {
+        "ok": True,
+        "customer_id": cid,
+        "file_key": file_key,
+        "filename": filename,
+        "file_url": direct_url,
+        "drive_id": drive_id,
+        "is_image": is_image,
+        "is_video": _is_video_mime(mime),
+        "fallback_used": fallback_used,
+        "action_taken": (
+            f"Sent {file_key} as "
+            + ("text link (CORE tier)" if fallback_used
+               else f"native {mime} attachment")
+            + " to customer."),
+    })
+
+
+def handle_list_files(payload, send):
+    """POST /list-files — return the registry as
+    {category: [keys]} for operator browsing. Read-only."""
+    registry = _load_file_registry()
+    by_cat = _FILE_REGISTRY_BY_CATEGORY or {}
+    # Telegram-renderable summary
+    lines = [f"📁 *File registry* ({len(registry)} files):"]
+    for cat, keys in by_cat.items():
+        if not keys:
+            continue
+        lines.append("")
+        lines.append(f"*{cat}*")
+        for k in keys[:25]:
+            lines.append(f"  • `{k}`")
+        if len(keys) > 25:
+            lines.append(f"  • _+ {len(keys) - 25} more_")
+    send(200, {
+        "ok": True,
+        "count": len(registry),
+        "by_category": by_cat,
+        "telegram_text": "\n".join(lines)
+        if registry
+        else (f"📁 File registry empty — check that "
+              f"`{REGISTRY_PATH}` exists on the bridge."),
+    })

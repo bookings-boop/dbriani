@@ -45,6 +45,9 @@ from hermes_calls import (  # noqa: F401
     HERMES, HERMES_TIMEOUT, SESSION_RE, FENCE_RE,
     run_hermes, extract_json, extract_session,
 )
+from waha import (  # noqa: F401 — re-exported for handlers
+    waha_send_file, waha_send_image,
+)
 from waha import (  # noqa: F401
     WAHA_API_KEY, WAHA_BASE,
     _waha_get, waha_lookup_push_name, waha_fetch_history,
@@ -92,6 +95,7 @@ from routes import (  # noqa: F401
     handle_label_eval,
     handle_lead_analyze_disregard,
     handle_learn,
+    handle_list_files,
     handle_nomod_webhook,
     handle_payment_link,
     handle_pipeline_analyze,
@@ -101,6 +105,7 @@ from routes import (  # noqa: F401
     handle_review,
     handle_rules,
     handle_save_rule,
+    handle_send_file,
     handle_set_mode,
     handle_snooze,
 )
@@ -2416,8 +2421,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send(200, {"status": "ok", "service": "hermes-bridge"})
-        else:
-            self._send(404, {"error": "not found"})
+            return
+        # No bridge-served files — file sends fetch directly from
+        # Google Drive via WAHA's RemoteFile path. See routes.py
+        # handle_send_file for the registry → direct-download URL
+        # conversion.
+        self._send(404, {"error": "not found"})
 
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/learn", "/rules",
@@ -2436,6 +2445,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/poll-payments",
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
+                             "/send-file", "/list-files",
                              "/nomod-webhook"):
             self._send(404, {"error": "not found"})
             return
@@ -2505,6 +2515,10 @@ class Handler(BaseHTTPRequestHandler):
             handle_info(payload, self._send)
         elif self.path == "/assist":
             handle_assist(payload, self._send)
+        elif self.path == "/send-file":
+            handle_send_file(payload, self._send)
+        elif self.path == "/list-files":
+            handle_list_files(payload, self._send)
         elif self.path == "/label":
             handle_label(payload, self._send)
         elif self.path == "/snooze":
