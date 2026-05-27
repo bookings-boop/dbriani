@@ -230,7 +230,10 @@
         5744,
         832
       ],
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -282,7 +285,10 @@
         "options": {
           "timeout": 8000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -936,7 +942,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -1824,7 +1833,10 @@
           "name": "WAHA API"
         }
       },
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2221,7 +2233,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2310,7 +2325,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2387,7 +2405,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2464,7 +2485,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2541,7 +2565,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2604,7 +2631,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -2787,7 +2817,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3050,7 +3083,10 @@
         6440,
         1440
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3105,7 +3141,10 @@
         6960,
         1360
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3141,7 +3180,10 @@
         5240,
         1320
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3177,7 +3219,10 @@
         7720,
         1360
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3213,7 +3258,10 @@
         5340,
         2000
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3277,7 +3325,10 @@
         5424,
         692
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3313,7 +3364,10 @@
         4540,
         1152
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3349,7 +3403,10 @@
         4940,
         1152
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3385,7 +3442,10 @@
         6968,
         1180
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3455,7 +3515,10 @@
         5520,
         892
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3504,7 +3567,10 @@
         5340,
         2160
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3580,7 +3646,10 @@
         6240,
         2400
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3643,7 +3712,10 @@
         6240,
         2540
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3706,7 +3778,10 @@
         6240,
         2680
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "parameters": {
@@ -3769,7 +3844,10 @@
         4800,
         812
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "fff69c9f-2b28-4496-8dba-0ed81360a11e",
@@ -3805,7 +3883,10 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"latest_message\": {{ JSON.stringify($('Format Context').item.json.userMessage) }}, \"skip_if_locked\": true }",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "41e7eda1-8678-4e61-a8a1-5c09ec37ef64",
@@ -3903,7 +3984,10 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"customer_message\" }",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "1a0ddc18-8629-46e8-995d-d54ea71f4edb",
@@ -3939,7 +4023,10 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.customer_phone) }}, \"event\": \"operator_reply\" }",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "096c061d-8dd9-4357-8c55-85433d496a1f",
@@ -3975,7 +4062,10 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"operator_reply\" }",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "385c9fb8-251b-407a-9564-98525fa1d854",
@@ -4011,7 +4101,10 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Response').item.json.customer_phone) }}, \"event\": \"draft_posted\" }",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "f57fc9d1-674e-4147-900e-561c273f701e",
@@ -4049,7 +4142,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "82ddf78c-6df2-47e9-bfd7-4f9e8328ec6e",
@@ -4115,7 +4211,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "a7658618-4021-44d1-b580-d04d6ae886f3",
@@ -4181,7 +4280,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "1afa6aa7-5402-4d03-9f0f-9bcd9b4c1d37",
@@ -4247,7 +4349,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "df7a41f8-29c6-4973-a303-b437cec92eeb",
@@ -4382,7 +4487,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "3e2242eb-d9a9-4f0d-a2e7-f6cb59021068",
@@ -4448,7 +4556,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "8cf5faa3-3022-4956-b9f5-b5af55f63240",
@@ -4514,7 +4625,10 @@
         "options": {
           "timeout": 90000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "disregard-reply-2026-05-24",
@@ -4580,7 +4694,10 @@
         "options": {
           "timeout": 15000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "515afd13-7a00-4b91-8a00-411cff7f02cd",
@@ -4776,7 +4893,10 @@
         "options": {
           "timeout": 10000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "85c77573-e5aa-44a4-a6f4-0f0dc9f28da9",
@@ -4848,7 +4968,10 @@
         "options": {
           "timeout": 10000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "fa54b042-5f65-42b0-a8fe-ce4138e8cd6a",
@@ -4955,7 +5078,10 @@
         "options": {
           "timeout": 15000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "862915a3-5d7b-401c-b412-8280cd62e39c",
@@ -4993,7 +5119,10 @@
         "options": {
           "timeout": 120000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "179fdf77-c48f-4f37-9ff8-a1aa01a6e392",
@@ -5059,7 +5188,10 @@
         "options": {
           "timeout": 10000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "6accb025-1eaa-4451-aad7-c1eb09707171",
@@ -5193,7 +5325,10 @@
         "options": {
           "timeout": 120000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "68149ded-7f2b-4bcd-80a4-7a71b09634e2",
@@ -5245,7 +5380,10 @@
         "options": {
           "timeout": 15000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "3dd73ee9-a148-470c-88a6-cf3931fe8cc5",
@@ -5311,7 +5449,10 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "p4yl1nk-prep-2026-05-24",
@@ -5453,7 +5594,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "p4yl1nk-nomod-rep-2026-05-24",
@@ -5491,7 +5635,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "p4yl1nk-if-ok-2026-05-24",
@@ -5657,7 +5804,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "p4yl1nk-mark-2026-05-24",
@@ -5709,7 +5859,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "p4yl1nk-unify-2026-05-24",
@@ -5791,7 +5944,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "recheck-status-2026-05-24",
@@ -5829,7 +5985,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "sync-sent-redis-2026-05-24",
@@ -5867,7 +6026,10 @@
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "sync-refine-redis-2026-05-27",
@@ -5905,7 +6067,10 @@
         "options": {
           "timeout": 8000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "hermes-assist-2026-05-27",
@@ -5943,7 +6108,10 @@
         "options": {
           "timeout": 120000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "send-assist-reply-2026-05-27",
@@ -6024,7 +6192,10 @@
         "options": {
           "timeout": 120000
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     },
     {
       "id": "edit-tg-file-reply-2026-05-27",
