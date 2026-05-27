@@ -282,16 +282,71 @@ def handle_queue(payload, send):
 def handle_customer_facts(payload, send):
     """feature-header: maintain customer_facts + return a context header.
     Fail-safe — ANY error degrades to cached facts and still returns 200,
-    so the workflow's draft card is never blocked by header logic."""
+    so the workflow's draft card is never blocked by header logic.
+
+    Production bug 2026-05-27: operator's behavioral feedback was being
+    saved (49 rules in 48h via /feedback) but NEVER reaching Hermes —
+    invocation_count = 0 on every rule. Operator was re-typing the
+    same feedback ("no emoji", "include URLs", "AED 450 flowers")
+    repeatedly because the n8n Build Prompt wasn't pulling
+    behavioral-context. Fix: handle_customer_facts now appends the
+    deduplicated active rules + customer notes to the returned
+    customer_header. n8n's Build Prompt already uses customer_header
+    in the system prompt, so this closes the feedback loop with NO
+    n8n workflow change. Rules also surface in the Telegram card so
+    the operator can see what's active."""
     from server import (
         _facts_extract_gate,
         _merge_facts,
+        behavioral_context,
         build_customer_header,
         extract_customer_facts,
         get_customer_facts,
         upsert_customer_facts,
         waha_lookup_push_name,
     )
+
+    def _build_behavioral_addendum(cid_arg):
+        """Pull active rules + customer notes, dedupe, format for
+        prompt+display. Returns ('' if nothing, else block of text)."""
+        try:
+            ctx = behavioral_context(cid_arg) or {}
+            globals_ = ctx.get("global") or []
+            scenario = ctx.get("scenario") or []
+            notes = ctx.get("customer_notes") or []
+            # Dedupe: lowercase fingerprint of first 40 chars catches
+            # the "Always include URLs" 6-variants problem.
+            seen = set()
+            uniq_globals = []
+            for r in globals_:
+                fp = (r or "").lower().strip()[:40]
+                if fp and fp not in seen:
+                    seen.add(fp)
+                    uniq_globals.append(r)
+            if not (uniq_globals or scenario or notes):
+                return ""
+            lines = [
+                "",
+                "─" * 30,
+                "🧠 ACTIVE BEHAVIORAL RULES "
+                "(operator feedback — FOLLOW THESE):"
+            ]
+            for r in uniq_globals:
+                lines.append(f"• {r}")
+            if scenario:
+                lines.append("")
+                lines.append("SCENARIO RULES:")
+                for r in scenario:
+                    lines.append(f"• {r}")
+            if notes:
+                lines.append("")
+                lines.append("NOTES FOR THIS CUSTOMER:")
+                for n in notes:
+                    lines.append(f"• {n}")
+            return "\n".join(lines)
+        except Exception as _e:
+            log(f"behavioral addendum err: {_e!r}")
+            return ""
     cid = (payload.get("customer_id") or "").strip()
     cname = (payload.get("customer_name") or "").strip()
     msg = payload.get("incoming_message") or ""
@@ -309,8 +364,11 @@ def handle_customer_facts(payload, send):
                 "dates": f.get("dates", ""), "yachts": f.get("yachts", ""),
                 "party_size": f.get("party_size", ""),
                 "message_count": mc})
+            addendum = _build_behavioral_addendum(cid)
             send(200, {"ok": True, "extracted": False,
-                             "message_count": mc, "customer_header": hdr})
+                             "message_count": mc,
+                             "customer_header": hdr + addendum,
+                             "behavioral_addendum": addendum})
             return
         do_extract = (cached is None) or _facts_extract_gate(msg)
         if do_extract:
@@ -341,9 +399,13 @@ def handle_customer_facts(payload, send):
         mc = new_count if isinstance(new_count, int) \
             else ((cached or {}).get("message_count", 0) + 1)
         hdr = build_customer_header({**merged, "message_count": mc})
-        log(f"customer-facts cid={cid!r} extract={do_extract} msg#{mc}")
+        addendum = _build_behavioral_addendum(cid)
+        log(f"customer-facts cid={cid!r} extract={do_extract} msg#{mc} "
+            f"behavioral_rules_attached={'yes' if addendum else 'no'}")
         send(200, {"ok": True, "extracted": bool(do_extract),
-                         "message_count": mc, "customer_header": hdr})
+                         "message_count": mc,
+                         "customer_header": hdr + addendum,
+                         "behavioral_addendum": addendum})
     except Exception as e:
         log("customer_facts ERROR:", repr(e))
         cached = None
@@ -358,8 +420,11 @@ def handle_customer_facts(payload, send):
             "yachts": (cached or {}).get("yachts", ""),
             "party_size": (cached or {}).get("party_size", ""),
             "message_count": mc})
+        addendum = _build_behavioral_addendum(cid)
         send(200, {"ok": True, "extracted": False, "degraded": True,
-                         "message_count": mc, "customer_header": hdr})
+                         "message_count": mc,
+                         "customer_header": hdr + addendum,
+                         "behavioral_addendum": addendum})
 
 # (moved to routes.py — handle_<name>(payload, self._send))
 
