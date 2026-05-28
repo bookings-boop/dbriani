@@ -415,17 +415,26 @@ def render_review(scored, totals, mode="ondemand"):
             imp_bits = ""
             if isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
-                sug = (row.get("suggested_action") or "").strip()
-                rea = (row.get("importance_reasoning") or "").strip()
-                why_used_sug = (sug and why == sug)
-                if sug and not why_used_sug:
-                    imp_bits += f" — _{sug}_"
-                elif rea and why_used_sug:
-                    # Why-line already carries the suggestion; show the
-                    # 'why this score' reasoning on the 🧠 line instead.
-                    imp_bits += f" — _{rea}_"
-                elif rea:
-                    imp_bits += f" — _{rea}_"
+                if label_key == "CONFIRMED":
+                    # Booked & paid — any cached suggested_action/reasoning
+                    # predates the payment (e.g. 'send payment link to
+                    # lock the deposit'), so it's stale and misleading
+                    # (Antonio, 2026-05-28). Suppress it; point the
+                    # operator at post-sale actions instead.
+                    imp_bits += (" — _booked & paid · confirm logistics "
+                                 "or upsell (extra hour / add-ons)_")
+                else:
+                    sug = (row.get("suggested_action") or "").strip()
+                    rea = (row.get("importance_reasoning") or "").strip()
+                    why_used_sug = (sug and why == sug)
+                    if sug and not why_used_sug:
+                        imp_bits += f" — _{sug}_"
+                    elif rea and why_used_sug:
+                        # Why-line already carries the suggestion; show the
+                        # 'why this score' reasoning on the 🧠 line instead.
+                        imp_bits += f" — _{rea}_"
+                    elif rea:
+                        imp_bits += f" — _{rea}_"
             lead_body = (
                 f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
                 f"{(row.get('yachts') or 'no yacht set')} · "

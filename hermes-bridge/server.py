@@ -1649,8 +1649,18 @@ def refresh_customer_facts_from_waha(customer_id):
         cached = get_customer_facts(customer_id)
         merged = (_merge_facts(cached, extracted) if extracted
                   else _merge_facts(cached, None))
-        if not (merged.get("name") or "").strip() and waha.get("push_name"):
-            merged["name"] = waha["push_name"]
+        if not (merged.get("name") or "").strip():
+            pn = (waha.get("push_name") or "").strip()
+            # Don't store a phone-format pushName as the customer's name.
+            # Many customers set their WhatsApp display name to their own
+            # number (e.g. '+971 58 821 1789'), which then shows in
+            # /review instead of a real name AND blocks a real name
+            # extracted later (Antonio, 2026-05-28). Only accept a
+            # pushName that actually looks like a name (has letters and
+            # isn't just phone punctuation/digits).
+            if pn and re.search(r"[A-Za-z]{2,}", pn) \
+                    and not re.fullmatch(r"[+\d\s().\-]+", pn):
+                merged["name"] = pn
         upsert_customer_facts(customer_id,
                               merged.get("name") or "", merged)
         return merged
