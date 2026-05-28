@@ -1712,10 +1712,18 @@ def handle_assist(payload, send):
         "  Examples: 'what is the status of William?', 'tell me "
         "about Luke', 'where are we with Madawi?', 'any update "
         "on Qurbani?'\n"
-        "- draft_nudge: operator wants a follow-up message drafted "
+        "- draft_nudge: operator wants a follow-up / message drafted "
         "for a customer.\n"
         "  Examples: 'draft a nudge to William', 'follow up with "
-        "Luke about the Bliss', 'send a check-in to Madawi'.\n"
+        "Luke about the Bliss', 'send a check-in to Madawi', "
+        "'draft a nudge to Madawi and tell him we cant call now, "
+        "sunday before 4 or after 8pm — which is better?'.\n"
+        "  IMPORTANT: put the operator's FULL instruction of WHAT to "
+        "say into `detail` verbatim — everything after the customer "
+        "name (e.g. 'tell him we cant call now, sunday before 4 or "
+        "after 8pm, which is better?'). Do NOT shorten it to a topic; "
+        "the drafter needs the complete instruction to write the "
+        "right message.\n"
         "- send_paylink: operator wants a payment link created.\n"
         "  Examples: 'send a payment link to Luke for AED 5000', "
         "'create paylink for Madawi 3500'.\n"
@@ -1745,9 +1753,10 @@ def handle_assist(payload, send):
         " \"amount_aed\": <number or null>,"
         " \"file_key\": \"...\" (snake_case slug for send_file, "
         "else empty),"
-        " \"detail\": \"...\" (extra context or filter, e.g. "
-        "'about the Bliss this weekend' for draft_nudge; the "
-        "caption text for send_file if operator said one),"
+        " \"detail\": \"...\" (for draft_nudge: the operator's FULL "
+        "verbatim instruction of what to say — everything after the "
+        "customer name; for find_customer: the filter; for send_file: "
+        "the caption if any),"
         " \"reasoning\": \"one short sentence explaining the "
         "classification\"}\n\n"
         f"OPERATOR MESSAGE: {text!r}\n\n"
@@ -2151,13 +2160,37 @@ def handle_draft_followup(payload, send):
                 directive += (" KNOWN FACTS to anchor on (do NOT ask the "
                               "customer to repeat these): "
                               + " · ".join(facts_bits) + ".")
+        # Operator-directed override — production bug 2026-05-28:
+        # "draft a nudge to Madawi and tell him we can't call now,
+        # sunday before 4 or after 8pm — what's convenient?" produced
+        # a generic "someone will reach out shortly" because the
+        # operator's actual instruction (passed as operator_hint by
+        # /assist) was never used. When present, it REPLACES the
+        # generic label directive — the operator is telling us exactly
+        # what to say, so say it.
+        operator_hint = (payload.get("operator_hint") or "").strip()
+        if operator_hint:
+            directive = (
+                "OPERATOR-DIRECTED MESSAGE. The operator has told you "
+                "exactly what to communicate to this customer. Write the "
+                "actual customer-facing WhatsApp message that delivers "
+                "this, in Maria's warm lowercase voice, anchored to the "
+                "conversation context above. Follow the instruction "
+                "precisely — do NOT substitute a generic 'someone will "
+                "reach out' or 'just checking in' message, and do NOT "
+                "add unrelated upsells.\n\n"
+                f"OPERATOR'S INSTRUCTION: \"{operator_hint}\"\n\n"
+                "If the instruction contains a question (e.g. preferred "
+                "timings), ask it naturally in the message. Keep it "
+                "concise and human.")
         # Build the prompt — mirrors _draft() but with the directive
         # injected as the incoming_message context.
+        tag = "OPERATOR-DIRECTED" if operator_hint \
+            else f"PROACTIVE FOLLOW-UP — label={label}"
         inner = {
             "customer_id": cid,
             "customer_name": payload.get("customer_name") or name,
-            "incoming_message": (
-                f"[PROACTIVE FOLLOW-UP — label={label}] {directive}"),
+            "incoming_message": f"[{tag}] {directive}",
             "history": history,
             "session_id": payload.get("session_id"),
         }
