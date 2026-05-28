@@ -4552,7 +4552,7 @@
       "onError": "continueRegularOutput",
       "parameters": {
         "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -4564,7 +4564,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\"{{ $json.reply_markup ? ', \"reply_markup\": ' + JSON.stringify($json.reply_markup) : '' }} }",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ $json.reply_markup ? JSON.stringify($json.reply_markup) : '{\"inline_keyboard\":[]}' }} }",
         "options": {}
       }
     },
@@ -6263,6 +6263,34 @@
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify($json.telegram_text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {\"inline_keyboard\": []} }",
+        "options": {}
+      },
+      "id": "edit-disregard-done-20260529",
+      "name": "Edit Disregard Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6320,
+        3200
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -7815,7 +7843,7 @@
       "main": [
         [
           {
-            "node": "Send Disregard Btn Reply",
+            "node": "Edit Disregard Done",
             "type": "main",
             "index": 0
           }
