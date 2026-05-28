@@ -439,18 +439,39 @@ def render_review(scored, totals, mode="ondemand"):
                     _imp_s = row.get("importance_analyzed_at_seconds")
                     _cust_s = row.get("last_customer_message_at_seconds")
                     _nudge_s = row.get("last_nudge_drafted_at_seconds")
+                    _reply_s = row.get("last_operator_reply_at_seconds")
+                    # Our most-recent outbound (reply OR nudge), in
+                    # seconds-ago (smaller = more recent).
+                    _out_cands = [s for s in (_reply_s, _nudge_s)
+                                  if isinstance(s, (int, float))]
+                    _out_s = min(_out_cands) if _out_cands else None
+                    # We messaged AFTER the customer → awaiting their reply.
+                    _we_last = (_out_s is not None
+                                and (not isinstance(_cust_s, (int, float))
+                                     or _out_s < _cust_s))
+                    # Analysis stale if ANY activity (customer msg or our
+                    # outbound) happened after it ran.
                     _stale = isinstance(_imp_s, (int, float)) and (
                         (isinstance(_cust_s, (int, float))
                          and _imp_s > _cust_s + 60)
-                        or (isinstance(_nudge_s, (int, float))
-                            and _imp_s > _nudge_s + 60))
+                        or (_out_s is not None and _imp_s > _out_s + 60))
                     sug = (row.get("suggested_action") or "").strip()
                     rea = (row.get("importance_reasoning") or "").strip()
                     why_used_sug = (sug and why == sug)
-                    if _stale:
-                        imp_bits += (" — _🔄 new activity since last "
-                                     "analysis — open the chat before "
-                                     "nudging (draft will re-check)_")
+                    if _we_last and _out_s is not None:
+                        # We ALREADY followed up and they haven't replied —
+                        # never recommend another nudge (Shanebabu was
+                        # told 'send nudge' 8 min after we messaged him,
+                        # 2026-05-29). Show when + that we're waiting.
+                        imp_bits += (
+                            f" — _✅ followed up {_fmt_dur(_out_s)} ago — "
+                            f"awaiting reply, don't re-nudge_")
+                    elif _stale:
+                        # Customer was active since the analysis ran; the
+                        # cached recommendation is out of date.
+                        imp_bits += (" — _🔄 customer active since last "
+                                     "analysis — open chat / draft to "
+                                     "re-check_")
                     elif sug and not why_used_sug:
                         imp_bits += f" — _{sug}_"
                     elif rea and why_used_sug:
