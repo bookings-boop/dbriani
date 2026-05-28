@@ -139,25 +139,47 @@ def _merge_facts(cached, extracted):
 
 # --- /review ranking + render -------------------------------------
 
-# High-value yacht class — 100+ ft, premium tier. Bookings on these
-# yachts represent significantly higher revenue per charter, so they
-# get a sorting bonus regardless of label (operator: "+972 54-209-0578
-# with AK Royalty 136 should be on top").
-LARGE_YACHTS = frozenset({
-    "ak royalty", "mila", "cante", "luna", "notorious", "sapphire",
-    "athena", "skyfall", "tatti", "odysea", "royal mirage", "asya",
-    "finesse", "carina", "haigan",
-})
+# Yacht hourly rate (AED/hr) from catalog §7. Used to rank leads by the
+# VALUE of the yachts they're interested in (operator 2026-05-29: "based
+# on hourly yacht rate the customers are interested in, it should be
+# sorted" — William/Pershing 82 @5,500 should outrank mid-rate leads).
+# Keys are lowercase substrings matched against customer_facts.yachts.
+YACHT_RATE = {
+    "élan 44": 799, "elan 44": 799, "elise 50": 900, "diana 50": 1100,
+    "novia 55": 1300, "zenith 64": 1300, "bliss 55": 1400,
+    "von dutch 40": 1400, "azimut 62": 1500, "cabo 77": 2200,
+    "azimut 50": 2700, "azimut 79": 2700, "belle 75": 2800,
+    "sunseeker 88": 2800, "pershing 5x": 2900, "monaco 60": 3000,
+    "satoshi": 3000, "ferretti 670": 3500, "eclipse 90": 4000,
+    "cante 97": 4400, "carina 75": 4400, "azimut 70": 4500,
+    "azimut 77": 4500, "haigan": 4500, "zirve 72": 4500,
+    "azimut 88": 4750, "luna 101": 5000, "galeon 780": 5000,
+    "notorious": 5000, "asya 110": 5300, "ferretti 780": 5500,
+    "pershing 82": 5500, "benetti 120": 5500, "royal mirage": 6000,
+    "zeta 100": 7000, "dolce vita": 7500, "riva 82": 9000,
+    "tatti 110": 9000, "sapphire 150": 9000, "baglietto 110": 9000,
+    "princess x95": 9900, "lamborghini 63": 10000, "odysea 130": 10000,
+    "aurora 130": 14000, "sunseeker 131": 15000, "royalty 136": 15000,
+    "saffuriya": 15000, "thunder": 15000, "mila 141": 18000,
+    "athena 170": 18000, "skyfall 177": 20000, "finesse": 20000,
+    "sofiya": 20000,
+}
 
 
-def _yacht_size_bonus(yachts_str):
-    """Return +200 if any yacht in the comma-separated string is in
-    LARGE_YACHTS (100+ ft tier), else 0. Case-insensitive substring
-    match — yacht names in customer_facts vary in formatting."""
+def _yacht_rate_bonus(yachts_str):
+    """Bonus scaled by the MAX hourly rate among the yachts the customer
+    is interested in. Higher-rate (= higher-value) charters sort above
+    lower-rate ones. Scaled (rate/3) so rate is the dominant within-tier
+    factor over urgency/importance, and capped at 2400 so a HOT lead can
+    never jump above WAITING_FOR_PAYMENT(4000)/CONFIRMED(5000)."""
     y = (yachts_str or "").lower()
     if not y:
         return 0
-    return 200 if any(name in y for name in LARGE_YACHTS) else 0
+    best = 0
+    for name, rate in YACHT_RATE.items():
+        if name in y and rate > best:
+            best = rate
+    return min(best // 3, 2400)
 
 
 def _booking_urgency_bonus(dates_str):
@@ -204,7 +226,7 @@ def score_lead(row, now_dt):
       2. label base (NEEDS_ATTENTION 1000, HOT 800, etc.) — except
          WAITING_FOR_PAYMENT which is 4000 base + bonuses
       3. urgency_by_booking_date: today/tomorrow +600, ≤3d +400, ≤7d +200
-      4. yacht_size_bonus: large yacht (100+ ft) +200
+      4. yacht_rate_bonus: scaled by max hourly rate (rate/3, cap 2400)
       5. urgency_by_silence (we_owe_reply, HOT silent >2h, same-day, etc.)
       6. importance_score from Hermes (0-90 within tier)
     """
@@ -255,9 +277,10 @@ def score_lead(row, now_dt):
     # booking regardless of label-tier base.
     score += _booking_urgency_bonus(row.get("dates") or "")
 
-    # Yacht-size bonus — large premium yacht (100+ ft tier) gets +200
-    # so high-value bookings surface above identical-label peers.
-    score += _yacht_size_bonus(row.get("yachts") or "")
+    # Yacht-rate bonus — scaled by the hourly rate of the yachts the
+    # customer wants, so higher-value charters sort to the top within a
+    # label tier (operator 2026-05-29).
+    score += _yacht_rate_bonus(row.get("yachts") or "")
 
     # Hermes importance — additive bonus within the label tier. Cap at +90
     # so a HOT (base 800) with importance=100 reaches 890 — still well below
