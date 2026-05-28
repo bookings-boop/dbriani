@@ -3593,6 +3593,74 @@ def handle_improve(payload, send):
         "elapsed_ms": elapsed,
     })
 
+def handle_edit_capture(payload, send):
+    """POST /edit-capture — store an operator edit-delta (the first Hermes
+    draft vs the text actually sent) for the draft-feedback learning loop.
+
+    Stores EVERY correction (difflib ratio < 0.8 == >20% changed) immediately,
+    regardless of whether the operator later engages the feedback prompt — the
+    diffs feed batch pattern analysis. Below threshold → nothing stored, no
+    prompt. Fail-safe: returns 200 ok:false on ANY error so it can never block
+    or disturb the send flow.
+
+    Body: {draft_id, sent_text?}  (sent_text overrides the Redis draft's
+    draft_text — used by the manual 'send this: X' path)."""
+    import difflib
+    from server import (
+        _draft_get,
+        edit_corr_insert,
+        get_current_label_row,
+    )
+    from waha import country_flag_for_cid
+    did = (payload.get("draft_id") or "").strip()
+    if not did:
+        send(400, {"ok": False, "error": "draft_id required"})
+        return
+    try:
+        d, _ = _draft_get(did)
+        if not d:
+            send(200, {"ok": False, "captured": False, "error": "draft not found"})
+            return
+        original = str(d.get("original_draft_text") or "").strip()
+        sent = str(payload.get("sent_text") or d.get("draft_text") or "").strip()
+        cid = (d.get("customer_phone") or "").strip()
+        # No baseline (e.g. a draft created before original_draft_text existed)
+        # or no sent text → nothing to compare; skip silently.
+        if not original or not sent or not cid:
+            send(200, {"ok": True, "captured": False, "should_prompt": False,
+                             "reason": "no baseline"})
+            return
+        ratio = difflib.SequenceMatcher(None, original, sent).ratio()
+        if ratio >= 0.8:
+            send(200, {"ok": True, "captured": False, "should_prompt": False,
+                             "similarity": round(ratio, 3)})
+            return
+        label = yacht = country = ""
+        try:
+            row = get_current_label_row(cid) or {}
+            label = row.get("label", "") or ""
+            yacht = (str(row.get("yachts", "") or "").split(",")[0]).strip()
+        except Exception as e:
+            log("edit-capture context err:", repr(e))
+        try:
+            country = country_flag_for_cid(cid) or ""
+        except Exception:
+            country = ""
+        corr_id, err = edit_corr_insert(cid, original, sent, label, yacht,
+                                        country, round(ratio, 3))
+        if err:
+            log("edit-capture INSERT err:", err)
+            send(200, {"ok": False, "captured": False, "error": err})
+            return
+        log(f"edit-capture STORED id={corr_id} cid={cid} sim={ratio:.3f} "
+            f"label={label!r} yacht={yacht!r}")
+        send(200, {"ok": True, "captured": True, "correction_id": corr_id,
+                         "similarity": round(ratio, 3), "should_prompt": True})
+    except Exception as e:
+        log("edit-capture ERROR", repr(e))
+        send(200, {"ok": False, "captured": False, "error": str(e)})
+
+
 def handle_quality_check(payload, send):
     """POST /quality-check — fast quality SCORE of a draft (no rewrite).
     Returns {ok, score:1-10, flags:[...], summary}. Fail-safe: on ANY error

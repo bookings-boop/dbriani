@@ -86,6 +86,7 @@ from routes import (  # noqa: F401
     handle_draft,
     handle_draft_followup,
     handle_draft_freshness,
+    handle_edit_capture,
     handle_feedback,
     handle_followup_action,
     handle_hourly_sweep,
@@ -1064,6 +1065,30 @@ def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
         if err:
             return None, err
         # psql -tA emits the RETURNING value then the command tag — take line 1.
+        rid = (out.strip().splitlines() or [""])[0].strip()
+        return rid, None
+    except Exception as e:
+        return None, repr(e)
+
+
+def edit_corr_insert(customer_id, original_text, sent_text, label, yacht,
+                     country, similarity):
+    """INSERT an edit_corrections row (draft feedback loop, Phase 1).
+    reason_tag / reason_detail stay NULL until the operator engages the
+    feedback prompt (Phase 2). Returns (id, None) or (None, error)."""
+    sim = "NULL" if similarity is None else str(float(similarity))
+    sql = (
+        "INSERT INTO edit_corrections "
+        "(customer_id, original_text, sent_text, context_label, "
+        "context_yacht, context_country, similarity) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(original_text), _lit(sent_text),
+                     _lit(label), _lit(yacht), _lit(country)])
+        + ", " + sim + ") RETURNING id"
+    )
+    try:
+        out, err = _psql(sql)
+        if err:
+            return None, err
         rid = (out.strip().splitlines() or [""])[0].strip()
         return rid, None
     except Exception as e:
@@ -2645,6 +2670,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
                              "/send-file", "/list-files",
+                             "/edit-capture",
                              "/nomod-webhook"):
             self._send(404, {"error": "not found"})
             return
@@ -2682,6 +2708,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_improve(payload, self._send)
         elif self.path == "/quality-check":
             handle_quality_check(payload, self._send)
+        elif self.path == "/edit-capture":
+            handle_edit_capture(payload, self._send)
         elif self.path == "/learn":
             handle_learn(payload, self._send)
         elif self.path == "/rules":

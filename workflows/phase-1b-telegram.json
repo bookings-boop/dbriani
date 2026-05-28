@@ -193,7 +193,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage,   // Nomod: skip the FR-5 improver\n  should_send_file: !!input.should_send_file,\n  file_key: input.file_key || '',\n  file_description: input.file_description || ''\n};\n// Supersede prior pending draft for the same customer. Operator's\n// mental model is 'one active card per customer' \u2014 if the customer\n// messaged again after debounce window expired (60s+), we created a\n// new draft, so the OLD draft is stale. Mark it superseded, surface\n// its message_id so downstream Notify Superseded Prior can edit the\n// old Telegram card. SKIP drafts in operator-action-in-progress\n// states (awaiting_edit/awaiting_amount/link_sent/sent/skipped/\n// superseded) to avoid losing typed feedback or duplicating action.\n// Phase C (Redis-migration): supersede is handled entirely by the\n// bridge. Persist Draft (downstream) -> _draft_save auto-supersedes\n// prior pending drafts in Redis AND disables their Telegram card\n// buttons + prepends the superseded marker. The staticData push +\n// scan and the duplicate n8n 'Notify Superseded Prior' edit were\n// removed (the bridge edit is the single source of truth).\nconst superseded_prior = null;\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  // Show name in the 'from' line when we have one \u2014 @lid hash is\n// not human-readable. Falls back to customer_phone (the @lid id\n// or @c.us number) when no name resolved.\nconst _displayName = (pending.customer_name && pending.customer_name.trim()) || pending.customer_phone;\nlines = ['\ud83d\udce9 from ' + _displayName];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nif (pending && pending.should_send_file && pending.file_key) {\n    (lines || []).push('\ud83d\udcce Suggested file: ' + pending.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + id }],\n      ...((pending && pending.should_send_file && pending.file_key) ? [[{ text: '\ud83d\udcce Send File ('+(pending.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending, superseded_prior: superseded_prior } };"
+        "jsCode": "// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['(empty draft)']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  original_draft_text: messages.join('\\n\\n'),  // baseline for /edit-capture\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage,   // Nomod: skip the FR-5 improver\n  should_send_file: !!input.should_send_file,\n  file_key: input.file_key || '',\n  file_description: input.file_description || ''\n};\n// Supersede prior pending draft for the same customer. Operator's\n// mental model is 'one active card per customer' \u2014 if the customer\n// messaged again after debounce window expired (60s+), we created a\n// new draft, so the OLD draft is stale. Mark it superseded, surface\n// its message_id so downstream Notify Superseded Prior can edit the\n// old Telegram card. SKIP drafts in operator-action-in-progress\n// states (awaiting_edit/awaiting_amount/link_sent/sent/skipped/\n// superseded) to avoid losing typed feedback or duplicating action.\n// Phase C (Redis-migration): supersede is handled entirely by the\n// bridge. Persist Draft (downstream) -> _draft_save auto-supersedes\n// prior pending drafts in Redis AND disables their Telegram card\n// buttons + prepends the superseded marker. The staticData push +\n// scan and the duplicate n8n 'Notify Superseded Prior' edit were\n// removed (the bridge edit is the single source of truth).\nconst superseded_prior = null;\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '\ud83d\udcac DRAFT:' : ('\ud83d\udcac DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('\ud83d\udcdc History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '\ud83d\udcdc First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes];\n} else {\n  // Show name in the 'from' line when we have one \u2014 @lid hash is\n// not human-readable. Falls back to customer_phone (the @lid id\n// or @c.us number) when no name resolved.\nconst _displayName = (pending.customer_name && pending.customer_name.trim()) || pending.customer_phone;\nlines = ['\ud83d\udce9 from ' + _displayName];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('\ud83d\udc64 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '\ud83d\udcdd Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nif (pending && pending.should_send_file && pending.file_key) {\n    (lines || []).push('\ud83d\udcce Suggested file: ' + pending.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '\u2705 Send', callback_data: 'send:' + id }, { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + id }],\n    [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + id }, { text: '\u274c Skip', callback_data: 'skip:' + id }],\n    [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + id },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + id }],\n      ...((pending && pending.should_send_file && pending.file_key) ? [[{ text: '\ud83d\udcce Send File ('+(pending.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending, superseded_prior: superseded_prior } };"
       },
       "id": "0353eee2-a420-41e4-9ae9-2e3f4d547b33",
       "name": "Queue & Format",
@@ -6209,6 +6209,47 @@
         3200
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "capture-edit-delta-2026-05-29",
+      "name": "Capture Edit Delta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        1450
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/edit-capture",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"draft_id\": {{ JSON.stringify($json.draft_id) }} }",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
     }
   ],
   "connections": {
@@ -6512,6 +6553,11 @@
           },
           {
             "node": "Sync Sent To Redis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Capture Edit Delta",
             "type": "main",
             "index": 0
           }
