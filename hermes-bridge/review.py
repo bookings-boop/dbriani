@@ -166,12 +166,10 @@ YACHT_RATE = {
 }
 
 
-def _yacht_rate_bonus(yachts_str):
-    """Bonus scaled by the MAX hourly rate among the yachts the customer
-    is interested in. Higher-rate (= higher-value) charters sort above
-    lower-rate ones. Scaled (rate/3) so rate is the dominant within-tier
-    factor over urgency/importance, and capped at 2400 so a HOT lead can
-    never jump above WAITING_FOR_PAYMENT(4000)/CONFIRMED(5000)."""
+def _yacht_max_rate(yachts_str):
+    """Max catalog hourly rate (AED/hr) among the yachts the customer is
+    interested in; 0 if none recognised. Drives strict rate-first
+    ordering within each /review section."""
     y = (yachts_str or "").lower()
     if not y:
         return 0
@@ -179,7 +177,15 @@ def _yacht_rate_bonus(yachts_str):
     for name, rate in YACHT_RATE.items():
         if name in y and rate > best:
             best = rate
-    return min(best // 3, 2400)
+    return best
+
+
+def _yacht_rate_bonus(yachts_str):
+    """Additive score bonus scaled by the customer's max yacht rate
+    (rate/3, capped at 2400 to stay under the WAITING/CONFIRMED tier
+    bases). Keeps the flat cross-section score roughly value-weighted;
+    strict within-section ordering is handled by _yacht_max_rate."""
+    return min(_yacht_max_rate(yachts_str) // 3, 2400)
 
 
 def _booking_urgency_bonus(dates_str):
@@ -405,6 +411,19 @@ def render_review(scored, totals, mode="ondemand"):
         secs = item[1].get("last_customer_message_at_seconds")
         return (secs is None, secs if secs is not None else 0)
     sections["NEW"]["items"].sort(key=_recency_key)
+
+    # STRICT rate-first ordering within each value-relevant section
+    # (operator 2026-05-29): order by the highest hourly rate of the
+    # yachts the customer wants, descending; the additive score is the
+    # tiebreaker (urgency/importance). This guarantees e.g. an
+    # AK Royalty 136 @18,000/hr ranks above a Tatti 110 @9,000/hr even
+    # when the additive rate bonus is capped. NEW keeps recency order
+    # (yacht rate is usually unknown that early).
+    def _rate_key(item):
+        return (_yacht_max_rate(item[1].get("yachts") or ""), item[0])
+    for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
+                "WARM", "COLD", "CONFIRMED"):
+        sections[_lk]["items"].sort(key=_rate_key, reverse=True)
 
     # ---- Single-message render (backward compat) ----------------------------
     when = ("Scheduled review" if mode == "scheduled"
