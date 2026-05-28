@@ -771,7 +771,7 @@ def classify_feedback(text):
         return None
     try:
         rc, out, _, _ = run_hermes(FEEDBACK_CLASSIFIER_PROMPT + text.strip(),
-                                   timeout=60)
+                                   timeout=60, priority="background")
         if rc == 0:
             parsed, _ = extract_json(out)
             if isinstance(parsed, dict):
@@ -1430,7 +1430,8 @@ def extract_customer_facts(incoming_message, history):
         "--- CONVERSATION ---\n" + (history or "(no prior history)") +
         "\n\n--- LATEST MESSAGE ---\n" + (incoming_message or ""))
     try:
-        rc, out, err, elapsed = run_hermes(q, timeout=FACTS_EXTRACT_TIMEOUT)
+        rc, out, err, elapsed = run_hermes(q, timeout=FACTS_EXTRACT_TIMEOUT,
+                                           priority="background")
     except subprocess.TimeoutExpired:
         log(f"extract_customer_facts: hermes timeout {FACTS_EXTRACT_TIMEOUT}s")
         return None
@@ -1591,7 +1592,8 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         f"--- CONVERSATION ---\n{history or '(no history available)'}"
     )
     try:
-        rc, out, err, elapsed = run_hermes(q, timeout=ANALYZE_LEAD_TIMEOUT)
+        rc, out, err, elapsed = run_hermes(q, timeout=ANALYZE_LEAD_TIMEOUT,
+                                           priority="background")
     except subprocess.TimeoutExpired:
         log(f"hermes_analyze_lead: timeout {ANALYZE_LEAD_TIMEOUT}s "
             f"cid={customer_id}")

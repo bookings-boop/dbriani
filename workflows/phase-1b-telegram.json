@@ -797,13 +797,13 @@
                 "options": {
                   "caseSensitive": true,
                   "leftValue": "",
-                  "typeValidation": "strict",
+                  "typeValidation": "loose",
                   "version": 2
                 },
                 "conditions": [
                   {
                     "id": "file-2026-05-27",
-                    "leftValue": "={{ $json.action }}",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
                     "rightValue": "file",
                     "operator": {
                       "type": "string",
@@ -880,7 +880,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\u2705 SENT to \" + $('Parse Callback').item.json.draft.customer_phone + \"\\n\\n\" + $('Parse Callback').item.json.draft.draft_text) }}\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\u2705 SENT to \" + $('Parse Callback').item.json.draft.customer_phone + \"\\n\\n\" + $('Parse Callback').item.json.draft.draft_text) }},\n  \"reply_markup\": {\"inline_keyboard\": []}\n}",
         "options": {}
       },
       "id": "0146bfff-35f3-44bb-b5cd-2c1afe4a5f8d",
@@ -991,7 +991,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// R4: only one draft may await an edit at a time.\n// Redis-migration 2026-05-28: write status to Redis (bridge\n// mark sets the awaiting_edit singleton via _draft_update) so\n// Process Text Reply's Redis 'awaiting' lookup finds it.\n// Previously this only mutated staticData -> after the read\n// migration, edit feedback silently fell through.\nconst pc = $('Parse Callback').item.json;\nconst draftId = pc.draft_id;\nconst pcDraft = pc.draft || {};\nconst adminChatId = pc.chat_id || 5532831477;\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({ method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000 });\n  } catch (e) { return null; }\n}\n// conflict \u2014 another draft already awaiting edit?\nconst cur = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nif (cur && cur.found && cur.draft && cur.draft.id !== draftId) {\n  return { json: { blocked: true,\n    blocking_phone: cur.draft.customer_phone || 'unknown',\n    draft_id: draftId } };\n}\n// set awaiting_edit in Redis (singleton written by bridge)\nawait bq('mark', { draft_id: draftId, status: 'awaiting_edit' });\nreturn { json: {\n  blocked: false,\n  draft_id: draftId,\n  customer_phone: pcDraft.customer_phone || 'unknown',\n  original_draft: (pcDraft.messages && pcDraft.messages[0]) || pcDraft.draft_text || 'unknown'\n} };\n"
+        "jsCode": "// R4: only one draft may await an edit at a time.\n// Redis-migration 2026-05-28: write status to Redis (bridge\n// mark sets the awaiting_edit singleton via _draft_update) so\n// Process Text Reply's Redis 'awaiting' lookup finds it.\n// Previously this only mutated staticData -> after the read\n// migration, edit feedback silently fell through.\nconst pc = $('Parse Callback').item.json;\nconst draftId = pc.draft_id;\nconst pcDraft = pc.draft || {};\nconst adminChatId = pc.chat_id || 5532831477;\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({ method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000 });\n  } catch (e) { return null; }\n}\n// A previous draft still holds the awaiting_edit lock? Single\n// operator: tapping Edit on a NEW draft means the old edit was\n// abandoned, so STEAL the lock instead of blocking. Incident\n// 2026-05-28: a stale lock blocked the new edit (blocked=true) and\n// the operator's typed edit then leaked to /assist as a nudge to a\n// DIFFERENT customer (wrong-number send). Release the old lock\n// first so this draft's lock is the only one.\nconst cur = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nif (cur && cur.found && cur.draft && cur.draft.id !== draftId) {\n  await bq('mark', { draft_id: cur.draft.id, status: 'pending' });\n}\n// set awaiting_edit in Redis (singleton written by bridge).\n// RETRY: the lock MUST land or the operator's next message won't\n// route to refine (it would hit /assist). 3 tries covers a\n// transient bridge hiccup under load (2026-05-28: marks were\n// silently failing during high-volume bursts).\nlet _mk = null;\nfor (let _i = 0; _i < 3 && !(_mk && _mk.ok); _i++) {\n  _mk = await bq('mark', { draft_id: draftId, status: 'awaiting_edit' });\n}\nreturn { json: {\n  blocked: false,\n  draft_id: draftId,\n  customer_phone: pcDraft.customer_phone || 'unknown',\n  original_draft: (pcDraft.messages && pcDraft.messages[0]) || pcDraft.draft_text || 'unknown'\n} };\n"
       },
       "id": "7846dcfa-6530-4de5-9939-99729993ad5d",
       "name": "Set Awaiting Edit",
@@ -1151,7 +1151,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse regen response, update the existing draft (R3: array shape)\nconst response = $input.item.json;\nlet raw = \"\";\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: \"Empty Claude response on regen\", raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error(\"messages missing\");\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: \"(parse fail: \" + e.message + \")\" };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : '',\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n} };"
+        "jsCode": "// Parse regen response \u2192 new content + a fully-rendered card.\n// Redis-migration 2026-05-28: no longer relies on staticData for\n// the authoritative draft. Customer context comes from the Redis\n// draft (via Parse Callback); the new content + card are committed\n// ATOMICALLY by the downstream 'Regen Commit (Classic)' node\n// (card edit + Redis write in one bridge call), so what the\n// operator sees == what Send fans. Bug 2026-05-28: classic regen\n// wrote only staticData, so Send pushed the pre-regen text.\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on regen', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\n\n// Authoritative customer context = the Redis draft resolved by\n// Parse Callback. Fall back to staticData only if it's absent.\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\nlet cust = { phone: d.customer_phone, name: d.customer_name, message: d.customer_message };\nif (!cust.phone) {\n  const data = $getWorkflowStaticData('global');\n  const entry = (data.pendingQueue || []).find(x => x.id === draftId);\n  if (entry) cust = { phone: entry.customer_phone, name: entry.customer_name, message: entry.customer_message };\n}\n\nconst new_draft_text = msgs.join('\\n\\n');\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst new_notes = parsed.notes_for_zayn || '(no notes)';\n\nconst card_text = '\\ud83d\\udce9 [REGEN] from ' + (cust.phone || '?') +\n  '\\nName: ' + (cust.name || '(unknown)') +\n  '\\n\\nThey said:\\n\"' + (cust.message || '') + '\"' +\n  '\\n\\n---\\n\\ud83d\\udcac NEW DRAFT:\\n' + preview +\n  '\\n\\n\\ud83d\\udcdd Notes: ' + new_notes;\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\\u2705 Send', callback_data: 'send:' + draftId }, { text: '\\u270f\\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\\ud83d\\udd01 Regen', callback_data: 'regen:' + draftId }, { text: '\\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\\ud83e\\udd16 Auto', callback_data: 'auto:' + draftId }, { text: '\\ud83d\\udcb3 Send Link', callback_data: 'paylink:' + draftId }]\n]};\n\nreturn { json: {\n  draft_id: draftId,\n  new_messages: msgs,\n  new_draft_text: new_draft_text,\n  new_preview: preview,\n  new_notes: new_notes,\n  customer_phone: cust.phone || 'unknown',\n  customer_name: cust.name || '',\n  customer_message: cust.message || '',\n  card: { chat_id: pc.chat_id, message_id: pc.message_id, text: card_text, reply_markup: reply_markup },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string') ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string') ? parsed.file_description.trim() : '',\n} };\n"
       },
       "id": "ebde5e8c-9695-4708-8f07-fad6082a258a",
       "name": "Parse Regen",
@@ -1164,35 +1164,8 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Callback').item.json.chat_id }},\n  \"message_id\": {{ $('Parse Callback').item.json.message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REGEN] from \" + $json.customer_phone + \"\\nName: \" + ($json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $json.draft_id},{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $json.draft_id}]]}) }}\n}",
-        "options": {}
-      },
-      "id": "2fa0e426-23da-4756-a56f-0ae1e2bde1c8",
-      "name": "Edit Telegram (Regen)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6416,
-        1440
-      ]
-    },
-    {
-      "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\n// Redis-migration 2026-05-28: bridge lookups replace staticData\n// queue scans. _http is bound so it works inside this node.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000,\n    });\n  } catch (e) { return null; }\n}\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      const _r = await bq('get-by-tgmsg', { message_id: r2.message_id });\n      d2 = (_r && _r.found) ? _r.draft : null;\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const _aa = await bq('awaiting', { status: 'awaiting_amount', chat_id: adminChatId });\n  const await_amt = (_aa && _aa.found) ? _aa.draft : null;\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await bq('mark', { draft_id: await_amt.id, status: 'pending' });  // release lock in Redis\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst _ae = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nconst awaiting = (_ae && _ae.found) ? _ae.draft : null;\nif (awaiting && text) {\n  await bq('mark', { draft_id: awaiting.id, status: 'pending' });  // release the edit lock in Redis\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // newest-match: telegram message_ids collide across bot/session resets\n  const _rr = await bq('get-by-tgmsg', { message_id: r.message_id });\n  let d = (_rr && _rr.found) ? _rr.draft : null;\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      // explicit directive \u2014 send the operator's text verbatim\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    // everything else is FEEDBACK FOR CLAUDE \u2014 refine the draft, never auto-send\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (Z) FALLBACK \u2014 non-command, non-reply free-text from operator -> /assist endpoint for natural-language routing\n//     (status queries, draft nudges, paylink creation, customer search). Empty text still acks.\nif (!text || !text.trim()) {\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: '\u26a0\ufe0f Empty message.' } };\n}\nreturn { json: { action: 'assist_query', query_text: text, admin_chat_id: adminChatId } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\n// Redis-migration 2026-05-28: bridge lookups replace staticData\n// queue scans. _http is bound so it works inside this node.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000,\n    });\n  } catch (e) { return null; }\n}\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      const _r = await bq('get-by-tgmsg', { message_id: r2.message_id });\n      d2 = (_r && _r.found) ? _r.draft : null;\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const _aa = await bq('awaiting', { status: 'awaiting_amount', chat_id: adminChatId });\n  const await_amt = (_aa && _aa.found) ? _aa.draft : null;\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await bq('mark', { draft_id: await_amt.id, status: 'pending' });  // release lock in Redis\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst _ae = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nconst awaiting = (_ae && _ae.found) ? _ae.draft : null;\nif (awaiting && text) {\n  await bq('mark', { draft_id: awaiting.id, status: 'pending' });  // release the edit lock in Redis\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // Resolve the replied-to card to its draft (newest-match: telegram\n  // message_ids collide across bot/session resets).\n  const _rr = await bq('get-by-tgmsg', { message_id: r.message_id });\n  let d = (_rr && _rr.found) ? _rr.draft : null;\n  // Fallback: the replied-to message may not be the card itself, or\n  // the card's draft may have expired. If an awaiting_edit lock is\n  // set for this chat (operator tapped Edit), refine THAT draft.\n  if (!d) {\n    const _ae2 = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\n    d = (_ae2 && _ae2.found) ? _ae2.draft : null;\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n  // A REPLY must NEVER fall through to /assist \u2014 that could send a\n  // nudge to a wrong fuzzy-matched customer (wrong-number incident\n  // 2026-05-28). If we can't map the reply to a live draft, say so.\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: \"\\u26a0\\ufe0f Couldn't match that reply to a live \"\n      + \"draft card (it may have already been sent or expired). \"\n      + \"Tap \\u270f\\ufe0f Edit on the card you want to change, \"\n      + \"then type your edit.\" } };\n}\n\n// (Z) FALLBACK \u2014 non-command, non-reply free-text from operator -> /assist endpoint for natural-language routing\n//     (status queries, draft nudges, paylink creation, customer search). Empty text still acks.\nif (!text || !text.trim()) {\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: '\u26a0\ufe0f Empty message.' } };\n}\nreturn { json: { action: 'assist_query', query_text: text, admin_chat_id: adminChatId } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -1985,7 +1958,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n  entry.status = 'pending';\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  // FIX 2026-05-27: include messages + draft_text so the downstream\n  // 'Sync Refine To Redis' node can POST them to /queue update,\n  // keeping Redis aligned with staticData. Without this, Send button\n  // reads stale Redis content and sends the pre-refine message.\n  messages: msgs,\n  draft_text: msgs.join('\\n\\n'),\n  notes: parsed.notes_for_zayn || (entry ? entry.notes : ''),\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : '',\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n} };\n"
+        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  parsed = { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst entry = (data.pendingQueue || []).find(d => d.id === draftId);\nif (entry) {\n  entry.messages = msgs;\n  entry.draft_text = msgs.join('\\n\\n');\n  entry.notes = parsed.notes_for_zayn || entry.notes;\n  entry.messages_sent_count = 0;\n  entry.status = 'pending';\n}\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nreturn { json: {\n  draft_id: draftId,\n  // FIX 2026-05-27: include messages + draft_text so the downstream\n  // 'Sync Refine To Redis' node can POST them to /queue update,\n  // keeping Redis aligned with staticData. Without this, Send button\n  // reads stale Redis content and sends the pre-refine message.\n  messages: msgs,\n  draft_text: msgs.join('\\n\\n'),\n  notes: parsed.notes_for_zayn || (entry ? entry.notes : ''),\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: entry ? entry.customer_phone : 'unknown',\n  customer_name: entry ? entry.customer_name : '',\n  customer_message: entry ? entry.customer_message : '',\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id,\n  // Atomic refine commit (2026-05-28): card + Redis written\n  // together by 'Refine Commit' (regen-commit) so an exec crash\n  // can't leave Redis ahead of the card (sent != shown).\n  card: {\n    chat_id: bp.admin_chat_id,\n    message_id: bp.telegram_message_id,\n    text: '\\ud83d\\udce9 [REFINED] from ' + (entry ? entry.customer_phone : 'unknown')\n      + '\\nName: ' + ((entry && entry.customer_name) || '(unknown)')\n      + '\\n\\nThey said:\\n\"' + ((entry && entry.customer_message) || '') + '\"'\n      + '\\n\\n---\\n\\ud83d\\udcac NEW DRAFT:\\n' + preview\n      + '\\n\\n\\ud83d\\udcdd Notes: ' + (parsed.notes_for_zayn || '(no notes)'),\n    reply_markup: { inline_keyboard: [\n      [{ text: '\\u2705 Send', callback_data: 'send:' + draftId }, { text: '\\u270f\\ufe0f Edit', callback_data: 'edit:' + draftId }],\n      [{ text: '\\ud83d\\udd01 Regen', callback_data: 'regen:' + draftId }, { text: '\\u274c Skip', callback_data: 'skip:' + draftId }],\n      [{ text: '\\ud83e\\udd16 Auto', callback_data: 'auto:' + draftId }, { text: '\\ud83d\\udcb3 Send Link', callback_data: 'paylink:' + draftId }]\n    ] }\n  },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n} };\n"
       },
       "id": "a58240a9-95dc-42eb-bf1e-afcce3a9efa4",
       "name": "Parse Refine",
@@ -1993,33 +1966,6 @@
       "typeVersion": 2,
       "position": [
         6148,
-        1580
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Parse Refine').item.json.admin_chat_id }},\n  \"message_id\": {{ $('Parse Refine').item.json.telegram_message_id }},\n  \"text\": {{ JSON.stringify(\"\ud83d\udce9 [REFINED] from \" + $('Parse Refine').item.json.customer_phone + \"\\nName: \" + ($('Parse Refine').item.json.customer_name || \"(unknown)\") + \"\\n\\nThey said:\\n\\\"\" + $('Parse Refine').item.json.customer_message + \"\\\"\\n\\n---\\n\ud83d\udcac NEW DRAFT:\\n\" + $('Parse Refine').item.json.new_preview + \"\\n\\n\ud83d\udcdd Notes: \" + $('Parse Refine').item.json.new_notes) }},\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard: [[{text: \"\u2705 Send\", callback_data: \"send:\" + $('Parse Refine').item.json.draft_id}, {text: \"\u270f\ufe0f Edit\", callback_data: \"edit:\" + $('Parse Refine').item.json.draft_id}], [{text: \"\ud83d\udd01 Regen\", callback_data: \"regen:\" + $('Parse Refine').item.json.draft_id}, {text: \"\u274c Skip\", callback_data: \"skip:\" + $('Parse Refine').item.json.draft_id}], [{text: \"\ud83e\udd16 Auto\", callback_data: \"auto:\" + $('Parse Refine').item.json.draft_id},{text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + $('Parse Refine').item.json.draft_id}]]}) }}\n}",
-        "options": {}
-      },
-      "id": "f07d84c0-d0d6-4145-a5f7-e4acc788db24",
-      "name": "Edit Telegram (Refine)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6408,
         1580
       ]
     },
@@ -2237,7 +2183,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-5: apply Hermes's improvement to the pending draft + re-render the card\nconst resp = $input.item.json || {};\nconst cp = $('Check Pending').item.json;\nconst draftId = cp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\n// race guard: the operator may have acted during the ~18s Hermes call\nif (!d || d.status !== 'pending') return [];\n// Race guard: even if staticData says 'pending', Redis is the\n// cross-execution source of truth. The Send-callback execution\n// may have flipped the draft to 'sent' between our exec-start\n// snapshot and now. If Redis says 'sent'/'skipped'/'link_sent',\n// abort \u2014 don't re-edit the card AFTER it's been actioned.\ntry {\n  const redisResp = $('Recheck Draft Status').item.json || {};\n  const redisDraft = redisResp.draft || null;\n  if (redisDraft && redisDraft.status && redisDraft.status !== 'pending') {\n    return [];\n  }\n} catch (e) { /* fall through \u2014 staticData check is enough */ }\nif (resp.ok !== true || resp.improved !== true) return [];\nconst msgs = (Array.isArray(resp.messages) && resp.messages.length)\n  ? resp.messages.slice(0, 4).map(m => String(m)) : null;\nif (!msgs) return [];\nd.messages = msgs;\nd.draft_text = msgs.join('\\n\\n');\nd.improved_note = resp.note || '';\nconst preview = msgs.length === 1 ? msgs[0]\n  : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = msgs.length === 1 ? '\ud83d\udcac DRAFT:'\n  : ('\ud83d\udcac DRAFT (' + msgs.length + ' messages):');\nconst lines = [];\n// Apply Improvement was stripping the rich customer header that\n// Queue & Format adds (name / yachts / dates / party / msg#).\n// Reuse the same Customer Facts header here so the operator sees\n// consistent context before AND after the improver fires.\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Show name in the 'from' line when available; @lid hash is\n// not human-readable.\nconst displayName = (d.customer_name && d.customer_name.trim()) || d.customer_phone;\nif (d.is_lead) {\n  lines.push('\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + d.customer_phone,\n             '', 'Lead brief (from you):', '\"' + d.customer_message + '\"');\n} else {\n  lines.push('\ud83d\udce9 from ' + displayName);\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else if (d.customer_name) {\n    lines.push('\ud83d\udc64 ' + d.customer_name);\n  }\n  lines.push('', 'They said:', '\"' + d.customer_message + '\"');\n}\nlines.push('', '---', '\u2728 improved by Hermes', draftHeader, preview,\n           '', '\ud83d\udcdd Notes: ' + (d.notes || ''));\nif (d && d.should_send_file && d.file_key) {\n    (lines || []).push('\ud83d\udcce Suggested file: ' + d.file_key);\n  }\n  const reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + draftId },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + draftId }],\n      ...((d && d.should_send_file && d.file_key) ? [[{ text: '\ud83d\udcce Send File ('+(d.file_key)+')', callback_data: 'file:' + draftId }]] : [])\n] };\nreturn [{ json: {\n  chat_id: d.telegram_chat_id || 5532831477,\n  message_id: cp.telegram_message_id,\n  text: lines.join('\\n'),\n  reply_markup: reply_markup,\n  draft_id: draftId,\n  improved_draft_text: d.draft_text\n} }];\n"
+        "jsCode": "// FR-5: apply Hermes's improvement to the pending draft + re-render the card\nconst resp = $input.item.json || {};\nconst cp = $('Check Pending').item.json;\nconst draftId = cp.draft_id;\nconst data = $getWorkflowStaticData('global');\nconst d = (data.pendingQueue || []).find(x => x.id === draftId);\n// race guard: the operator may have acted during the ~18s Hermes call\nif (!d || d.status !== 'pending') return [];\n// Race guard: even if staticData says 'pending', Redis is the\n// cross-execution source of truth. The Send-callback execution\n// may have flipped the draft to 'sent' between our exec-start\n// snapshot and now. If Redis says 'sent'/'skipped'/'link_sent',\n// abort \u2014 don't re-edit the card AFTER it's been actioned.\ntry {\n  const redisResp = $('Recheck Draft Status').item.json || {};\n  const redisDraft = redisResp.draft || null;\n  if (redisDraft && redisDraft.status && redisDraft.status !== 'pending') {\n    return [];\n  }\n} catch (e) { /* fall through \u2014 staticData check is enough */ }\nif (resp.ok !== true || resp.improved !== true) return [];\nconst msgs = (Array.isArray(resp.messages) && resp.messages.length)\n  ? resp.messages.slice(0, 4).map(m => String(m)) : null;\nif (!msgs) return [];\nd.messages = msgs;\nd.draft_text = msgs.join('\\n\\n');\nd.improved_note = resp.note || '';\nconst preview = msgs.length === 1 ? msgs[0]\n  : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = msgs.length === 1 ? '\ud83d\udcac DRAFT:'\n  : ('\ud83d\udcac DRAFT (' + msgs.length + ' messages):');\nconst lines = [];\n// Apply Improvement was stripping the rich customer header that\n// Queue & Format adds (name / yachts / dates / party / msg#).\n// Reuse the same Customer Facts header here so the operator sees\n// consistent context before AND after the improver fires.\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Show name in the 'from' line when available; @lid hash is\n// not human-readable.\nconst displayName = (d.customer_name && d.customer_name.trim()) || d.customer_phone;\nif (d.is_lead) {\n  lines.push('\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + d.customer_phone,\n             '', 'Lead brief (from you):', '\"' + d.customer_message + '\"');\n} else {\n  lines.push('\ud83d\udce9 from ' + displayName);\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else if (d.customer_name) {\n    lines.push('\ud83d\udc64 ' + d.customer_name);\n  }\n  lines.push('', 'They said:', '\"' + d.customer_message + '\"');\n}\nlines.push('', '---', '\u2728 improved by Hermes', draftHeader, preview,\n           '', '\ud83d\udcdd Notes: ' + (d.notes || ''));\nif (d && d.should_send_file && d.file_key) {\n    (lines || []).push('\ud83d\udcce Suggested file: ' + d.file_key);\n  }\n  const reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + draftId },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + draftId }],\n      ...((d && d.should_send_file && d.file_key) ? [[{ text: '\ud83d\udcce Send File ('+(d.file_key)+')', callback_data: 'file:' + draftId }]] : [])\n] };\nreturn [{ json: {\n  chat_id: d.telegram_chat_id || 5532831477,\n  message_id: cp.telegram_message_id,\n  text: lines.join('\\n'),\n  reply_markup: reply_markup,\n  draft_id: draftId,\n  improved_draft_text: d.draft_text,\n  improved_messages: msgs\n} }];\n"
       },
       "id": "6736d545-a4a5-4046-ad11-fa9ac2f5c51f",
       "name": "Apply Improvement",
@@ -2245,33 +2191,6 @@
       "typeVersion": 2,
       "position": [
         6768,
-        1032
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": {{ $json.chat_id }}, \"message_id\": {{ $json.message_id }}, \"text\": {{ JSON.stringify($json.text) }}, \"reply_markup\": {{ JSON.stringify($json.reply_markup) }} }",
-        "options": {}
-      },
-      "id": "3512a752-613a-44ab-a858-dacd490e4c9f",
-      "name": "Edit Improved Card",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6968,
         1032
       ]
     },
@@ -5333,75 +5252,6 @@
       }
     },
     {
-      "id": "25ddbcba-f00d-4ff7-9027-fb56455ae229",
-      "name": "Update Redis (Regen)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6016,
-        1200
-      ],
-      "onError": "continueRegularOutput",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "IgIcvPoibuAayVDx",
-          "name": "Hermes Bridge"
-        }
-      },
-      "parameters": {
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "method": "POST",
-        "url": "http://172.18.0.1:8788/queue",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={ \"action\": \"update\", \"draft_id\": {{ JSON.stringify($('Build Regen Card').item.json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($('Build Regen Card').item.json.draft_text) }}, \"messages\": {{ JSON.stringify($('Build Regen Card').item.json.new_messages) }} } }",
-        "options": {
-          "timeout": 15000
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
-    },
-    {
-      "id": "3dd73ee9-a148-470c-88a6-cf3931fe8cc5",
-      "name": "Edit Telegram (Regen Followup)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6256,
-        1200
-      ],
-      "onError": "continueRegularOutput",
-      "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={ \"chat_id\": {{ $('Build Regen Card').item.json.edit_payload.chat_id }}, \"message_id\": {{ $('Build Regen Card').item.json.edit_payload.message_id }}, \"text\": {{ JSON.stringify($('Build Regen Card').item.json.edit_payload.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify($('Build Regen Card').item.json.edit_payload.reply_markup) }} }",
-        "options": {}
-      }
-    },
-    {
       "parameters": {
         "method": "POST",
         "url": "http://172.18.0.1:8788/autosend-state",
@@ -6020,47 +5870,6 @@
       "waitBetweenTries": 2500
     },
     {
-      "id": "sync-refine-redis-2026-05-27",
-      "name": "Sync Refine To Redis",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        4600,
-        1900
-      ],
-      "onError": "continueRegularOutput",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "IgIcvPoibuAayVDx",
-          "name": "Hermes Bridge"
-        }
-      },
-      "parameters": {
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "method": "POST",
-        "url": "http://172.18.0.1:8788/queue",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"action\": \"update\",\n  \"draft_id\": {{ JSON.stringify($json.draft_id) }},\n  \"fields\": {\n    \"messages\": {{ JSON.stringify($json.messages) }},\n    \"draft_text\": {{ JSON.stringify($json.draft_text) }},\n    \"notes\": {{ JSON.stringify($json.notes || \"\") }},\n    \"messages_sent_count\": 0,\n    \"status\": \"pending\",\n    \"refined_at\": {{ JSON.stringify(new Date().toISOString()) }}\n  }\n}",
-        "options": {
-          "timeout": 8000
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
-    },
-    {
       "id": "hermes-assist-2026-05-27",
       "name": "Hermes Assist",
       "type": "n8n-nodes-base.httpRequest",
@@ -6138,7 +5947,7 @@
         3700
       ],
       "parameters": {
-        "jsCode": "// Read the active draft from Parse Callback's enriched payload to\n// pull customer_id, file_key, and a caption. Falls back to scanning\n// the pendingQueue staticData by draft_id if needed.\nconst cb = $('Parse Callback').item.json || {};\nconst draftId = cb.draft_id;\nconst customerId = cb.customer_id;\n\n// Try to find the draft to get the file_key + suggested caption\nconst queue = ($getWorkflowStaticData('global').pendingQueue) || [];\nlet draft = queue.find(d => d.id === draftId);\n\nconst fileKey = (draft && draft.file_key)\n  || (cb.file_key)\n  || '';\nconst fileDesc = (draft && draft.file_description) || '';\n// Caption: use file_description if present, else the first message\n// in the draft (just so the customer sees context), else empty.\nconst firstMsg = draft && draft.messages && draft.messages[0]\n  || draft && draft.draft_text || '';\nconst caption = (fileDesc && fileDesc.length > 5 ? fileDesc : '')\n  || firstMsg\n  || '';\n\nreturn [{ json: {\n  customer_id: customerId,\n  draft_id: draftId,\n  file_key: fileKey,\n  caption: (caption || '').slice(0, 800),\n  admin_chat_id: cb.admin_chat_id,\n  reply_to_message_id: cb.message_id,\n} }];\n"
+        "jsCode": "// Read the active draft from Parse Callback's enriched payload to\n// pull customer_id, file_key, and a caption. Falls back to scanning\n// the pendingQueue staticData by draft_id if needed.\nconst cb = $('Parse Callback').item.json || {};\nconst draftId = cb.draft_id;\n// Redis draft is the authoritative source post-migration\n// (2026-05-28). /assist file-send creates a Redis-ONLY draft (not\n// in staticData), so reading staticData alone returned no file_key\n// and the send failed. Read the Redis draft first; fall back to\n// staticData for legacy drafts.\nconst d = cb.draft || {};\nconst queue = ($getWorkflowStaticData('global').pendingQueue) || [];\nconst sd = queue.find(x => x.id === draftId) || {};\nconst customerId = cb.customer_id || d.customer_phone || sd.customer_phone;\nconst fileKey = d.file_key || sd.file_key || cb.file_key || '';\nconst fileDesc = d.file_description || sd.file_description || '';\nconst firstMsg = (d.messages && d.messages[0]) || d.draft_text\n  || (sd.messages && sd.messages[0]) || sd.draft_text || '';\nconst caption = (fileDesc && fileDesc.length > 5 ? fileDesc : '')\n  || firstMsg || '';\n\nreturn [{ json: {\n  customer_id: customerId,\n  draft_id: draftId,\n  file_key: fileKey,\n  caption: (caption || '').slice(0, 800),\n  admin_chat_id: cb.admin_chat_id,\n  reply_to_message_id: cb.message_id,\n} }];\n"
       }
     },
     {
@@ -6211,6 +6020,242 @@
           "timeout": 30000
         }
       }
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($('Parse Regen').item.json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($('Parse Regen').item.json.new_draft_text) }}, \"messages\": {{ JSON.stringify($('Parse Regen').item.json.new_messages) }}, \"messages_sent_count\": 0 }, \"card\": {{ JSON.stringify($('Parse Regen').item.json.card) }} }",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "regencommit-classic-20260528",
+      "name": "Regen Commit (Classic)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6416,
+        1440
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($('Build Regen Card').item.json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($('Build Regen Card').item.json.draft_text) }}, \"messages\": {{ JSON.stringify($('Build Regen Card').item.json.new_messages) }}, \"messages_sent_count\": 0 }, \"card\": {{ JSON.stringify($('Build Regen Card').item.json.edit_payload) }} }",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "regencommit-followup-20260528",
+      "name": "Regen Commit (Followup)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6256,
+        1200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($json.improved_draft_text) }}, \"messages\": {{ JSON.stringify($json.improved_messages) }} }, \"card\": { \"chat_id\": {{ JSON.stringify($json.chat_id) }}, \"message_id\": {{ JSON.stringify($json.message_id) }}, \"text\": {{ JSON.stringify($json.text) }}, \"reply_markup\": {{ JSON.stringify($json.reply_markup) }} } }",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "improvecommit-20260528",
+      "name": "Improve Commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6968,
+        1032
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"mark\", \"draft_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }}, \"status\": \"skipped\" }",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "markskipped-redis-20260528",
+      "name": "Mark Skipped Redis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5964,
+        1120
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"mark\", \"draft_id\": {{ JSON.stringify($('Unify Paylink Context').item.json.draft_id) }}, \"status\": \"link_sent\" }",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "marklinksent-redis-20260528",
+      "name": "Mark Link Sent Redis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7104,
+        1640
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($('Parse Refine').item.json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($('Parse Refine').item.json.draft_text) }}, \"messages\": {{ JSON.stringify($('Parse Refine').item.json.messages) }}, \"notes\": {{ JSON.stringify($('Parse Refine').item.json.notes || \"\") }}, \"messages_sent_count\": 0 }, \"card\": {{ JSON.stringify($('Parse Refine').item.json.card) }} }",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "refinecommit-20260528",
+      "name": "Refine Commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6408,
+        1580
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
     }
   ],
   "connections": {
@@ -6596,7 +6641,7 @@
       "main": [
         [
           {
-            "node": "Edit Telegram (Regen)",
+            "node": "Regen Commit (Classic)",
             "type": "main",
             "index": 0
           }
@@ -6914,7 +6959,7 @@
       "main": [
         [
           {
-            "node": "Sync Refine To Redis",
+            "node": "Refine Commit",
             "type": "main",
             "index": 0
           }
@@ -7069,23 +7114,12 @@
       "main": [
         [
           {
-            "node": "Edit Improved Card",
+            "node": "Improve Commit",
             "type": "main",
             "index": 0
           },
           {
             "node": "Push Improved Text",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Edit Telegram (Refine)": {
-      "main": [
-        [
-          {
-            "node": "Prep Learn",
             "type": "main",
             "index": 0
           }
@@ -7958,27 +7992,11 @@
       "main": [
         [
           {
-            "node": "Update Redis (Regen)",
+            "node": "Regen Commit (Followup)",
             "type": "main",
             "index": 0
           }
         ]
-      ]
-    },
-    "Update Redis (Regen)": {
-      "main": [
-        [
-          {
-            "node": "Edit Telegram (Regen Followup)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Edit Telegram (Regen Followup)": {
-      "main": [
-        []
       ]
     },
     "Cancel Prior Autosend": {
@@ -8117,6 +8135,11 @@
             "node": "Promote To Waiting Payment",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Mark Link Sent Redis",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -8154,17 +8177,6 @@
         ]
       ]
     },
-    "Sync Refine To Redis": {
-      "main": [
-        [
-          {
-            "node": "Edit Telegram (Refine)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Hermes Assist": {
       "main": [
         [
@@ -8192,6 +8204,28 @@
         [
           {
             "node": "Edit Telegram (File Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Skipped": {
+      "main": [
+        [
+          {
+            "node": "Mark Skipped Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refine Commit": {
+      "main": [
+        [
+          {
+            "node": "Prep Learn",
             "type": "main",
             "index": 0
           }

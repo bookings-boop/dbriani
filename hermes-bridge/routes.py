@@ -210,7 +210,8 @@ def handle_autonomous_log(payload, send):
 def handle_queue(payload, send):
     """POST /queue — Redis-backed pendingQueue.
     See docs/pendingqueue-redis-migration-plan.md §3.
-    Actions: save | get | update | mark | latest-for-customer | drop.
+    Actions: save | get | update | mark | latest-for-customer | drop |
+    regen-commit | claim-send | get-by-tgmsg | awaiting.
     Always 200; ok flag carries the outcome."""
     from server import (
         _draft_awaiting,
@@ -266,6 +267,72 @@ def handle_queue(payload, send):
         did = (payload.get("draft_id") or "").strip()
         d, err = _draft_update(did, payload.get("fields") or {})
         send(200, {"ok": d is not None, "draft": d, "error": err})
+        return
+
+    if action == "regen-commit":
+        # Atomic regen apply. Edit the Telegram card FIRST, then write
+        # the new content to Redis — but ONLY if the card edit landed.
+        #
+        # Production bug 2026-05-28 ("I pressed send and the message
+        # sent was completely different than what I saw; regenerate
+        # isn't working"): regen used two separate n8n nodes — one to
+        # write Redis, one to edit the card. When the n8n execution
+        # crashed between them (box under load), Redis ended up ahead of
+        # the card, so Send (which reads Redis) pushed text the operator
+        # never saw. The classic-regen branch was worse: it wrote only
+        # staticData (a casualty of the Redis migration) and Redis was
+        # never updated at all → Send pushed the PRE-regen text.
+        #
+        # Doing both writes inside one bridge call makes them atomic from
+        # n8n's view (one node = one HTTP call). Card-FIRST ordering
+        # means a Telegram failure leaves BOTH stores on the old content
+        # (regen visibly "didn't take") — never the dangerous direction
+        # (Redis ahead of an unseen card). Invariant: Redis is updated
+        # iff the card shows the new draft, so Send == what's on screen.
+        from server import _tg_post
+        did = (payload.get("draft_id") or "").strip()
+        fields = payload.get("fields") or {}
+        card = payload.get("card") or {}
+        if not did:
+            send(200, {"ok": False, "error": "draft_id required"})
+            return
+        chat_id = card.get("chat_id")
+        message_id = card.get("message_id")
+        if not (chat_id and message_id):
+            send(200, {"ok": False,
+                       "error": "card.chat_id/message_id required"})
+            return
+        tg_body = {"chat_id": chat_id,
+                   "message_id": int(message_id),
+                   "text": (card.get("text") or "")[:4000]}
+        if card.get("parse_mode"):
+            tg_body["parse_mode"] = card["parse_mode"]
+        if card.get("reply_markup"):
+            tg_body["reply_markup"] = card["reply_markup"]
+        r, err = _tg_post("editMessageText", tg_body)
+        # Telegram returns 400 "message is not modified" when the card
+        # already shows this exact text — that means the card IS in the
+        # desired state, so a retry (n8n timed out then re-fired) is a
+        # success, not a failure. Treat it as ok and fall through to the
+        # idempotent Redis write.
+        not_modified = bool(err and "not modified" in err.lower())
+        if r is None and not not_modified:
+            log(f"REGEN_COMMIT id={did} card-edit FAILED err={err} "
+                f"— Redis left unchanged (card+Redis stay consistent)")
+            send(200, {"ok": False, "stage": "telegram",
+                       "error": "card edit failed: " + str(err)})
+            return
+        d, uerr = _draft_update(did, fields)
+        if d is None:
+            log(f"REGEN_COMMIT id={did} card-edited OK but Redis "
+                f"update FAILED err={uerr}")
+            send(200, {"ok": False, "stage": "redis",
+                       "error": "redis update failed: " + str(uerr)})
+            return
+        log(f"REGEN_COMMIT id={did} OK card+redis in sync "
+            f"msgs={len(d.get('messages') or [])} "
+            f"{'(not-modified)' if not_modified else ''}".strip())
+        send(200, {"ok": True, "draft": d})
         return
 
     if action == "mark":
@@ -1790,7 +1857,35 @@ def handle_assist(payload, send):
             "send_file"):
         cid, matches = resolve_customer_by_name(cust_name)
         name_matches = matches or []
+        # Phone fallback — the operator may identify the customer by
+        # NUMBER ("send X to +971521892525"). resolve_customer_by_name
+        # only does a name LIKE match and can't match a phone, so try a
+        # phone lookup before giving up.
+        if not cid:
+            _digits = re.sub(r"[^\d]", "", cust_name or "")
+            if len(_digits) < 7:  # phone may be elsewhere in the text
+                _m = re.search(r"[+\d][\d\s().\-]{7,}\d", text)
+                if _m:
+                    _digits = re.sub(r"[^\d]", "", _m.group(0))
+            if len(_digits) >= 7:
+                from server import resolve_customer_by_phone
+                _pc, _pm = resolve_customer_by_phone(_digits)
+                if _pc:
+                    cid, name_matches = _pc, []
         if not cid and not name_matches:
+            # If a phone number was clearly intended but no record
+            # exists, guide to the explicit send paths — never fuzzy-send.
+            _ph = re.search(r"[+\d][\d\s().\-]{7,}\d", cust_name or text or "")
+            if _ph:
+                _d = re.sub(r"[^\d]", "", _ph.group(0))
+                send(200, {
+                    "ok": False, "intent": intent,
+                    "telegram_text": (
+                        f"📵 No customer record for *+{_d}* yet.\n"
+                        f"To message a new number directly:\n"
+                        f"  `/send {_d}@c.us <your message>`\n"
+                        f"or log them first: `/lead {_d} <details>`.")})
+                return
             send(200, {
                 "ok": False, "intent": intent,
                 "telegram_text": (
@@ -1812,6 +1907,19 @@ def handle_assist(payload, send):
                     f"Be more specific:\n{opts}")
             })
             return
+
+    # Resolve the recipient's REAL phone for operator verification.
+    # @lid customer_ids are opaque hashes — without the number, a wrong
+    # fuzzy-name match (resolve_customer_by_name LIKE '%name%') can send
+    # to the wrong customer with nothing on the card to catch it
+    # (incident 2026-05-28: nudge meant for +971502351565 went to
+    # +971588404401). Showing the number makes the operator verify WHO
+    # before tapping Send.
+    from waha import phone_for_cid
+    cust_phone = phone_for_cid(cid) if cid else ""
+    if cid:
+        log(f"/assist resolve intent={intent} name={cust_name!r} "
+            f"-> cid={cid} phone={cust_phone or '?'}")
 
     # ━━━ 3. Dispatch by intent
     if intent == "status_query":
@@ -1888,12 +1996,17 @@ def handle_assist(payload, send):
             [{"text": "🔁 Regen", "callback_data": "regen:" + draft_id},
              {"text": "❌ Skip", "callback_data": "skip:" + draft_id}],
         ]}
+        # Recipient line shows the REAL phone so the operator can verify
+        # the target before [✅ Send] — see phone_for_cid rationale.
+        _who = " / ".join(p for p in [cust_name, cust_phone] if p) \
+            or cid
         send(200, {
             "ok": True, "intent": "draft_nudge",
             "customer_id": cid, "draft_id": draft_id,
             "telegram_text": (
-                f"📝 *Nudge draft for* "
-                f"{cust_name or cid}:\n\n{drafted}"),
+                f"📝 *Nudge draft* → *{_who}*\n"
+                f"⚠️ _Confirm this is the right recipient before "
+                f"sending._\n\n{drafted}"),
             "reply_markup": reply_markup,
             "draft_text": drafted,
             "action_taken": "Hermes drafted a follow-up + posted card."
@@ -1927,8 +2040,12 @@ def handle_assist(payload, send):
                 "link_url": url,
                 "telegram_text": (
                     f"💳 *Paylink created* — "
-                    f"AED {float(amount):,.0f}\n{url}\n\n"
-                    f"_Reply with 'send' to push to WhatsApp._"),
+                    f"AED {float(amount):,.0f}\n"
+                    f"👤 Recipient: *{cust_name or cid}*"
+                    + (f" — *{cust_phone}*" if cust_phone else "")
+                    + f"\n{url}\n\n"
+                    f"⚠️ _Confirm the recipient, then reply 'send' to "
+                    f"push to WhatsApp._"),
                 "action_taken": "Nomod paylink created."
             })
         else:
@@ -1950,42 +2067,86 @@ def handle_assist(payload, send):
                     "Use *'list files'* to see what's available.")
             })
             return
-        captured = {}
+        # Validate against the REAL registry handle_send_file uses
+        # (_load_file_registry → {key: url}). NOTE: _list_library_files
+        # returns empty on the box and must NOT be used here — it would
+        # reject every file. The classifier emits snake_case slugs
+        # (drinks_menu) while registry keys are hyphenated
+        # (satoshi-onboard-drinks), so match on an alphanumeric-
+        # normalized form; fail SAFE (show available) rather than guess.
+        registry = _load_file_registry() or {}
 
-        def _cap(_status, body):
-            captured["body"] = body
+        def _norm(s):
+            return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
-        sf_payload = {"customer_id": cid, "file_key": file_key}
-        if detail:
-            sf_payload["caption"] = detail
-        handle_send_file(sf_payload, _cap)
-        body = captured.get("body", {}) or {}
-        if body.get("ok"):
-            send(200, {
-                "ok": True, "intent": "send_file",
-                "customer_id": cid, "file_key": file_key,
-                "file_url": body.get("file_url"),
-                "telegram_text": (
-                    f"📤 *Sent* `{body.get('filename', file_key)}` "
-                    f"to *{cust_name or cid}* on WhatsApp."
-                    + (f"\n_Caption:_ {detail}" if detail else "")),
-                "action_taken": body.get("action_taken"),
-            })
-        else:
-            err_msg = body.get("error") or "unknown error"
-            # If the key didn't match, list available files to help
-            try:
-                lib = _list_library_files()
-                avail = ", ".join(f"`{f['key']}`"
-                                  for f in lib[:10]) or "(empty)"
-            except Exception:
-                avail = "(can't read library)"
+        real_key = file_key if file_key in registry else None
+        if not real_key:
+            nq = _norm(file_key)
+            cand = [k for k in registry
+                    if nq and (nq in _norm(k) or _norm(k) in nq)]
+            real_key = cand[0] if len(cand) == 1 else None
+        if not real_key:
+            avail = ", ".join(f"`{k}`" for k in list(registry)[:12]) \
+                or "(empty)"
             send(200, {
                 "ok": False, "intent": "send_file",
                 "telegram_text": (
-                    f"⚠️ Couldn't send: {err_msg}\n\n"
-                    f"Available files: {avail}")
-            })
+                    f"📁 Couldn't match `{file_key}` to a library file.\n"
+                    f"Use *'list files'* to see exact names.\n\n"
+                    f"Available: {avail}")})
+            return
+        # CONFIRMATION GATE — incident 2026-05-28: /assist used to send
+        # files INSTANTLY (handle_send_file ran here with no operator
+        # confirmation), so a wrong fuzzy name match hit WhatsApp
+        # immediately. Now persist a pending draft carrying the file +
+        # post a card showing the resolved PHONE and a [📎 Send File]
+        # button. The send only fires when the operator taps it
+        # (callback file:<id> → Route Action → Prep Send File).
+        from server import _draft_save
+        import time as _t
+        import random as _r
+        import string as _s
+        draft_id = (str(int(_t.time() * 1000)) + "_"
+                    + "".join(_r.choices(_s.ascii_lowercase + _s.digits,
+                                         k=5)))
+        draft_obj = {
+            "id": draft_id,
+            "customer_phone": cid,
+            "customer_name": cust_name or "",
+            "customer_message": "",
+            "conversation_history": "",
+            "messages": [f"(file: {real_key})"],
+            "draft_text": f"(file: {real_key})",
+            "messages_sent_count": 0,
+            "notes": "Operator-directed file send via /assist",
+            "status": "pending",
+            "telegram_chat_id": 5532831477,
+            "telegram_message_id": None,
+            "should_send_file": True,
+            "file_key": real_key,
+            "file_description": detail or "",
+            "is_followup": False,
+            "is_lead": False,
+            "is_payment": False,
+            "break_condition": {"hit": False},
+        }
+        _draft_save(draft_obj)
+        _who = " / ".join(p for p in [cust_name, cust_phone] if p) or cid
+        reply_markup = {"inline_keyboard": [
+            [{"text": f"📎 Send File ({real_key})",
+              "callback_data": "file:" + draft_id},
+             {"text": "❌ Skip", "callback_data": "skip:" + draft_id}]]}
+        send(200, {
+            "ok": True, "intent": "send_file",
+            "customer_id": cid, "draft_id": draft_id,
+            "file_key": real_key,
+            "telegram_text": (
+                f"📎 *Send file* `{real_key}` → *{_who}*\n"
+                f"⚠️ _Confirm the recipient, then tap Send File._"
+                + (f"\n_Caption:_ {detail}" if detail else "")),
+            "reply_markup": reply_markup,
+            "action_taken": "Awaiting operator confirmation."
+        })
         return
 
     if intent == "list_files":
@@ -3336,7 +3497,7 @@ def handle_improve(payload, send):
         return
     query = build_improve_query(payload)
     try:
-        rc, out, err, elapsed = run_hermes(query)
+        rc, out, err, elapsed = run_hermes(query, priority="background")
     except subprocess.TimeoutExpired:
         log(f"improve TIMEOUT after {HERMES_TIMEOUT}s")
         send(502, {"ok": False, "error": "hermes timeout"})
@@ -3384,7 +3545,7 @@ def handle_learn(payload, send):
         return
     query = build_learn_query(payload)
     try:
-        rc, out, err, elapsed = run_hermes(query)
+        rc, out, err, elapsed = run_hermes(query, priority="background")
     except subprocess.TimeoutExpired:
         send(502, {"ok": False, "error": "hermes timeout"})
         return
@@ -4293,6 +4454,27 @@ def handle_send_file(payload, send):
     if not file_key:
         send(200, {"ok": False, "error": "file_key required"})
         return
+
+    # Idempotency guard — production 2026-05-28: under box load the
+    # [📎 Send File] button is slow, the operator taps it repeatedly,
+    # and each tap fired a separate WAHA send → the customer received the
+    # file 2-3 times. Claim a short-lived per-(cid,file_key) Redis lock
+    # (SET NX); only the first tap within the window proceeds. redis-cli
+    # SET..NX prints 'OK' when it set the key, empty when it already
+    # existed. Fail-OPEN: any Redis hiccup proceeds (better one send than
+    # a blocked send).
+    try:
+        _claim, _cerr = _redis(["SET", "filesend:" + cid + ":" + file_key,
+                                "1", "NX", "EX", "60"])
+        if not _cerr and str(_claim or "").strip().upper() != "OK":
+            log(f"send-file DEDUP skip cid={cid} key={file_key!r} "
+                f"— repeat tap within 60s, ignored")
+            send(200, {"ok": True, "deduped": True, "file_key": file_key,
+                       "action_taken": "already sent moments ago "
+                       "(ignored a repeat tap)"})
+            return
+    except Exception as _de:
+        log(f"send-file dedup check failed, proceeding: {_de!r}")
 
     registry = _load_file_registry()
     share_url = registry.get(file_key)

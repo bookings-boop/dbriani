@@ -170,6 +170,50 @@ def waha_lookup_push_name(customer_id):
     return push_name
 
 
+# cid -> phone resolution cache. The lid<->phone mapping is stable, so a
+# longer TTL than pushName is safe.
+_WAHA_PHONE_CACHE = {}
+_WAHA_PHONE_TTL = 600  # seconds
+
+
+def phone_for_cid(customer_id):
+    """Resolve a WhatsApp customer_id to a human-readable phone number,
+    for OPERATOR VERIFICATION before a send. Two id shapes:
+      - '<digits>@c.us' → the digits ARE the phone → '+<digits>'
+      - '<lid>@lid'     → opaque privacy id (NOT a phone); resolve via
+        WAHA's LID API: GET /api/default/lids/<lid>@lid →
+        {"lid":"…@lid","pn":"<digits>@c.us"}.
+    Returns '+<digits>' on success, '' if unresolvable. Cached 10 min;
+    only positive resolutions are cached so a transient WAHA miss retries.
+
+    Why this exists — production incident 2026-05-28: an /assist nudge
+    fuzzy-matched a name to the WRONG customer and was sent to a
+    different number. The operator couldn't catch it because the card
+    showed only a name / opaque @lid. Showing the resolved phone lets the
+    operator verify the recipient before tapping Send."""
+    cid = (customer_id or "").strip()
+    if not cid:
+        return ""
+    now_ts = time.time()
+    hit = _WAHA_PHONE_CACHE.get(cid)
+    if hit and hit[1] > now_ts:
+        return hit[0]
+    phone = ""
+    if cid.endswith("@c.us"):
+        digits = cid.split("@", 1)[0]
+        phone = "+" + digits if digits.isdigit() else ""
+    elif cid.endswith("@lid"):
+        lid = cid.split("@", 1)[0]
+        data, err = _waha_get(f"/api/default/lids/{lid}@lid")
+        if not err and isinstance(data, dict):
+            pn = (data.get("pn") or "").split("@", 1)[0]
+            if pn.isdigit():
+                phone = "+" + pn
+    if phone:  # cache positive resolutions only
+        _WAHA_PHONE_CACHE[cid] = (phone, now_ts + _WAHA_PHONE_TTL)
+    return phone
+
+
 def waha_fetch_history(customer_id, limit=30):
     """Pull last N messages from WAHA + pushName. Returns dict:
       {history: '...',     ← oldest-first, last 20 with non-empty body

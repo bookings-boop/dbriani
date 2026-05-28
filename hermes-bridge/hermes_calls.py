@@ -33,19 +33,48 @@ HERMES_TIMEOUT = int(os.environ.get("BRIDGE_HERMES_TIMEOUT", "120"))
 # own n8n timeout). 3 is a safe default for a 2-vCPU / 4GB box.
 HERMES_MAX_CONCURRENCY = int(
     os.environ.get("BRIDGE_HERMES_CONCURRENCY", "3"))
-_HERMES_SEM = threading.BoundedSemaphore(HERMES_MAX_CONCURRENCY)
+
+# Two-lane concurrency control — fixes a PRIORITY INVERSION (incident
+# 2026-05-28: the operator's interactive edit/refine/nudge waited
+# 10-17s behind bursts of background lead-analysis / customer-facts
+# Hermes calls because every call shared ONE pool). _HERMES_TOTAL is the
+# global cap (max model subprocesses the box can run). _HERMES_BG caps
+# BACKGROUND work one slot BELOW total, so an INTERACTIVE call (operator
+# is actively waiting) always finds a free slot instead of queuing
+# behind the background backlog.
+#
+# Lock order is always BG → TOTAL (background path only); interactive
+# takes TOTAL alone. No circular wait → no deadlock. Background can hold
+# at most (cap-1) slots, guaranteeing ≥1 reachable by interactive.
+_HERMES_TOTAL = threading.BoundedSemaphore(HERMES_MAX_CONCURRENCY)
+# Background cap — kept TWO below total so the hourly proactive sweep
+# (which fires ~9 lead-analysis calls at once) can never occupy more
+# than 1 slot, leaving ≥2 free for the operator's interactive work
+# (drafts, nudges, edits). Production 2026-05-28: a sweep coinciding
+# with a live session pushed interactive calls into 40s+ queue waits
+# and made buttons unresponsive. Tunable via env.
+HERMES_BG_CONCURRENCY = int(os.environ.get(
+    "BRIDGE_HERMES_BG_CONCURRENCY",
+    str(max(1, HERMES_MAX_CONCURRENCY - 2))))
+_HERMES_BG = threading.BoundedSemaphore(HERMES_BG_CONCURRENCY)
 
 # Output parsing regexes (compiled once at import).
 SESSION_RE = re.compile(r"session_id:\s*(\S+)")
 FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 
 
-def run_hermes(query, timeout=None):
+def run_hermes(query, timeout=None, priority="interactive"):
     """Invoke `hermes chat -q <query>` in YOLO mode, return
     (returncode, stdout, stderr, elapsed_ms). The bridge always uses
     --source tool (so Hermes knows it's being called programmatically)
     and -Q (no-prompt-on-tool-confirm). PATH is prepended with the
     hermes bin dir so any sub-tools Hermes spawns find their siblings.
+
+    priority: 'interactive' (default — operator is actively waiting:
+    refine / nudge / assist / draft; gets a reserved slot) or
+    'background' (proactive lead-analysis, customer-facts extraction,
+    auto-improve, learn — capped one slot below total so it can never
+    starve interactive work).
 
     Caller is responsible for parsing the JSON Hermes returns —
     use extract_json() below. Caller also picks the timeout; we default
@@ -57,21 +86,27 @@ def run_hermes(query, timeout=None):
            "--source", "tool", "--yolo", "-t", "memory"]
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(HERMES) + os.pathsep + env.get("PATH", "")
-    # Acquire a concurrency slot. If the box is saturated this blocks
-    # until a slot frees (or the caller's HTTP timeout fires upstream).
+    # Acquire a concurrency slot. Background work first passes the BG
+    # gate (cap-1) so it leaves a slot for interactive; both lanes then
+    # take a global slot. Lock order BG→TOTAL avoids deadlock.
+    background = (priority == "background")
     waited0 = time.time()
-    _HERMES_SEM.acquire()
+    if background:
+        _HERMES_BG.acquire()
+    _HERMES_TOTAL.acquire()
     queue_ms = int((time.time() - waited0) * 1000)
     if queue_ms > 500:
         log(f"hermes call: WAITED {queue_ms}ms for a concurrency slot "
-            f"(cap={HERMES_MAX_CONCURRENCY})")
+            f"(cap={HERMES_MAX_CONCURRENCY}, prio={priority})")
     log("hermes call:", " ".join(c for c in cmd if c != query))
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=timeout, env=env)
     finally:
-        _HERMES_SEM.release()
+        _HERMES_TOTAL.release()
+        if background:
+            _HERMES_BG.release()
     return proc.returncode, proc.stdout, proc.stderr, \
         int((time.time() - t0) * 1000)
 
