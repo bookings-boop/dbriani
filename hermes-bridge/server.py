@@ -2510,22 +2510,26 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, code, obj):
+        # Whole response wrapped in broken-pipe guard — production
+        # 2026-05-28: n8n's httpRequest 12s timeout on slow /queue
+        # saves disconnects before the bridge finishes writing →
+        # BrokenPipeError at wfile.write crashed the handler thread
+        # (noisy traceback + the work after send() never ran). The
+        # client already gave up; a failed write is expected, not an
+        # error.
         body = json.dumps(obj).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-        # Force the response onto the socket NOW — without this, bytes
-        # sit in BufferedWriter until the handler returns. Most callers
-        # don't notice, but handle_nomod_webhook needs Nomod to see the
-        # 200 BEFORE its background processing continues. Universal +
-        # harmless for normal handlers.
         try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            # Force the response onto the socket NOW — handle_nomod_webhook
+            # needs Nomod to see the 200 before background work continues.
             self.wfile.flush()
-        except (OSError, BrokenPipeError):
-            # Client disconnected mid-response — don't crash any
-            # background work that may follow this send().
+        except (OSError, BrokenPipeError, ConnectionError):
+            # Client (n8n) disconnected mid-response — don't crash the
+            # handler thread or any background work that follows send().
             pass
 
     def do_GET(self):
