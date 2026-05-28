@@ -214,6 +214,80 @@ def phone_for_cid(customer_id):
     return phone
 
 
+# ── Country flags for /review ──────────────────────────────────────
+# Phone calling-code → flag emoji. Longest-prefix match (codes are 1-3
+# digits). Covers Dubriani's actual markets (GCC + UK/EU/US + South
+# Asia + Africa + CIS). Unknown codes fall back to a neutral flag.
+_CALLING_CODE_FLAG = {
+    "971": "🇦🇪", "966": "🇸🇦", "974": "🇶🇦", "973": "🇧🇭",
+    "965": "🇰🇼", "968": "🇴🇲", "967": "🇾🇪", "961": "🇱🇧",
+    "962": "🇯🇴", "963": "🇸🇾", "964": "🇮🇶", "972": "🇮🇱",
+    "98": "🇮🇷", "20": "🇪🇬", "212": "🇲🇦", "213": "🇩🇿",
+    "216": "🇹🇳", "218": "🇱🇾", "249": "🇸🇩", "252": "🇸🇴",
+    "234": "🇳🇬", "254": "🇰🇪", "27": "🇿🇦", "251": "🇪🇹",
+    "44": "🇬🇧", "353": "🇮🇪", "33": "🇫🇷", "49": "🇩🇪",
+    "39": "🇮🇹", "34": "🇪🇸", "351": "🇵🇹", "31": "🇳🇱",
+    "32": "🇧🇪", "41": "🇨🇭", "43": "🇦🇹", "30": "🇬🇷",
+    "90": "🇹🇷", "7": "🇷🇺", "380": "🇺🇦", "994": "🇦🇿",
+    "995": "🇬🇪", "998": "🇺🇿", "48": "🇵🇱", "40": "🇷🇴",
+    "1": "🇺🇸", "91": "🇮🇳", "92": "🇵🇰", "880": "🇧🇩",
+    "94": "🇱🇰", "977": "🇳🇵", "93": "🇦🇫", "86": "🇨🇳",
+    "65": "🇸🇬", "60": "🇲🇾", "62": "🇮🇩", "63": "🇵🇭",
+    "66": "🇹🇭", "84": "🇻🇳", "81": "🇯🇵", "82": "🇰🇷",
+    "61": "🇦🇺", "64": "🇳🇿",
+}
+
+# Bulk lid→phone map, cached. /review resolves many @lid customers at
+# once, so we fetch the whole map in ONE WAHA call instead of per-cid.
+_LID_MAP_CACHE = {"map": {}, "exp": 0.0}
+_LID_MAP_TTL = 600  # seconds
+
+
+def _get_lid_phone_map():
+    """Return {'<lid>@lid': '<digits>'} from WAHA, cached 10 min. Empty
+    dict on any WAHA error (callers degrade to no-flag)."""
+    now_ts = time.time()
+    if _LID_MAP_CACHE["map"] and _LID_MAP_CACHE["exp"] > now_ts:
+        return _LID_MAP_CACHE["map"]
+    rows, err = _waha_get("/api/default/lids?limit=10000")
+    if err or not isinstance(rows, list):
+        return _LID_MAP_CACHE["map"]  # keep stale map rather than wipe
+    m = {}
+    for r in rows:
+        lid = (r.get("lid") or "").strip()
+        pn = (r.get("pn") or "").split("@", 1)[0]
+        if lid and pn.isdigit():
+            m[lid] = pn
+    if m:
+        _LID_MAP_CACHE["map"] = m
+        _LID_MAP_CACHE["exp"] = now_ts + _LID_MAP_TTL
+    return m
+
+
+def country_flag_for_cid(customer_id):
+    """Flag emoji for a customer based on their phone country code.
+    @c.us → digits are the phone; @lid → resolve via the cached lid map.
+    Returns '' when the phone can't be resolved (no flag rather than a
+    wrong one)."""
+    cid = (customer_id or "").strip()
+    if not cid:
+        return ""
+    if cid.endswith("@c.us"):
+        digits = cid.split("@", 1)[0]
+    elif cid.endswith("@lid"):
+        digits = _get_lid_phone_map().get(cid, "")
+    else:
+        digits = "".join(c for c in cid if c.isdigit())
+    digits = "".join(c for c in digits if c.isdigit())
+    if not digits:
+        return ""
+    for length in (3, 2, 1):
+        flag = _CALLING_CODE_FLAG.get(digits[:length])
+        if flag:
+            return flag
+    return "🏳️"  # resolved a number but unknown country code
+
+
 def waha_fetch_history(customer_id, limit=30):
     """Pull last N messages from WAHA + pushName. Returns dict:
       {history: '...',     ← oldest-first, last 20 with non-empty body

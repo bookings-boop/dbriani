@@ -435,8 +435,14 @@ def render_review(scored, totals, mode="ondemand"):
                         imp_bits += f" — _{rea}_"
                     elif rea:
                         imp_bits += f" — _{rea}_"
+            try:
+                from waha import country_flag_for_cid
+                _flag = country_flag_for_cid(row.get("customer_id"))
+            except Exception:
+                _flag = ""
+            _nm = row.get("name") or _name_fallback(row.get("customer_id"))
             lead_body = (
-                f"*{row.get('name') or _name_fallback(row.get('customer_id'))}* — "
+                f"{(_flag + ' ') if _flag else ''}*{_nm}* — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
                 f"{(row.get('dates') or 'no date')} · "
                 f"msg #{row.get('message_count')}\n"
