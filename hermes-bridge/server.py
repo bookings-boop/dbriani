@@ -1581,7 +1581,13 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         "  - suggested_action: ≤25 words. Specific next play if "
         "verdict='keep_open'. For paylink-sent-silent: 'send gentle "
         "follow-up'. For tire-kicker: 'don't waste premium options, "
-        "anchor a deal'. Empty string if verdict='close'.\n\n"
+        "anchor a deal'. Empty string if verdict='close'.\n"
+        "    ⚠️ ANTI-PUSHINESS: look at the END of the conversation. If "
+        "the LAST message(s) are from Dubriani (no customer reply since "
+        "our follow-up), we have ALREADY nudged them — do NOT suggest "
+        "another nudge/follow-up. Suggest 'wait for reply — already "
+        "followed up' and lower importance_score. Repeated unanswered "
+        "follow-ups read as pushy and damage the brand.\n\n"
         f"--- CUSTOMER FACTS ---\n"
         f"Name: {nm}\n"
         f"Yachts discussed: {yachts}\n"
@@ -2204,6 +2210,14 @@ def scan_followup_eligibility():
         "       OR cs.last_operator_reply_at < cs.last_customer_message_at) "
         "  AND now() - cs.last_customer_message_at > interval '30 minutes' "
         "  AND now() - cs.last_customer_message_at < interval '7 days' "
+        # Anti-pushiness (2026-05-29): do NOT re-nudge a customer we have
+        # ALREADY followed up since their last message. One nudge per
+        # customer-silence cycle — if they don't reply, back off. The
+        # cycle resets when they message again (last_customer_message_at
+        # moves past last_nudge_drafted_at). Operator hit 4 near-identical
+        # nudges to silent leads (Lamia/Sid) → came across pushy.
+        "  AND NOT (cs.last_nudge_drafted_at IS NOT NULL "
+        "           AND cs.last_nudge_drafted_at > cs.last_customer_message_at) "
         "  AND COALESCE(cs.followup_count, 0) < " + str(FOLLOWUP_CAP) + " "
         # Active-negotiation suppression — labels operator handles.
         "  AND (cf.label IS NULL OR cf.label NOT IN ("
@@ -2309,6 +2323,15 @@ def read_lead_summary(filter_label=None):
         where = "WHERE label = 'WARM'"
     elif fl == "cold":
         where = "WHERE label = 'COLD'"
+    # Exclude merged duplicate rows. When a customer's @c.us and @lid
+    # identities are merged, the non-canonical row keeps merged_into set
+    # and must NOT appear as a second line in /review (Madawi/Émilie each
+    # showed twice, 2026-05-29). v_lead_summary doesn't expose
+    # merged_into, so filter against customer_facts directly.
+    _merged_excl = ("customer_id NOT IN (SELECT customer_id FROM "
+                    "customer_facts WHERE merged_into IS NOT NULL)")
+    where = (where + " AND " + _merged_excl) if where \
+        else ("WHERE " + _merged_excl)
     sql = (
         "SELECT customer_id, COALESCE(name,''), label, "
         "COALESCE(to_char(label_updated_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "

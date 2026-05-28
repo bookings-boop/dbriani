@@ -154,18 +154,34 @@ def waha_lookup_push_name(customer_id):
     hit = _WAHA_PUSHNAME_CACHE.get(cid)
     if hit and hit[1] > now_ts:
         return hit[0]
-    chats, err = _waha_get("/api/default/chats?limit=200")
-    if err or not isinstance(chats, list):
-        # Don't poison the cache on transient failure
-        return ""
     push_name = ""
-    for c in chats:
-        sid = c.get("_serialized") or (c.get("id") or {}).get("_serialized")
-        if sid == cid:
-            pn = (c.get("name") or "").strip()
+    # PRIMARY: the contact's WhatsApp display name (pushname). This is the
+    # real name the customer set (e.g. 'Lamia', 'Sid'). The chats-list
+    # 'name' field is usually just the phone number, which masks the real
+    # name — 2026-05-29: many "nameless" leads actually HAD a pushname we
+    # never read. Prefer pushname > shortName > name.
+    contact, cerr = _waha_get(
+        "/api/contacts?session=default&contactId=" + cid)
+    if not cerr and isinstance(contact, dict):
+        for key in ("pushname", "shortName", "name"):
+            pn = (contact.get(key) or "").strip()
             if pn and pn not in _WAHA_SYSTEM_NAMES:
                 push_name = pn
-            break
+                break
+    # FALLBACK: the chats-list name (covers cases where the contact
+    # endpoint is empty but the chat carries a saved name).
+    if not push_name:
+        chats, err = _waha_get("/api/default/chats?limit=200")
+        if err or not isinstance(chats, list):
+            return ""  # don't poison the cache on transient failure
+        for c in chats:
+            sid = (c.get("_serialized")
+                   or (c.get("id") or {}).get("_serialized"))
+            if sid == cid:
+                pn = (c.get("name") or "").strip()
+                if pn and pn not in _WAHA_SYSTEM_NAMES:
+                    push_name = pn
+                break
     _WAHA_PUSHNAME_CACHE[cid] = (push_name, now_ts + _WAHA_PUSHNAME_TTL)
     return push_name
 
