@@ -424,10 +424,34 @@ def render_review(scored, totals, mode="ondemand"):
                     imp_bits += (" — _booked & paid · confirm logistics "
                                  "or upsell (extra hour / add-ons)_")
                 else:
+                    # STALENESS GUARD (2026-05-29): the cached
+                    # suggested_action/reasoning comes from the last
+                    # hermes_analyze_lead run. If the customer has
+                    # messaged OR we've nudged SINCE that analysis, the
+                    # recommendation is out of date — it caused /review to
+                    # recommend nudges to customers who'd already gone
+                    # silent on prior nudges, or who just said "plans
+                    # changed" (Aysar). _seconds = seconds-ago, so a
+                    # LARGER value is older: the analysis is stale when it
+                    # ran longer ago than the latest activity. Suppress
+                    # the suggestion + tell the operator to open the chat;
+                    # the draft flow re-analyses with fresh history.
+                    _imp_s = row.get("importance_analyzed_at_seconds")
+                    _cust_s = row.get("last_customer_message_at_seconds")
+                    _nudge_s = row.get("last_nudge_drafted_at_seconds")
+                    _stale = isinstance(_imp_s, (int, float)) and (
+                        (isinstance(_cust_s, (int, float))
+                         and _imp_s > _cust_s + 60)
+                        or (isinstance(_nudge_s, (int, float))
+                            and _imp_s > _nudge_s + 60))
                     sug = (row.get("suggested_action") or "").strip()
                     rea = (row.get("importance_reasoning") or "").strip()
                     why_used_sug = (sug and why == sug)
-                    if sug and not why_used_sug:
+                    if _stale:
+                        imp_bits += (" — _🔄 new activity since last "
+                                     "analysis — open the chat before "
+                                     "nudging (draft will re-check)_")
+                    elif sug and not why_used_sug:
                         imp_bits += f" — _{sug}_"
                     elif rea and why_used_sug:
                         # Why-line already carries the suggestion; show the
