@@ -606,8 +606,14 @@ def handle_refresh_facts(payload, send):
         extracted = extract_customer_facts(waha["last_message"], waha["history"])
         cached = get_customer_facts(cid)
         merged = _merge_facts(cached, extracted) if extracted else _merge_facts(cached, None)
-        if not (merged.get("name") or "").strip() and waha["push_name"]:
-            merged["name"] = waha["push_name"]
+        # Same phone-format pushName guard as the per-message path: never
+        # store a phone-format WhatsApp display name as the customer's
+        # name (it masks a real name and shows a number in /review).
+        if not (merged.get("name") or "").strip():
+            _pn = (waha.get("push_name") or "").strip()
+            if _pn and re.search(r"[A-Za-z]{2,}", _pn) \
+                    and not re.fullmatch(r"[+\d\s().\-]+", _pn):
+                merged["name"] = _pn
         new_count, err = upsert_customer_facts(cid, merged.get("name") or "", merged)
         if err:
             log("refresh_facts upsert err:", err)
