@@ -6137,7 +6137,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"chat_id\": {{ $('Process Text Reply').item.json.admin_chat_id }},\n  \"text\": {{ JSON.stringify($json.telegram_text || '(no response)') }},\n  \"parse_mode\": \"Markdown\"\n}",
+        "jsonBody": "={\n  \"chat_id\": {{ $('Process Text Reply').item.json.admin_chat_id }},\n  \"text\": {{ JSON.stringify($json.telegram_text || '(no response)') }},\n  \"parse_mode\": \"Markdown\"\n  {{ $json.reply_markup ? (', \"reply_markup\": ' + JSON.stringify($json.reply_markup)) : '' }}\n}",
         "options": {
           "timeout": 30000
         }

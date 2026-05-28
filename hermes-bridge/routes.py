@@ -1849,16 +1849,54 @@ def handle_assist(payload, send):
         body = captured.get("body", {}) or {}
         drafted = body.get("draft_text") \
             or body.get("telegram_text") or "(empty)"
+        # Persist the nudge as a real pending draft + return a card with
+        # action buttons. Production bug 2026-05-28: previously /assist
+        # only SHOWED the text and said "reply with send" — but no draft
+        # card existed, so typing "send" looped back to /assist and did
+        # nothing. Now the operator taps [✅ Send] (callback send:<id>),
+        # which the normal callback flow handles via Redis lookup.
+        from server import _draft_save
+        import time as _t
+        import random as _r
+        import string as _s
+        draft_id = (str(int(_t.time() * 1000)) + "_"
+                    + "".join(_r.choices(_s.ascii_lowercase + _s.digits,
+                                         k=5)))
+        cust_name = body.get("customer_name") or ""
+        draft_obj = {
+            "id": draft_id,
+            "customer_phone": cid,
+            "customer_name": cust_name,
+            "customer_message": "",
+            "conversation_history": "",
+            "messages": [drafted],
+            "draft_text": drafted,
+            "messages_sent_count": 0,
+            "notes": "Operator-directed nudge via /assist",
+            "status": "pending",
+            "telegram_chat_id": 5532831477,
+            "telegram_message_id": None,
+            "is_followup": True,
+            "is_lead": False,
+            "is_payment": False,
+            "break_condition": {"hit": False},
+        }
+        _draft_save(draft_obj)
+        reply_markup = {"inline_keyboard": [
+            [{"text": "✅ Send", "callback_data": "send:" + draft_id},
+             {"text": "✏️ Edit", "callback_data": "edit:" + draft_id}],
+            [{"text": "🔁 Regen", "callback_data": "regen:" + draft_id},
+             {"text": "❌ Skip", "callback_data": "skip:" + draft_id}],
+        ]}
         send(200, {
             "ok": True, "intent": "draft_nudge",
-            "customer_id": cid,
+            "customer_id": cid, "draft_id": draft_id,
             "telegram_text": (
-                f"📝 *Drafted nudge for*"
-                f" `{cid}`:\n\n{drafted}\n\n"
-                f"_Reply with 'send' to push to WhatsApp, "
-                f"or edit and reply with the new text._"),
+                f"📝 *Nudge draft for* "
+                f"{cust_name or cid}:\n\n{drafted}"),
+            "reply_markup": reply_markup,
             "draft_text": drafted,
-            "action_taken": "Hermes drafted a follow-up."
+            "action_taken": "Hermes drafted a follow-up + posted card."
         })
         return
 
