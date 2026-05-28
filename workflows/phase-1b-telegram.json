@@ -2121,7 +2121,7 @@
     },
     {
       "parameters": {
-        "amount": 20
+        "amount": 5
       },
       "id": "4f1c8241-741d-4ca6-86b2-697827b976dd",
       "name": "Improve Wait",
@@ -2149,7 +2149,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://172.18.0.1:8788/improve",
+        "url": "http://172.18.0.1:8788/quality-check",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
@@ -2184,7 +2184,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-5: apply Hermes's improvement to the pending draft + re-render the card\nconst resp = $input.item.json || {};\nconst cp = $('Check Pending').item.json;\nconst draftId = cp.draft_id;\n// Phase B (Redis-migration): the draft is the live Redis copy from\n// Recheck Draft Status (the cross-execution source of truth). The old\n// staticData read + the dead entry mutation were removed \u2014 Improve\n// Commit writes Redis authoritatively.\nlet d = null;\ntry { d = ($('Recheck Draft Status').item.json || {}).draft || null; } catch (e) { d = null; }\nif (!d) {\n  // fallback: reconstruct enough from Check Pending's fields\n  d = { status: 'pending', customer_phone: cp.customer_id || '',\n        customer_name: cp.customer_name || '', customer_message: cp.incoming_message || '',\n        notes: '', is_lead: false, draft_text: cp.current_draft || '',\n        telegram_chat_id: 5532831477 };\n}\n// race guard: the operator may have acted during the ~18s Hermes call.\n// Redis status is authoritative across executions.\nif (!d || (d.status && d.status !== 'pending')) return [];\nif (resp.ok !== true || resp.improved !== true) return [];\nconst msgs = (Array.isArray(resp.messages) && resp.messages.length)\n  ? resp.messages.slice(0, 4).map(m => String(m)) : null;\nif (!msgs) return [];\nd.messages = msgs;\nd.draft_text = msgs.join('\\n\\n');\nd.improved_note = resp.note || '';\nconst preview = msgs.length === 1 ? msgs[0]\n  : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = msgs.length === 1 ? '\ud83d\udcac DRAFT:'\n  : ('\ud83d\udcac DRAFT (' + msgs.length + ' messages):');\nconst lines = [];\n// Reuse the Customer Facts header so the operator sees consistent\n// context before AND after the improver fires.\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\nconst displayName = (d.customer_name && d.customer_name.trim()) || d.customer_phone;\nif (d.is_lead) {\n  lines.push('\ud83c\udd95 NEW LEAD \u2014 outbound first contact', '\ud83d\udcde ' + d.customer_phone,\n             '', 'Lead brief (from you):', '\"' + d.customer_message + '\"');\n} else {\n  lines.push('\ud83d\udce9 from ' + displayName);\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else if (d.customer_name) {\n    lines.push('\ud83d\udc64 ' + d.customer_name);\n  }\n  lines.push('', 'They said:', '\"' + d.customer_message + '\"');\n}\nlines.push('', '---', '\u2728 improved by Hermes', draftHeader, preview,\n           '', '\ud83d\udcdd Notes: ' + (d.notes || ''));\nif (d && d.should_send_file && d.file_key) {\n    (lines || []).push('\ud83d\udcce Suggested file: ' + d.file_key);\n  }\n  const reply_markup = { inline_keyboard: [\n  [{ text: '\u2705 Send', callback_data: 'send:' + draftId },\n   { text: '\u270f\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\ud83d\udd01 Regen', callback_data: 'regen:' + draftId },\n   { text: '\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\ud83e\udd16 Auto', callback_data: 'auto:' + draftId },\n     { text: '\ud83d\udcb3 Send Link', callback_data: 'paylink:' + draftId }],\n      ...((d && d.should_send_file && d.file_key) ? [[{ text: '\ud83d\udcce Send File ('+(d.file_key)+')', callback_data: 'file:' + draftId }]] : [])\n] };\nreturn [{ json: {\n  chat_id: d.telegram_chat_id || 5532831477,\n  message_id: cp.telegram_message_id,\n  text: lines.join('\\n'),\n  reply_markup: reply_markup,\n  draft_id: draftId,\n  improved_draft_text: d.draft_text,\n  improved_messages: msgs\n} }];"
+        "jsCode": "// Quality-score badge (replaces the old auto-rewrite). Reads the score\n// from the /quality-check call (still wired through the 'Hermes Improve'\n// node) and PREPENDS a badge line to the ORIGINAL card. The draft text is\n// NEVER changed \u2014 no silent rewrites. Skips silently if the operator\n// already acted (Redis status != pending) or the score is unavailable.\nconst qc = $('Hermes Improve').item.json || {};\nlet st = 'pending';\ntry {\n  const rd = ($('Recheck Draft Status').item.json || {}).draft;\n  if (rd && rd.status) st = rd.status;\n} catch (e) {}\nif (st !== 'pending') return [];\nif (qc.ok !== true || typeof qc.score !== 'number') return [];\nconst score = Math.max(1, Math.min(10, Math.round(qc.score)));\nconst flags = Array.isArray(qc.flags) ? qc.flags : [];\nconst reason = (flags.length ? flags.join(', ').replace(/_/g, ' ')\n               : String(qc.summary || '')).slice(0, 80);\nlet badge;\nif (score >= 8) {\n  badge = '\ud83d\udfe2 ' + score + '/10';\n} else if (score >= 5) {\n  badge = '\ud83d\udfe1 ' + score + '/10' + (reason ? ' \u2014 ' + reason : '');\n} else {\n  badge = '\ud83d\udd34 ' + score + '/10' + (reason ? ' \u2014 ' + reason : '') + ' \u00b7 tap \ud83d\udd04 Regen';\n}\nconst tp = $('Queue & Format').item.json.telegram_payload;\nconst sid = $('Save Telegram MsgID').item.json;\nreturn [{ json: {\n  draft_id: sid.draft_id,\n  chat_id: tp.chat_id,\n  message_id: sid.telegram_message_id,\n  text: (badge + '\\n' + tp.text).slice(0, 4000),\n  reply_markup: tp.reply_markup\n} }];"
       },
       "id": "6736d545-a4a5-4046-ad11-fa9ac2f5c51f",
       "name": "Apply Improvement",
@@ -3319,45 +3319,6 @@
       "position": [
         4940,
         1152
-      ],
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://172.18.0.1:8788/autosend-state",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={ \"action\": \"update\", \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"draft_text\": {{ JSON.stringify($json.improved_draft_text) }} }",
-        "options": {}
-      },
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "IgIcvPoibuAayVDx",
-          "name": "Hermes Bridge"
-        }
-      },
-      "id": "2c0a9113-61c4-48f6-8653-0a4288d0e73d",
-      "name": "Push Improved Text",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        6968,
-        1180
       ],
       "onError": "continueRegularOutput",
       "retryOnFail": true,
@@ -6082,7 +6043,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"fields\": { \"draft_text\": {{ JSON.stringify($json.improved_draft_text) }}, \"messages\": {{ JSON.stringify($json.improved_messages) }} }, \"card\": { \"chat_id\": {{ JSON.stringify($json.chat_id) }}, \"message_id\": {{ JSON.stringify($json.message_id) }}, \"text\": {{ JSON.stringify($json.text) }}, \"reply_markup\": {{ JSON.stringify($json.reply_markup) }} } }",
+        "jsonBody": "={ \"action\": \"regen-commit\", \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"fields\": {}, \"card\": { \"chat_id\": {{ JSON.stringify($json.chat_id) }}, \"message_id\": {{ JSON.stringify($json.message_id) }}, \"text\": {{ JSON.stringify($json.text) }}, \"reply_markup\": {{ JSON.stringify($json.reply_markup) }} } }",
         "options": {
           "timeout": 15000
         }
@@ -7102,11 +7063,6 @@
         [
           {
             "node": "Improve Commit",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Push Improved Text",
             "type": "main",
             "index": 0
           }

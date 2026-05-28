@@ -90,6 +90,7 @@ from routes import (  # noqa: F401
     handle_followup_action,
     handle_hourly_sweep,
     handle_improve,
+    handle_quality_check,
     handle_info,
     handle_label,
     handle_label_eval,
@@ -1826,6 +1827,54 @@ def build_improve_query(p):
     return "\n".join(parts)
 
 
+def build_quality_query(p):
+    """Compose the -q query for a FAST quality SCORE of an existing draft.
+    Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
+    {"score": N, "flags": [...], "summary": "one line"}. See /quality-check."""
+    parts = []
+    sp = load_system_prompt()
+    if sp:
+        parts.append(sp)
+        parts.append("=" * 60)
+    parts.append(
+        "TASK: A first-draft WhatsApp reply for Dubriani Yachts is awaiting "
+        "operator review. SCORE its quality 1-10 against Maria's persona, the "
+        "hard rules above, and the conversation. Do NOT rewrite it — only "
+        "score and flag. 8-10 = send as-is; 5-7 = usable but has issues; "
+        "1-4 = should be regenerated."
+    )
+    name = (p.get("customer_name") or "the customer").strip()
+    hist = (p.get("history") or "").strip()
+    if hist:
+        parts.append("\n--- CONVERSATION SO FAR ---\n" + hist)
+    else:
+        parts.append("\n--- This is a NEW conversation — no prior history. ---")
+    parts.append(
+        f"\n--- NEWEST MESSAGE FROM {name} ---\n"
+        + (p.get("incoming_message") or "").strip()
+    )
+    rules = fetch_behavior_rules(p.get("customer_id"))
+    if rules:
+        parts.append(
+            "\n--- ACTIVE BEHAVIOR RULES (learned corrections — must follow) ---\n"
+            + "\n".join("- " + r for r in rules)
+        )
+    cur = p.get("current_draft")
+    if isinstance(cur, list):
+        cur = "\n\n".join(str(m) for m in cur)
+    parts.append("\n--- DRAFT TO SCORE ---\n" + str(cur or "").strip())
+    parts.append(
+        "\n--- RESPOND NOW ---\n"
+        "Output ONLY one JSON object — no markdown fences, no commentary:\n"
+        '{"score": <integer 1-10>, "flags": ["<short_snake_case_issue>", ...], '
+        '"summary": "<one short line, max 12 words>"}\n'
+        "flags: 0-3 short tags such as too_verbose, weak_opening, missing_cta, "
+        "ignores_question, rule_violation, off_tone, too_pushy. Use an empty "
+        "list if the draft is strong."
+    )
+    return "\n".join(parts)
+
+
 def build_learn_query(p):
     """Ask Hermes whether an operator's correction is a DURABLE behaviour rule
     (FR-5 learning loop) versus a one-off tweak."""
@@ -2578,7 +2627,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/draft", "/improve", "/learn", "/rules",
+        if self.path not in ("/draft", "/improve", "/quality-check",
+                             "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
                              "/debounce", "/payment-link", "/feedback",
@@ -2630,6 +2680,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_save_rule(payload, self._send)
         elif self.path == "/improve":
             handle_improve(payload, self._send)
+        elif self.path == "/quality-check":
+            handle_quality_check(payload, self._send)
         elif self.path == "/learn":
             handle_learn(payload, self._send)
         elif self.path == "/rules":

@@ -3593,6 +3593,51 @@ def handle_improve(payload, send):
         "elapsed_ms": elapsed,
     })
 
+def handle_quality_check(payload, send):
+    """POST /quality-check — fast quality SCORE of a draft (no rewrite).
+    Returns {ok, score:1-10, flags:[...], summary}. Fail-safe: on ANY error
+    returns 200 ok:false so n8n simply shows no badge — the draft is never
+    silently changed. Replaces the old /improve auto-rewrite pass."""
+    from server import (
+        build_quality_query,
+        extract_json,
+        run_hermes,
+    )
+    if not payload.get("current_draft"):
+        send(400, {"ok": False, "error": "current_draft is required"})
+        return
+    try:
+        rc, out, err, elapsed = run_hermes(
+            build_quality_query(payload), priority="background")
+    except subprocess.TimeoutExpired:
+        log("quality-check TIMEOUT")
+        send(200, {"ok": False, "error": "hermes timeout"})
+        return
+    except Exception as e:
+        log("quality-check EXEC ERROR", repr(e))
+        send(200, {"ok": False, "error": f"hermes exec error: {e}"})
+        return
+    parsed, blob = extract_json(out)
+    score = None
+    if isinstance(parsed, dict):
+        try:
+            score = int(parsed.get("score"))
+        except (TypeError, ValueError):
+            score = None
+    if rc != 0 or score is None or not (1 <= score <= 10):
+        log(f"quality-check FAIL rc={rc} parsed={parsed is not None}")
+        send(200, {"ok": False, "error": "no parseable score",
+                         "rc": rc, "raw": (blob or out)[:1000]})
+        return
+    flags = parsed.get("flags")
+    flags = [str(f) for f in flags][:3] if isinstance(flags, list) else []
+    summary = str(parsed.get("summary") or "")
+    log(f"quality-check OK customer={payload.get('customer_name')!r} "
+        f"score={score} flags={flags} elapsed={elapsed}ms")
+    send(200, {"ok": True, "score": score, "flags": flags,
+                     "summary": summary, "elapsed_ms": elapsed})
+
+
 def handle_learn(payload, send):
     from server import (
         VALID_SCOPES,
