@@ -805,8 +805,14 @@ def resolve_customer_by_name(name):
     if not name or not name.strip():
         return None, []
     n = name.strip().replace("'", "''").lower()
+    # Exclude merged (non-canonical) duplicate rows — production bug
+    # 2026-05-28: "draft nudge to Madawi" showed the same name twice
+    # because both the canonical @lid row AND its merged @c.us row
+    # matched. merged_into IS NOT NULL means the row points to a
+    # canonical twin; never surface it as a separate match.
     sql = ("SELECT customer_id || E'\\t' || name FROM customer_facts "
            f"WHERE lower(name) LIKE '%{n}%' "
+           "AND merged_into IS NULL "
            "ORDER BY updated_at DESC LIMIT 3")
     out, err = _psql(sql)
     if err:
