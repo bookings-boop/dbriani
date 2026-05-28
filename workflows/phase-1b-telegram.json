@@ -4648,7 +4648,14 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={ \"chat_id\": 5532831477, \"text\": {{ JSON.stringify($json.text) }}, \"parse_mode\": \"Markdown\", \"reply_markup\": {{ JSON.stringify({ inline_keyboard: ($json.inline_keyboard || []) }) }} }",
-        "options": {}
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 350
+            }
+          }
+        }
       }
     },
     {
