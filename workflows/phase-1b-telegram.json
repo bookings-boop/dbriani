@@ -2080,7 +2080,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// FR-3 (BUG-1 fix): the bridge buffered this message in Redis and issued\n// a token. staticData is NOT used \u2014 it cannot coordinate the concurrent\n// executions that one-per-inbound-message spawns.\nconst wh = $('WAHA Webhook').item.json.body.payload;\nconst r = $('Debounce Buffer').item.json || {};\nreturn { json: {\n  phone: wh.from,\n  token: r.token || '',\n  degraded: !r.token        // bridge/Redis error -> Flush Check fails open\n} };\n"
+        "jsCode": "// FR-3 (BUG-1 fix): the bridge buffered this message in Redis and issued\n// a token. staticData is NOT used \u2014 it cannot coordinate the concurrent\n// executions that one-per-inbound-message spawns.\nconst wh = $('WAHA Webhook').item.json.body.payload;\nconst r = $('Debounce Buffer').item.json || {};\n// Two-tier debounce: booking-signal messages flush fast (5s) so hot leads\n// get a near-instant reply; everything else waits 15s to let the customer\n// finish a multi-message thought before we draft. (date-within-24h is\n// proxied by today/tonight/this evening/same day \u2014 no date parsing here.)\nconst text = String(wh.body || '').toLowerCase();\nconst BOOKING_SIGNAL = /\\b(today|tonight|tonite|this evening|same.?day|right now|asap|how much|price|prices|pricing|cost|rate|rates|quote|deposit|let'?s book|book (it|now|this|the)|i'?ll take it)\\b/;\nconst wait_seconds = BOOKING_SIGNAL.test(text) ? 5 : 15;\nreturn { json: {\n  phone: wh.from,\n  token: r.token || '',\n  degraded: !r.token,       // bridge/Redis error -> Flush Check fails open\n  wait_seconds: wait_seconds\n} };"
       },
       "id": "7be73f77-c094-4c27-8a49-90e1d1ea2906",
       "name": "Buffer Message",
@@ -2093,7 +2093,8 @@
     },
     {
       "parameters": {
-        "amount": 60
+        "amount": "={{ $('Buffer Message').item.json.wait_seconds }}",
+        "unit": "seconds"
       },
       "id": "1f34ad7e-78c9-4530-a42c-b331134bd240",
       "name": "Debounce Wait",
