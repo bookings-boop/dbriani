@@ -213,6 +213,8 @@ def handle_queue(payload, send):
     Actions: save | get | update | mark | latest-for-customer | drop.
     Always 200; ok flag carries the outcome."""
     from server import (
+        _draft_awaiting,
+        _draft_by_tgmsg,
         _draft_drop,
         _draft_get,
         _draft_latest_for_customer,
@@ -220,6 +222,27 @@ def handle_queue(payload, send):
         _draft_update,
     )
     action = (payload.get("action") or "").strip().lower()
+
+    if action == "get-by-tgmsg":
+        # Resolve a Telegram message_id (the card the operator replied
+        # to) back to its draft. Redis-migration 2026-05-28 — replaces
+        # staticData.pendingQueue.find(d.telegram_message_id === mid).
+        mid = payload.get("message_id")
+        d, err = _draft_by_tgmsg(mid)
+        send(200, {"ok": True, "draft": d,
+                         "found": d is not None, "error": err})
+        return
+
+    if action == "awaiting":
+        # Return the draft blocking on operator input for a given
+        # status ('awaiting_edit' or 'awaiting_amount'). Replaces
+        # staticData's queue.find(x => x.status === '...').
+        status = (payload.get("status") or "awaiting_edit").strip()
+        chat = payload.get("chat_id")
+        d, err = _draft_awaiting(status, chat)
+        send(200, {"ok": True, "draft": d,
+                         "found": d is not None, "error": err})
+        return
 
     if action == "save":
         draft = payload.get("draft") or {}
@@ -302,7 +325,8 @@ def handle_queue(payload, send):
 
     send(200, {"ok": False,
                      "error": ("action must be save|get|update|mark|"
-                               "latest-for-customer|drop|claim-send")})
+                               "latest-for-customer|drop|claim-send|"
+                               "get-by-tgmsg|awaiting")})
 
 
 # ============================================================================

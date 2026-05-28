@@ -308,6 +308,33 @@ def _byc_key(cid):
     return "drafts:bycustomer:" + str(cid)
 
 
+def _tgmsg_key(message_id):
+    """Reverse index: Telegram message_id -> draft_id. Lets the
+    reply-to-a-card flow resolve a draft from the message the operator
+    replied to (Redis-migration 2026-05-28 — replaces the
+    staticData.pendingQueue scan)."""
+    return "tgmsg:" + str(message_id)
+
+
+def _awaiting_key(chat_id, status):
+    """Singleton per (admin chat, awaiting-status). Tracks the one
+    draft currently blocking on operator input — either 'awaiting_edit'
+    (typed refinement feedback) or 'awaiting_amount' (paylink amount).
+    Set when a draft enters that status, cleared when it leaves.
+    Replaces staticData's queue.find(x => x.status === '...')."""
+    return "draft:" + str(status) + ":" + str(chat_id)
+
+
+# Statuses that block on operator text input → tracked via singleton.
+_AWAITING_STATUSES = ("awaiting_edit", "awaiting_amount")
+
+
+# Operator's Telegram chat id — the single approval channel. Used as
+# the default when a draft has no telegram_chat_id yet (e.g. for the
+# awaiting-edit singleton key namespace).
+DEFAULT_ADMIN_CHAT = int(os.environ.get("ADMIN_CHAT_ID", "5532831477"))
+
+
 def _draft_save(draft):
     """Write draft JSON, set TTL, update active set + per-customer ZSET.
     Returns (ok, err).
@@ -541,6 +568,35 @@ def _draft_update(did, fields):
             _redis(["SADD", DRAFTS_ACTIVE, did])
         else:
             _redis(["SREM", DRAFTS_ACTIVE, did])
+    # tgmsg reverse-index — Redis-migration 2026-05-28: the
+    # operator's reply-to-a-card flow needs to resolve a Telegram
+    # message_id back to a draft_id. staticData.pendingQueue used to
+    # provide this via queue.find(d => d.telegram_message_id === ...).
+    # With Redis as the sole store we maintain tgmsg:<msgid> -> did
+    # so handle_queue's get-by-tgmsg can do the same lookup. Written
+    # whenever telegram_message_id is (re)set.
+    if "telegram_message_id" in (fields or {}):
+        new_mid = fields.get("telegram_message_id")
+        if new_mid:
+            _redis(["SET", _tgmsg_key(new_mid), did,
+                    "EX", str(QUEUE_TTL)])
+    # awaiting-* singletons — when a draft enters an operator-input-
+    # blocking status (awaiting_edit / awaiting_amount), record it so
+    # Process Text Reply can find "the draft blocking on my input"
+    # without scanning staticData. Cleared when status leaves.
+    if "status" in (fields or {}):
+        new_st = fields.get("status") or ""
+        chat = d.get("telegram_chat_id") or DEFAULT_ADMIN_CHAT
+        if new_st in _AWAITING_STATUSES:
+            _redis(["SET", _awaiting_key(chat, new_st), did,
+                    "EX", str(QUEUE_TTL)])
+        if prior_status in _AWAITING_STATUSES \
+                and prior_status != new_st:
+            # leaving an awaiting status — clear its singleton if it
+            # still points at us (avoid clobbering a newer one).
+            cur, _e = _redis(["GET", _awaiting_key(chat, prior_status)])
+            if (cur or "").strip() == did:
+                _redis(["DEL", _awaiting_key(chat, prior_status)])
     _, err = _redis(["SET", _draft_key(did), json.dumps(d),
                      "EX", str(QUEUE_TTL)])
     if err:
@@ -562,12 +618,60 @@ def _draft_update(did, fields):
 
 
 def _draft_drop(did):
-    """Cleanup. Returns (ok, err)."""
+    """Cleanup. Returns (ok, err). Also clears the tgmsg reverse
+    index + awaiting-edit singleton so no dangling pointers survive."""
     if not did:
         return False, "draft_id required"
+    # Clear reverse index + singleton before deleting the draft.
+    d, _ = _draft_get(did)
+    if d:
+        mid = d.get("telegram_message_id")
+        if mid:
+            _redis(["DEL", _tgmsg_key(mid)])
+        chat = d.get("telegram_chat_id") or DEFAULT_ADMIN_CHAT
+        for st in _AWAITING_STATUSES:
+            cur, _e = _redis(["GET", _awaiting_key(chat, st)])
+            if (cur or "").strip() == did:
+                _redis(["DEL", _awaiting_key(chat, st)])
     _redis(["DEL", _draft_key(did)])
     _redis(["SREM", DRAFTS_ACTIVE, did])
     return True, None
+
+
+def _draft_by_tgmsg(message_id):
+    """Resolve a Telegram message_id to its draft via the tgmsg
+    reverse index. Returns (draft|None, err|None)."""
+    if not message_id:
+        return None, "message_id required"
+    did_out, err = _redis(["GET", _tgmsg_key(message_id)])
+    if err:
+        return None, err
+    did = (did_out or "").strip()
+    if not did:
+        return None, None
+    return _draft_get(did)
+
+
+def _draft_awaiting(status, chat_id=None):
+    """Return the draft currently in an operator-input-blocking status
+    ('awaiting_edit' or 'awaiting_amount') for this admin chat, via the
+    singleton key. Returns (draft|None, err|None). Defensively verifies
+    the resolved draft is actually still in that status (the singleton
+    could be stale if a transition raced)."""
+    if status not in _AWAITING_STATUSES:
+        return None, f"unsupported awaiting status {status!r}"
+    chat = chat_id or DEFAULT_ADMIN_CHAT
+    did_out, err = _redis(["GET", _awaiting_key(chat, status)])
+    if err:
+        return None, err
+    did = (did_out or "").strip()
+    if not did:
+        return None, None
+    d, e2 = _draft_get(did)
+    if d and d.get("status") != status:
+        # stale singleton — the draft moved on. Treat as not-found.
+        return None, None
+    return d, e2
 
 
 def _draft_latest_for_customer(customer_id, want_status=None):
