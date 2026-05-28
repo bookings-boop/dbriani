@@ -3593,6 +3593,81 @@ def handle_improve(payload, send):
         "elapsed_ms": elapsed,
     })
 
+def handle_edit_feedback(payload, send):
+    """POST /edit-feedback — feedback-prompt interactions (draft feedback loop P2).
+
+    actions:
+      tag          {correction_id, reason_tag, chat_id} → save reason_tag; if
+                   not 'skip', arm an await-detail key for the chat and return a
+                   guided follow-up question (Hermes, deterministic fallback).
+      await-detail {chat_id, text} → if this chat has an armed correction, save
+                   the text as reason_detail and clear the key. Returns {captured}.
+
+    Fail-safe: 200 ok:false on any error (never disturbs operator messaging)."""
+    from server import (
+        EDIT_REASON_QUESTIONS,
+        build_edit_question_query,
+        edit_corr_get,
+        edit_corr_set_detail,
+        edit_corr_set_reason,
+        run_hermes,
+        _redis,
+    )
+    action = (payload.get("action") or "").strip().lower()
+    if action == "tag":
+        corr_id = payload.get("correction_id")
+        tag = (payload.get("reason_tag") or "").strip()
+        chat_id = str(payload.get("chat_id") or "").strip()
+        ok, err = edit_corr_set_reason(corr_id, tag)
+        if tag == "skip":
+            send(200, {"ok": ok, "skip": True, "error": err})
+            return
+        question = EDIT_REASON_QUESTIONS.get(tag, "What would you change?")
+        row, _ = edit_corr_get(corr_id)
+        if row:
+            try:
+                rc, out, _, _ = run_hermes(
+                    build_edit_question_query(tag, row.get("original", ""),
+                                              row.get("sent", "")),
+                    timeout=30, priority="background")
+                lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
+                if rc == 0 and lines:
+                    cand = lines[-1].strip().strip('"').strip()
+                    if 5 <= len(cand) <= 200:
+                        question = cand
+            except Exception as e:
+                log("edit-feedback question err:", repr(e))
+        if chat_id and corr_id is not None:
+            try:
+                _redis(["SET", "editfb:await:" + chat_id, str(corr_id),
+                        "EX", "180"])
+            except Exception:
+                pass
+        log(f"edit-feedback TAG id={corr_id} tag={tag!r}")
+        send(200, {"ok": True, "skip": False, "question": question})
+        return
+    if action == "await-detail":
+        chat_id = str(payload.get("chat_id") or "").strip()
+        text = (payload.get("text") or "").strip()
+        if not chat_id or not text:
+            send(200, {"ok": True, "captured": False})
+            return
+        cur, _ = _redis(["GET", "editfb:await:" + chat_id])
+        corr_id = (cur or "").strip()
+        if not corr_id:
+            send(200, {"ok": True, "captured": False})
+            return
+        ok, err = edit_corr_set_detail(corr_id, text)
+        try:
+            _redis(["DEL", "editfb:await:" + chat_id])
+        except Exception:
+            pass
+        log(f"edit-feedback DETAIL id={corr_id} captured={ok}")
+        send(200, {"ok": ok, "captured": ok, "error": err})
+        return
+    send(400, {"ok": False, "error": "action must be tag|await-detail"})
+
+
 def handle_edit_capture(payload, send):
     """POST /edit-capture — store an operator edit-delta (the first Hermes
     draft vs the text actually sent) for the draft-feedback learning loop.

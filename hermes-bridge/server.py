@@ -87,6 +87,7 @@ from routes import (  # noqa: F401
     handle_draft_followup,
     handle_draft_freshness,
     handle_edit_capture,
+    handle_edit_feedback,
     handle_feedback,
     handle_followup_action,
     handle_hourly_sweep,
@@ -1071,6 +1072,58 @@ def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
         return None, repr(e)
 
 
+EDIT_REASON_QUESTIONS = {
+    "too_long": "How long should this have been — one sentence, or 2-3 lines?",
+    "wrong_tone": "Too formal, too pushy, or something else?",
+    "missed_question": "What was the main thing they asked that I missed?",
+    "wrong_info": "What info was off — price, availability, or yacht details?",
+    "my_style": "What would you have said differently?",
+}
+
+
+def edit_corr_set_reason(corr_id, reason_tag):
+    """Set reason_tag on an edit_corrections row. Returns (ok, err)."""
+    try:
+        cid = int(corr_id)
+    except (TypeError, ValueError):
+        return False, "bad correction_id"
+    _, err = _psql("UPDATE edit_corrections SET reason_tag=" + _lit(reason_tag)
+                   + f" WHERE id = {cid}")
+    return (err is None), err
+
+
+def edit_corr_set_detail(corr_id, detail):
+    """Set reason_detail on an edit_corrections row. Returns (ok, err)."""
+    try:
+        cid = int(corr_id)
+    except (TypeError, ValueError):
+        return False, "bad correction_id"
+    _, err = _psql("UPDATE edit_corrections SET reason_detail=" + _lit(detail)
+                   + f" WHERE id = {cid}")
+    return (err is None), err
+
+
+def edit_corr_get(corr_id):
+    """Fetch one edit_corrections row as a JSON-safe dict. Returns (row, err)."""
+    try:
+        cid = int(corr_id)
+    except (TypeError, ValueError):
+        return None, "bad correction_id"
+    out, err = _psql(
+        "SELECT json_build_object('original', original_text, 'sent', sent_text, "
+        "'reason_tag', COALESCE(reason_tag,''), 'customer_id', customer_id) "
+        f"FROM edit_corrections WHERE id = {cid}")
+    if err:
+        return None, err
+    raw = (out or "").strip()
+    if not raw:
+        return None, None
+    try:
+        return json.loads(raw.splitlines()[0]), None
+    except Exception as e:
+        return None, repr(e)
+
+
 def edit_corr_insert(customer_id, original_text, sent_text, label, yacht,
                      country, similarity):
     """INSERT an edit_corrections row (draft feedback loop, Phase 1).
@@ -1850,6 +1903,20 @@ def build_improve_query(p):
         '"improved": false and echo the current draft text back in messages.'
     )
     return "\n".join(parts)
+
+
+def build_edit_question_query(reason_tag, original, sent):
+    """Ask Hermes for ONE short follow-up question about a specific operator
+    edit, grounded in the original-vs-sent diff (draft feedback loop)."""
+    return (
+        "An operator just edited a Dubriani Yachts WhatsApp draft before "
+        f"sending it. They flagged the reason as: {reason_tag}.\n\n"
+        "--- ORIGINAL DRAFT (what the AI wrote) ---\n" + (original or "") + "\n\n"
+        "--- WHAT THEY ACTUALLY SENT ---\n" + (sent or "") + "\n\n"
+        "Ask the operator ONE short, specific follow-up question (max 18 words) "
+        "that would help avoid this kind of edit next time. Be concrete about "
+        "THIS diff. Output ONLY the question text — no preamble, no quotes."
+    )
 
 
 def build_quality_query(p):
@@ -2670,7 +2737,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
                              "/send-file", "/list-files",
-                             "/edit-capture",
+                             "/edit-capture", "/edit-feedback",
                              "/nomod-webhook"):
             self._send(404, {"error": "not found"})
             return
@@ -2710,6 +2777,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_quality_check(payload, self._send)
         elif self.path == "/edit-capture":
             handle_edit_capture(payload, self._send)
+        elif self.path == "/edit-feedback":
+            handle_edit_feedback(payload, self._send)
         elif self.path == "/learn":
             handle_learn(payload, self._send)
         elif self.path == "/rules":

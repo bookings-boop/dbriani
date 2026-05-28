@@ -388,7 +388,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration \u2014 staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration \u2014 staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force' || action === 'editfb');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -815,6 +815,30 @@
                 "combinator": "and"
               },
               "renameOutput": true
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "editfb-rule",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "editfb",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "editfb"
             }
           ]
         },
@@ -1165,7 +1189,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\n// Redis-migration 2026-05-28: bridge lookups replace staticData\n// queue scans. _http is bound so it works inside this node.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000,\n    });\n  } catch (e) { return null; }\n}\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      const _r = await bq('get-by-tgmsg', { message_id: r2.message_id });\n      d2 = (_r && _r.found) ? _r.draft : null;\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const _aa = await bq('awaiting', { status: 'awaiting_amount', chat_id: adminChatId });\n  const await_amt = (_aa && _aa.found) ? _aa.draft : null;\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await bq('mark', { draft_id: await_amt.id, status: 'pending' });  // release lock in Redis\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst _ae = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nconst awaiting = (_ae && _ae.found) ? _ae.draft : null;\nif (awaiting && text) {\n  await bq('mark', { draft_id: awaiting.id, status: 'pending' });  // release the edit lock in Redis\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // Resolve the replied-to card to its draft (newest-match: telegram\n  // message_ids collide across bot/session resets).\n  const _rr = await bq('get-by-tgmsg', { message_id: r.message_id });\n  let d = (_rr && _rr.found) ? _rr.draft : null;\n  // Fallback: the replied-to message may not be the card itself, or\n  // the card's draft may have expired. If an awaiting_edit lock is\n  // set for this chat (operator tapped Edit), refine THAT draft.\n  if (!d) {\n    const _ae2 = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\n    d = (_ae2 && _ae2.found) ? _ae2.draft : null;\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n  // A REPLY must NEVER fall through to /assist \u2014 that could send a\n  // nudge to a wrong fuzzy-matched customer (wrong-number incident\n  // 2026-05-28). If we can't map the reply to a live draft, say so.\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: \"\\u26a0\\ufe0f Couldn't match that reply to a live \"\n      + \"draft card (it may have already been sent or expired). \"\n      + \"Tap \\u270f\\ufe0f Edit on the card you want to change, \"\n      + \"then type your edit.\" } };\n}\n\n// (Z) FALLBACK \u2014 non-command, non-reply free-text from operator -> /assist endpoint for natural-language routing\n//     (status queries, draft nudges, paylink creation, customer search). Empty text still acks.\nif (!text || !text.trim()) {\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: '\u26a0\ufe0f Empty message.' } };\n}\nreturn { json: { action: 'assist_query', query_text: text, admin_chat_id: adminChatId } };\n"
+        "jsCode": "// route an admin Telegram message: /lead, /send, edit-feedback, reply, or ack\nconst msg = $input.item.json.message || {};\nconst text = (msg.text || '').trim();\nconst adminChatId = (msg.chat && msg.chat.id) ? msg.chat.id : 5532831477;\n// Redis-migration 2026-05-28: bridge lookups replace staticData\n// queue scans. _http is bound so it works inside this node.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json',\n        'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}),\n      json: true, timeout: 8000,\n    });\n  } catch (e) { return null; }\n}\n\n// (C) /lead <free-form> -> create an outbound first-contact draft (FR-2)\nif (text.toLowerCase().indexOf('/lead') === 0) {\n  const leadText = text.slice(5).trim();\n  const cand = leadText.match(/[+\\d][\\d\\s().\\-]{7,}\\d/g) || [];\n  let phone = '';\n  for (const c of cand) {\n    const d = c.replace(/[^\\d]/g, '');\n    if (d.length >= 9 && d.length > phone.length) phone = d;\n  }\n  if (!phone) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: \"\u26a0\ufe0f Couldn't find a phone number in that lead. Try:  /lead <name> <phone> <details>\" } };\n  }\n  let norm = phone.replace(/^00/, '');\n  if (norm.length === 10 && norm[0] === '0') norm = '971' + norm.slice(1);\n  else if (norm.length === 9 && norm[0] === '5') norm = '971' + norm;\n  return { json: { action: 'new_lead', lead_phone: norm + '@c.us',\n    lead_text: leadText, admin_chat_id: adminChatId } };\n}\n\n// (B) /send <chatId> <message>\nif (text.toLowerCase().indexOf('/send ') === 0) {\n  const rest = text.slice(6).trim();\n  const sp = rest.indexOf(' ');\n  if (sp < 1) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: 'Usage:  /send <chatId> <message>' } };\n  }\n  return { json: { action: 'send_to_customer', origin: 'slash',\n    target_chatId: rest.slice(0, sp).trim(), final_text: rest.slice(sp + 1).trim(),\n    admin_chat_id: adminChatId } };\n}\n\n// (E) /auto, /manual \u2014 switch a conversation's autonomous mode (FR-4)\n{\n  const low = text.toLowerCase();\n  if (low === '/auto' || low === '/manual' || low === '/manual all') {\n    let d2 = null;\n    const r2 = msg.reply_to_message;\n    if (r2 && r2.message_id) {\n      const _r = await bq('get-by-tgmsg', { message_id: r2.message_id });\n      d2 = (_r && _r.found) ? _r.draft : null;\n    }\n    if (low === '/auto') {\n      if (!d2) {\n        return { json: { action: 'ack', admin_chat_id: adminChatId,\n          ack_text: '\u26a0\ufe0f reply to a customer draft card with /auto to hand that conversation to autonomous mode.' } };\n      }\n      return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n        mode: 'autonomous', admin_chat_id: adminChatId } };\n    }\n    if (low === '/manual all' || !d2) {\n      return { json: { action: 'mode_cmd', mode_target: '__ALL__',\n        mode: 'approval', admin_chat_id: adminChatId } };\n    }\n    return { json: { action: 'mode_cmd', mode_target: d2.customer_phone,\n      mode: 'approval', admin_chat_id: adminChatId } };\n  }\n}\n\n// (F) /caps \u2014 report autonomous-mode safety-cap status (BUG-2)\nif (text.toLowerCase() === '/caps') {\n  return { json: { action: 'caps_cmd', admin_chat_id: adminChatId } };\n}\n\n// (PRF) /refresh <name-or-phone-or-@lid> \u2014 re-extract customer_facts\n// via WAHA history.\n// Arg detection order: @lid id (contains '@') > phone (7+ digits, with\n// optional + sign / spaces / hyphens) > name (anything else).\n{\n  const lo = text.toLowerCase();\n  if (lo === '/refresh' || lo.indexOf('/refresh ') === 0) {\n    const arg = text.slice(8).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /refresh <name | phone | @lid customer_id>' } };\n    }\n    const isId = arg.indexOf('@') >= 0;\n    const phoneDigits = arg.replace(/[\\s\\-()+]/g, '');\n    const isPhone = !isId && /^\\d{7,}$/.test(phoneDigits);\n    const kind = isId ? 'customer_id' : (isPhone ? 'phone' : 'name');\n    const value = isPhone ? phoneDigits : arg;\n    return { json: { action: 'refresh_cmd', refresh_query: value,\n      refresh_query_kind: kind, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PR) /review [filter] \u2014 Pipeline Review report (Step 5 of pipeline-review)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/review' || lo.indexOf('/review ') === 0) {\n    const arg = text.slice(7).trim().toLowerCase();\n    const allowed = ['all','hot','warm','cold'];\n    const filt = allowed.indexOf(arg) >= 0 ? arg : 'all';\n    return { json: { action: 'review_cmd', filter: filt,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PI) /info <name-or-phone> \u2014 single-lead context dump\n{\n  const lo = text.toLowerCase();\n  if (lo === '/info' || lo.indexOf('/info ') === 0) {\n    const arg = text.slice(5).trim();\n    if (!arg) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /info <name or phone>' } };\n    }\n    // @lid customer_ids contain '@'; everything else is treated as a name.\n    const isId = arg.indexOf('@') >= 0;\n    return { json: { action: 'info_cmd', info_query: arg,\n      info_query_kind: isId ? 'customer_id' : 'name',\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (PL) /label <name-or-phone> <LABEL> \u2014 manual label override\n{\n  const lo = text.toLowerCase();\n  if (lo === '/label' || lo.indexOf('/label ') === 0) {\n    const parts = text.slice(7).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /label <name or phone> <LABEL>\\n'\n          + 'LABELS: NEW, WARM, HOT, NEEDS_ATTENTION, COLD,\\n'\n          + '        PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL' } };\n    }\n    const label = parts[parts.length - 1].toUpperCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'label_cmd', label_query: who,\n      label_query_kind: isId ? 'customer_id' : 'name',\n      label_value: label, admin_chat_id: adminChatId } };\n  }\n}\n\n// (PS) /snooze <name-or-phone> <dur> \u2014 snooze a customer (no label change)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/snooze' || lo.indexOf('/snooze ') === 0) {\n    const parts = text.slice(8).trim().split(/\\s+/);\n    if (parts.length < 2) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /snooze <name or phone> <duration>\\n'\n          + 'examples:  /snooze Mark 4h    /snooze +971... 2d' } };\n    }\n    const duration = parts[parts.length - 1].toLowerCase();\n    const who = parts.slice(0, -1).join(' ');\n    const isId = who.indexOf('@') >= 0;\n    return { json: { action: 'snooze_cmd', snooze_query: who,\n      snooze_query_kind: isId ? 'customer_id' : 'name',\n      snooze_duration: duration, admin_chat_id: adminChatId } };\n  }\n}\n\n// (G) /feedback <text> \u2014 operator behavioural feedback (classify +\n//     confirm + store in customer_notes / behavior_rules)\n{\n  const lo = text.toLowerCase();\n  if (lo === '/feedback' || lo.indexOf('/feedback ') === 0) {\n    const fb = text.slice(9).trim();\n    if (!fb) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  /feedback <text>\\n'\n          + 'examples:\\n'\n          + '  /feedback never offer phone calls\\n'\n          + '  /feedback Mark booked Aurora last March, mention it\\n'\n          + '  /feedback offer fine dining first to family groups'\n      } };\n    }\n    return { json: { action: 'feedback_cmd', feedback_text: fb,\n      admin_chat_id: adminChatId } };\n  }\n}\n\n// (D) /rules, /approverule <id>, /discardrule <id> \u2014 rule review (FR-5)\n{\n  const low = text.toLowerCase();\n  if (low === '/rules' || low.indexOf('/rules ') === 0) {\n    return { json: { action: 'rules_cmd', rules_action: 'list', rule_id: null,\n      admin_chat_id: adminChatId } };\n  }\n  if (low.indexOf('/approverule ') === 0 || low.indexOf('/discardrule ') === 0) {\n    const isApprove = low.indexOf('/approverule ') === 0;\n    const rid = (text.split(/\\s+/)[1] || '').trim();\n    if (!/^\\d+$/.test(rid)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: 'Usage:  ' + (isApprove ? '/approverule' : '/discardrule')\n          + ' <rule id number>' } };\n    }\n    return { json: { action: 'rules_cmd',\n      rules_action: isApprove ? 'activate' : 'discard', rid_text: rid,\n      rule_id: rid, admin_chat_id: adminChatId } };\n  }\n}\n\n// (paylink-amount) a draft is awaiting a payment amount \u2014 operator\n// hit [\ud83d\udcb3 Send Link] on a draft that had no payment_amount, so the\n// workflow prompted for one. The next text reply IS the amount.\n{\n  const _aa = await bq('awaiting', { status: 'awaiting_amount', chat_id: adminChatId });\n  const await_amt = (_aa && _aa.found) ? _aa.draft : null;\n  if (await_amt && text) {\n    // Parse: digits, optional 'k' suffix (5k -> 5000), commas + decimals ok\n    const m = text.trim().match(/^([\\d,]+(?:\\.\\d+)?)(k)?$/i);\n    if (!m) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount not recognised. Type a plain AED number (e.g. 3000 or 3k).' } };\n    }\n    let amt = parseFloat(m[1].replace(/,/g, ''));\n    if (m[2]) amt *= 1000;\n    if (!(amt > 0)) {\n      return { json: { action: 'ack', admin_chat_id: adminChatId,\n        ack_text: '\u26a0\ufe0f Amount must be positive.' } };\n    }\n    await bq('mark', { draft_id: await_amt.id, status: 'pending' });  // release lock in Redis\n    return { json: { action: 'paylink_amount', draft_id: await_amt.id,\n      amount: amt, admin_chat_id: adminChatId } };\n  }\n}\n\n// (edit) a draft is awaiting feedback -> refine it, do NOT send (FR-1)\nconst _ae = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\nconst awaiting = (_ae && _ae.found) ? _ae.draft : null;\nif (awaiting && text) {\n  await bq('mark', { draft_id: awaiting.id, status: 'pending' });  // release the edit lock in Redis\n  return { json: { action: 'refine', draft_id: awaiting.id, feedback: text,\n    admin_chat_id: adminChatId } };\n}\n\n// (A) reply to a draft card \u2014 DEFAULT: feedback to Claude (refine). Only an\n//     explicit \"send this: X\" sends X verbatim; \"ask this: X\" -> refine to ask X.\nconst r = msg.reply_to_message;\nif (r && r.message_id) {\n  // Resolve the replied-to card to its draft (newest-match: telegram\n  // message_ids collide across bot/session resets).\n  const _rr = await bq('get-by-tgmsg', { message_id: r.message_id });\n  let d = (_rr && _rr.found) ? _rr.draft : null;\n  // Fallback: the replied-to message may not be the card itself, or\n  // the card's draft may have expired. If an awaiting_edit lock is\n  // set for this chat (operator tapped Edit), refine THAT draft.\n  if (!d) {\n    const _ae2 = await bq('awaiting', { status: 'awaiting_edit', chat_id: adminChatId });\n    d = (_ae2 && _ae2.found) ? _ae2.draft : null;\n  }\n  if (d && text) {\n    const lo = text.toLowerCase();\n    if (lo.indexOf('send this:') === 0) {\n      return { json: { action: 'send_to_customer', origin: 'reply',\n        target_chatId: d.customer_phone, final_text: text.slice(10).trim(),\n        draft_id: d.id, admin_chat_id: adminChatId } };\n    }\n    let fb = text;\n    if (lo.indexOf('ask this:') === 0) {\n      fb = 'Ask the customer: ' + text.slice(9).trim();\n    }\n    return { json: { action: 'refine', draft_id: d.id, feedback: fb,\n      admin_chat_id: adminChatId } };\n  }\n  // A REPLY must NEVER fall through to /assist \u2014 that could send a\n  // nudge to a wrong fuzzy-matched customer (wrong-number incident\n  // 2026-05-28). If we can't map the reply to a live draft, say so.\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: \"\\u26a0\\ufe0f Couldn't match that reply to a live \"\n      + \"draft card (it may have already been sent or expired). \"\n      + \"Tap \\u270f\\ufe0f Edit on the card you want to change, \"\n      + \"then type your edit.\" } };\n}\n\n// (Z) FALLBACK \u2014 non-command, non-reply free-text from operator -> /assist endpoint for natural-language routing\n//     (status queries, draft nudges, paylink creation, customer search). Empty text still acks.\nif (!text || !text.trim()) {\n  return { json: { action: 'ack', admin_chat_id: adminChatId,\n    ack_text: '\u26a0\ufe0f Empty message.' } };\n}\n// edit-feedback detail (optional, P2): operator tapped a reason then typed\n// a note. If a correction is armed for this chat, capture it as\n// reason_detail. Fail-open; last check before /assist.\ntry {\n  const _ef = await _http({ method: 'POST',\n    url: 'http://172.18.0.1:8788/edit-feedback',\n    headers: { 'Content-Type': 'application/json',\n      'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { action: 'await-detail', chat_id: String(adminChatId), text: text },\n    json: true, timeout: 8000 });\n  if (_ef && _ef.captured) {\n    return { json: { action: 'ack', admin_chat_id: adminChatId,\n      ack_text: '\\u2713 noted \\u2014 thanks, I will use that.' } };\n  }\n} catch (e) {}\nreturn { json: { action: 'assist_query', query_text: text, admin_chat_id: adminChatId } };\n"
       },
       "id": "6f5d26c1-9134-4378-98b5-002d1802b7af",
       "name": "Process Text Reply",
@@ -6250,6 +6274,269 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 2500
+    },
+    {
+      "id": "edit-should-prompt",
+      "name": "Should Prompt?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2850,
+        1450
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "edit-should-prompt-c",
+              "leftValue": "={{ $json.should_prompt }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "edit-fb-wait",
+      "name": "Feedback Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        3050,
+        1450
+      ],
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "edit-build-prompt",
+      "name": "Build Feedback Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        1450
+      ],
+      "parameters": {
+        "jsCode": "// Build the feedback-prompt card (inline kbd editfb:<corr_id>:<tag>).\nconst cap = $('Capture Edit Delta').item.json || {};\nconst cid = cap.correction_id;\nconst sim = typeof cap.similarity === 'number' ? cap.similarity : 0;\nconst pct = Math.max(1, Math.round((1 - sim) * 100));\nconst tags = [\n  ['\ud83d\udccf Too long', 'too_long'], ['\ud83c\udfad Wrong tone', 'wrong_tone'],\n  ['\u2753 Missed question', 'missed_question'], ['\u2139\ufe0f Wrong info', 'wrong_info'],\n  ['\u270d\ufe0f My style', 'my_style'], ['\u23ed\ufe0f Skip', 'skip'],\n];\nconst kb = [];\nfor (let i = 0; i < tags.length; i += 2) {\n  kb.push(tags.slice(i, i + 2).map(t => ({ text: t[0], callback_data: 'editfb:' + cid + ':' + t[1] })));\n}\nreturn [{ json: { correction_id: cid, telegram_payload: {\n  chat_id: 5532831477,\n  text: '\ud83d\udcdd You edited that draft before sending (~' + pct + '% changed). What was off? (auto-dismisses)',\n  reply_markup: { inline_keyboard: kb },\n} } }];"
+      }
+    },
+    {
+      "id": "edit-post-prompt",
+      "name": "Post Feedback Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3450,
+        1450
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.telegram_payload) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "edit-dismiss-wait",
+      "name": "Dismiss Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        3650,
+        1450
+      ],
+      "parameters": {
+        "amount": 60,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "edit-clear-buttons",
+      "name": "Clear Prompt Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3850,
+        1450
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageReplyMarkup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": 5532831477, \"message_id\": {{ $('Post Feedback Prompt').item.json.result.message_id }}, \"reply_markup\": {\"inline_keyboard\":[]} }",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "edit-fb-tag",
+      "name": "Edit Feedback Tag",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2850,
+        1650
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/edit-feedback",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": \"tag\", \"correction_id\": {{ Number((($('Route Update Type').item.json.callback_query.data) || '').split(':')[1]) }}, \"reason_tag\": {{ JSON.stringify(((($('Route Update Type').item.json.callback_query.data) || '').split(':')[2]) || '') }}, \"chat_id\": {{ JSON.stringify(String(($('Parse Callback').item.json.chat_id) || 5532831477)) }} }",
+        "options": {
+          "timeout": 40000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "id": "edit-tag-route",
+      "name": "Feedback Tag Route",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3050,
+        1650
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "edit-tag-route-c",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "edit-skip",
+      "name": "Dismiss On Skip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3250,
+        1600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"\\u2713 Skipped \\u2014 thanks.\") }} }",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "edit-question",
+      "name": "Post Guided Question",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3250,
+        1750
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify(\"\\ud83d\\udcdd \" + ($json.question || \"What would you change?\") + \"\\n\\n(reply to add a note \\u2014 optional)\") }} }",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -6532,6 +6819,13 @@
         [
           {
             "node": "Prep Send File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Feedback Tag",
             "type": "main",
             "index": 0
           }
@@ -8205,6 +8499,101 @@
         [
           {
             "node": "Prep Learn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Edit Delta": {
+      "main": [
+        [
+          {
+            "node": "Should Prompt?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Prompt?": {
+      "main": [
+        [
+          {
+            "node": "Feedback Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Wait": {
+      "main": [
+        [
+          {
+            "node": "Build Feedback Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Feedback Prompt": {
+      "main": [
+        [
+          {
+            "node": "Post Feedback Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Feedback Prompt": {
+      "main": [
+        [
+          {
+            "node": "Dismiss Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dismiss Wait": {
+      "main": [
+        [
+          {
+            "node": "Clear Prompt Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Feedback Tag": {
+      "main": [
+        [
+          {
+            "node": "Feedback Tag Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feedback Tag Route": {
+      "main": [
+        [
+          {
+            "node": "Dismiss On Skip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post Guided Question",
             "type": "main",
             "index": 0
           }
