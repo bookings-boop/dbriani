@@ -414,7 +414,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"callback_query_id\": {{ JSON.stringify($json.callback_query_id) }}\n}",
+        "jsonBody": "={\n  \"callback_query_id\": {{ JSON.stringify($json.callback_query_id) }},\n  \"text\": {{ JSON.stringify(({'nudge':'\u23f3 Drafting nudge \u2014 ~30s\u2026','send':'\ud83d\udce4 Sending\u2026','edit':'\u270f\ufe0f Reply with what to change','regen':'\ud83d\udd01 Regenerating \u2014 ~30s\u2026','paylink':'\ud83d\udcb3 Working on the link\u2026','file':'\ud83d\udcce Sending file\u2026'})[$json.action] || '\u2713') }}\n}",
         "options": {}
       },
       "id": "9769b939-1457-42b4-97aa-23ebc06b2fd1",
@@ -2233,10 +2233,7 @@
           "name": "Hermes Bridge"
         }
       },
-      "onError": "continueErrorOutput",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -3567,10 +3564,7 @@
         5340,
         2160
       ],
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -4418,10 +4412,7 @@
         "options": {
           "timeout": 90000
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
+      }
     },
     {
       "id": "7537d13c-0938-4557-a165-eafbdc1d0269",
@@ -5325,10 +5316,7 @@
         "options": {
           "timeout": 120000
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
+      }
     },
     {
       "id": "68149ded-7f2b-4bcd-80a4-7a71b09634e2",
@@ -6108,10 +6096,7 @@
         "options": {
           "timeout": 120000
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2500
+      }
     },
     {
       "id": "send-assist-reply-2026-05-27",
