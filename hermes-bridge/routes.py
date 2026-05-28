@@ -946,15 +946,71 @@ def handle_poll_payments(payload, send):
         else:
             unmatched.append(entry)
 
+    # Safety net: promote any paid-but-not-CONFIRMED stragglers the live
+    # webhook/poll promotion missed (merge race, dedup, payer-mismatch
+    # hold, manual mislabel). Runs every poll so stuck-paid self-heals.
+    reconciled = _reconcile_paid_unconfirmed()
+
     log(f"poll-payments scanned={scanned} matched={len(matched)} "
-        f"unmatched={len(unmatched)} dedup_skipped={dedup_skipped}")
+        f"unmatched={len(unmatched)} dedup_skipped={dedup_skipped} "
+        f"reconciled={reconciled}")
     send(200, {
         "ok": True,
         "scanned": scanned,
         "dedup_skipped": dedup_skipped,
         "matched": matched,
         "unmatched": unmatched,
+        "reconciled": reconciled,
     })
+
+
+def _reconcile_paid_unconfirmed():
+    """Safety net for stuck-paid customers: promote any CANONICAL
+    customer with a real deposit (>= CONFIRM_PROMOTION_MIN_AED) on file
+    but a non-CONFIRMED label → CONFIRMED. Catches what the live
+    webhook/poll promotion missed (webhook/merge race, dedup, payer-
+    mismatch hold, or a manual mislabel — Émilie stuck WAITING, Mohammed
+    DISREGARDED despite paying AED 6426, 2026-05-29). Skips rows with a
+    refund/chargeback on file. Returns count promoted."""
+    from server import apply_label_transition
+    from payments import CONFIRM_PROMOTION_MIN_AED
+    try:
+        out, err = _psql(
+            "SELECT a.customer_id, cf.label FROM ("
+            "  SELECT DISTINCT customer_id FROM autonomous_sends "
+            "  WHERE kind='payment_received' "
+            "  AND COALESCE((notes->>'total')::numeric,0) >= "
+            + str(CONFIRM_PROMOTION_MIN_AED) + ") a "
+            "JOIN customer_facts cf ON cf.customer_id=a.customer_id "
+            "WHERE cf.label <> 'CONFIRMED' AND cf.merged_into IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM autonomous_sends r "
+            "  WHERE r.customer_id=a.customer_id "
+            "  AND r.kind IN ('refund','chargeback','payment_refunded'))")
+    except Exception as e:
+        log("reconcile paid-unconfirmed query err:", repr(e))
+        return 0
+    if err:
+        return 0
+    n = 0
+    for line in (out or "").strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        cid = parts[0].strip()
+        prev = (parts[1].strip() if len(parts) > 1 else "") or "NEW"
+        if not cid:
+            continue
+        try:
+            apply_label_transition(
+                cid, prev, "CONFIRMED", "reconcile:paid_not_confirmed",
+                f"real deposit on file; label was {prev}", 0,
+                created_by="system")
+            log(f"reconcile cid={cid!r} {prev} -> CONFIRMED "
+                f"(paid but was stuck)")
+            n += 1
+        except Exception as e:
+            log(f"reconcile promote err cid={cid!r}: {e!r}")
+    return n
 
 
 # ============================================================================
