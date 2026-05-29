@@ -1129,6 +1129,42 @@ def edit_corr_get(corr_id):
         return None, repr(e)
 
 
+DISK_ALERT_CHAT = 5532831477
+
+
+def _disk_alert_check():
+    """Alert the admin Telegram chat if the root filesystem is filling.
+    Called hourly from the sweep. Cooldown per severity (6h, via Redis) so it
+    doesn't spam every hour. Incident 2026-05-29: the disk hit 100% silently
+    and took the bot down (n8n 503 / postgres unhealthy). Never again."""
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+    pct = int(round(used * 100.0 / total)) if total else 0
+    if pct < 80:
+        return
+    sev = "urgent" if pct >= 90 else "warn"
+    try:
+        seen, _ = _redis(["GET", "diskalert:" + sev])
+        if (seen or "").strip():
+            return  # already alerted this severity within the cooldown
+        _redis(["SET", "diskalert:" + sev, "1", "EX", "21600"])  # 6h
+    except Exception:
+        pass  # Redis trouble — better a possible dup alert than silence
+    gb = round(free / (1024.0 ** 3), 1)
+    if pct >= 90:
+        msg = (f"🚨 URGENT: bot box disk {pct}% full ({gb}GB free). n8n + "
+               "postgres FAIL at 100% (this took the bot down on 2026-05-29). "
+               "Free space NOW — old ~/backups dumps + `docker image prune -af`.")
+    else:
+        msg = (f"⚠️ bot box disk {pct}% full ({gb}GB free). The weekly cleanup "
+               "runs Sundays, but keep an eye on it.")
+    try:
+        _tg_post("sendMessage", {"chat_id": DISK_ALERT_CHAT, "text": msg})
+        log(f"disk-alert sent ({sev}) {pct}% free={gb}GB")
+    except Exception as e:
+        log("disk-alert send err:", repr(e))
+
+
 def edit_learning_digest(days=30):
     """Monthly edit-learning summary for the Pipeline Review (P4): most-corrected
     patterns, rules generated, and consolidation suggestions over `days`.

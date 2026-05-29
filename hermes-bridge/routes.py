@@ -3160,6 +3160,13 @@ def handle_hourly_sweep(payload, send):
     )
     import time as _time
     t0 = _time.time()
+    # Disk-space guard (incident 2026-05-29): alert admin if the root fs is
+    # filling, BEFORE it hits 100% and silently kills n8n/postgres.
+    try:
+        from server import _disk_alert_check
+        _disk_alert_check()
+    except Exception as _de:
+        log("disk alert check err:", repr(_de))
     try:
         sql = (
             "SELECT cs.customer_id, "
