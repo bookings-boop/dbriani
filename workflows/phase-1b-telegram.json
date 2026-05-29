@@ -971,7 +971,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"customer_id\": {{ JSON.stringify(($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.is_payment) ? ($('Parse Callback').item.json.draft.customer_phone || '') : '') }}, \"label\": \"CONFIRMED\", \"reason\": \"payment_link_sent \u2014 auto from Mark Sent\" }",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify(($('Parse Callback').item.json.draft && $('Parse Callback').item.json.draft.is_payment) ? ($('Parse Callback').item.json.draft.customer_phone || '') : '') }}, \"label\": \"WAITING_FOR_PAYMENT\", \"reason\": \"payment_link_sent \u2014 awaiting payment (Mark Sent)\" }",
         "options": {
           "timeout": 8000
         }
