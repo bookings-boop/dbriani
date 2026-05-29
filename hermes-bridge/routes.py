@@ -3593,6 +3593,77 @@ def handle_improve(payload, send):
         "elapsed_ms": elapsed,
     })
 
+def handle_edit_rule(payload, send):
+    """POST /edit-rule — operator decision on a pattern-detected rule suggestion
+    (draft feedback loop P3). Confirm card buttons editrule:<suggest_id>:<action>.
+
+    actions:
+      save     → INSERT the suggested rule (active, source='edit_learning') and
+                 stamp the contributing corrections.
+      discard  → drop the suggestion.
+      arm-edit → arm an await key so the operator's next reply replaces the rule
+                 text (handled by /edit-feedback await-detail).
+    Returns {ok, card_text} for the n8n card edit. Fail-safe 200."""
+    from server import (
+        save_behavior_rule,
+        edit_corr_stamp_rule,
+        _redis,
+    )
+    action = (payload.get("action") or "").strip().lower()
+    sid = (payload.get("suggest_id") or "").strip()
+    chat_id = str(payload.get("chat_id") or "").strip()
+    key = "rulesuggest:" + sid
+    if action == "discard":
+        try:
+            _redis(["DEL", key])
+        except Exception:
+            pass
+        send(200, {"ok": True, "card_text": "❌ Rule discarded."})
+        return
+    if action in ("arm-edit", "edit"):
+        if chat_id and sid:
+            try:
+                _redis(["SET", "editrule:await:" + chat_id, sid, "EX", "300"])
+            except Exception:
+                pass
+        send(200, {"ok": True,
+                         "card_text": "✏️ Reply to this message with your "
+                         "version of the rule."})
+        return
+    if action == "save":
+        cur, _ = _redis(["GET", key])
+        raw = (cur or "").strip()
+        if not raw:
+            send(200, {"ok": False,
+                             "card_text": "⚠️ This suggestion expired."})
+            return
+        try:
+            s = json.loads(raw)
+        except Exception:
+            send(200, {"ok": False,
+                             "card_text": "⚠️ Couldn't read the suggestion."})
+            return
+        rid, err = save_behavior_rule(
+            s.get("rule_text", ""), s.get("scope", "GLOBAL_RULE"),
+            s.get("scope_value"), "edit_learning", s.get("reasoning", ""),
+            source="edit_learning")
+        if err or not rid:
+            send(200, {"ok": False, "card_text": "⚠️ Save failed: " + str(err)})
+            return
+        edit_corr_stamp_rule(rid, s.get("reason_tag", ""),
+                             s.get("context_label", ""))
+        try:
+            _redis(["DEL", key])
+        except Exception:
+            pass
+        log(f"edit-rule SAVE id={rid} from suggest={sid}")
+        send(200, {"ok": True, "rule_id": rid,
+                         "card_text": "✅ Rule saved & active:\n"
+                         + s.get("rule_text", "")})
+        return
+    send(400, {"ok": False, "error": "action must be save|discard|arm-edit"})
+
+
 def handle_edit_feedback(payload, send):
     """POST /edit-feedback — feedback-prompt interactions (draft feedback loop P2).
 
@@ -3607,12 +3678,18 @@ def handle_edit_feedback(payload, send):
     from server import (
         EDIT_REASON_QUESTIONS,
         build_edit_question_query,
+        build_rule_draft_query,
         edit_corr_get,
         edit_corr_set_detail,
         edit_corr_set_reason,
+        edit_corr_stamp_rule,
+        edit_pattern_check,
         run_hermes,
+        save_behavior_rule,
         _redis,
+        _tg_post,
     )
+    import random
     action = (payload.get("action") or "").strip().lower()
     if action == "tag":
         corr_id = payload.get("correction_id")
@@ -3643,6 +3720,44 @@ def handle_edit_feedback(payload, send):
                         "EX", "180"])
             except Exception:
                 pass
+        # Pattern detection (P3): >=3 edits with this reason_tag + context ->
+        # Hermes drafts a rule and we post a confirm card. Never auto-applied.
+        try:
+            pairs, ctx = edit_pattern_check(corr_id, tag)
+            if pairs:
+                rule_text = ""
+                rc, out, _, _ = run_hermes(build_rule_draft_query(tag, ctx, pairs),
+                                           timeout=40, priority="background")
+                cand = [l.strip() for l in (out or "").splitlines() if l.strip()]
+                if rc == 0 and cand:
+                    rule_text = cand[-1].strip().strip('"').strip()[:300]
+                if rule_text:
+                    sug = "".join(random.choice("0123456789abcdef")
+                                  for _ in range(10))
+                    suggestion = {
+                        "rule_text": rule_text, "scope": "GLOBAL_RULE",
+                        "scope_value": None,
+                        "reasoning": (f"auto-drafted from {len(pairs)} '{tag}' "
+                                      "edits" + (f" ({ctx})" if ctx else "")),
+                        "reason_tag": tag, "context_label": ctx}
+                    _redis(["SET", "rulesuggest:" + sug, json.dumps(suggestion),
+                            "EX", "86400"])
+                    kb = {"inline_keyboard": [[
+                        {"text": "✅ Save", "callback_data": "editrule:" + sug + ":save"},
+                        {"text": "✏️ Edit", "callback_data": "editrule:" + sug + ":edit"},
+                        {"text": "❌ Discard", "callback_data": "editrule:" + sug + ":discard"}]]}
+                    card = ("🧠 Pattern detected — " + str(len(pairs))
+                            + " edits flagged '" + tag + "'"
+                            + (" in " + ctx if ctx else "")
+                            + ".\n\nSuggested rule:\n" + rule_text
+                            + "\n\nSave as an active behavior rule?")
+                    _tg_post("sendMessage", {
+                        "chat_id": int(chat_id) if chat_id.isdigit() else 5532831477,
+                        "text": card, "reply_markup": kb})
+                    log(f"edit-feedback PATTERN tag={tag!r} ctx={ctx!r} "
+                        f"n={len(pairs)} suggest={sug}")
+        except Exception as e:
+            log("edit-feedback pattern err:", repr(e))
         log(f"edit-feedback TAG id={corr_id} tag={tag!r}")
         send(200, {"ok": True, "skip": False, "question": question})
         return
@@ -3651,6 +3766,33 @@ def handle_edit_feedback(payload, send):
         text = (payload.get("text") or "").strip()
         if not chat_id or not text:
             send(200, {"ok": True, "captured": False})
+            return
+        # editrule edit-via-reply takes priority: operator tapped Edit on a rule
+        # confirm card, now typed their version → save it as the rule.
+        er, _ = _redis(["GET", "editrule:await:" + chat_id])
+        er = (er or "").strip()
+        if er:
+            cur, _ = _redis(["GET", "rulesuggest:" + er])
+            raw = (cur or "").strip()
+            saved = False
+            if raw:
+                try:
+                    s = json.loads(raw)
+                except Exception:
+                    s = None
+                if s:
+                    rid, _e = save_behavior_rule(
+                        text, s.get("scope", "GLOBAL_RULE"), s.get("scope_value"),
+                        "edit_learning", s.get("reasoning", ""),
+                        source="edit_learning")
+                    if rid:
+                        edit_corr_stamp_rule(rid, s.get("reason_tag", ""),
+                                             s.get("context_label", ""))
+                        saved = True
+                    _redis(["DEL", "rulesuggest:" + er])
+            _redis(["DEL", "editrule:await:" + chat_id])
+            log(f"edit-rule EDIT-SAVE chat={chat_id} saved={saved}")
+            send(200, {"ok": True, "captured": True, "type": "rule"})
             return
         cur, _ = _redis(["GET", "editfb:await:" + chat_id])
         corr_id = (cur or "").strip()

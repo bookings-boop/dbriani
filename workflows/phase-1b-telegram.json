@@ -388,7 +388,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration \u2014 staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force' || action === 'editfb');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration \u2014 staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nconst action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force' || action === 'editfb' || action === 'editrule');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "id": "7b5e0250-f1ad-4894-8894-83f883c7292a",
       "name": "Parse Callback",
@@ -839,6 +839,30 @@
               },
               "renameOutput": true,
               "outputKey": "editfb"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "editrule-rule",
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "editrule",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "editrule"
             }
           ]
         },
@@ -6537,6 +6561,74 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "edit-rule-action",
+      "name": "Edit Rule Action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2850,
+        1900
+      ],
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/edit-rule",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"action\": {{ JSON.stringify(((($('Route Update Type').item.json.callback_query.data) || '').split(':')[2]) || '') }}, \"suggest_id\": {{ JSON.stringify(((($('Route Update Type').item.json.callback_query.data) || '').split(':')[1]) || '') }}, \"chat_id\": {{ JSON.stringify(String(($('Parse Callback').item.json.chat_id) || 5532831477)) }} }",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "id": "update-rule-card",
+      "name": "Update Rule Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3050,
+        1900
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"chat_id\": {{ $('Parse Callback').item.json.chat_id }}, \"message_id\": {{ $('Parse Callback').item.json.message_id }}, \"text\": {{ JSON.stringify($json.card_text || \"done\") }} }",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -6826,6 +6918,13 @@
         [
           {
             "node": "Edit Feedback Tag",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Rule Action",
             "type": "main",
             "index": 0
           }
@@ -8594,6 +8693,17 @@
         [
           {
             "node": "Post Guided Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Rule Action": {
+      "main": [
+        [
+          {
+            "node": "Update Rule Card",
             "type": "main",
             "index": 0
           }

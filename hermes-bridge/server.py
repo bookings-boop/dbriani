@@ -88,6 +88,7 @@ from routes import (  # noqa: F401
     handle_draft_freshness,
     handle_edit_capture,
     handle_edit_feedback,
+    handle_edit_rule,
     handle_feedback,
     handle_followup_action,
     handle_hourly_sweep,
@@ -1031,7 +1032,8 @@ def fetch_behavior_rules(customer_id):
         return []
 
 
-def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
+def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning,
+                       source=None):
     """INSERT a behavior_rule. Active flag depends on origin:
       - created_via='edit_feedback'  → active=TRUE (operator's draft
         edit is their primary feedback mechanism; they expect the
@@ -1052,12 +1054,15 @@ def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning):
     doesn't unbounded-grow the rule set.
 
     Returns (rule_id, None) or (None, error)."""
-    auto_active = (created_via == "edit_feedback")
+    # edit_learning rules are confirmed by the operator on the [Save] card,
+    # so they activate immediately (same rationale as edit_feedback).
+    auto_active = created_via in ("edit_feedback", "edit_learning")
     sql = (
         "INSERT INTO behavior_rules "
-        "(rule_text, scope, scope_value, created_via, reasoning, active) VALUES ("
+        "(rule_text, scope, scope_value, created_via, reasoning, source, active) "
+        "VALUES ("
         + ", ".join([_lit(rule_text), _lit(scope), _lit(scope_value),
-                     _lit(created_via), _lit(reasoning)])
+                     _lit(created_via), _lit(reasoning), _lit(source)])
         + (", true" if auto_active else ", false")
         + ") RETURNING id"
     )
@@ -1122,6 +1127,72 @@ def edit_corr_get(corr_id):
         return json.loads(raw.splitlines()[0]), None
     except Exception as e:
         return None, repr(e)
+
+
+def edit_corr_stamp_rule(rule_id, reason_tag, context_label):
+    """Mark all untagged corrections that match this reason_tag + context as
+    having generated rule_id. Returns (ok, err)."""
+    try:
+        rid = int(rule_id)
+    except (TypeError, ValueError):
+        return False, "bad rule_id"
+    _, err = _psql(
+        "UPDATE edit_corrections SET rule_generated_from=" + str(rid)
+        + " WHERE rule_generated_from IS NULL AND reason_tag=" + _lit(reason_tag)
+        + " AND COALESCE(context_label,'')=" + _lit(context_label or ""))
+    return (err is None), err
+
+
+def edit_pattern_check(corr_id, reason_tag):
+    """After a correction is tagged, see whether >=3 untagged-into-rule
+    corrections now share its reason_tag + context_label. Returns
+    (pairs|None, context_label). 'skip' never forms a pattern."""
+    if not reason_tag or reason_tag == "skip":
+        return None, ""
+    try:
+        cid = int(corr_id)
+    except (TypeError, ValueError):
+        return None, ""
+    out, err = _psql("SELECT COALESCE(context_label,'') FROM edit_corrections "
+                     f"WHERE id = {cid}")
+    if err:
+        return None, ""
+    lines = (out or "").strip().splitlines()
+    ctx = lines[0] if lines else ""
+    out, err = _psql(
+        "SELECT COALESCE(json_agg(json_build_object("
+        "'original', original_text, 'sent', sent_text)), '[]') "
+        "FROM edit_corrections WHERE rule_generated_from IS NULL AND reason_tag="
+        + _lit(reason_tag) + " AND COALESCE(context_label,'')=" + _lit(ctx))
+    if err:
+        return None, ctx
+    raw = (out or "").strip().splitlines()
+    raw = raw[0] if raw else "[]"
+    try:
+        pairs = json.loads(raw)
+    except Exception:
+        pairs = []
+    if not isinstance(pairs, list) or len(pairs) < 3:
+        return None, ctx
+    return pairs, ctx
+
+
+def build_rule_draft_query(reason_tag, context_label, pairs):
+    """Hermes prompt: draft ONE behavior rule from repeated edit pairs."""
+    blocks = []
+    for i, p in enumerate(pairs[:8], 1):
+        blocks.append(f"{i}. AI wrote: {(p.get('original') or '')[:300]}\n"
+                      f"   Operator sent: {(p.get('sent') or '')[:300]}")
+    return (
+        "You are improving the Dubriani Yachts WhatsApp draft assistant. The "
+        f"operator has repeatedly edited drafts for the same reason "
+        f"({reason_tag}" + (f"; context: {context_label}" if context_label else "")
+        + "). Original AI drafts vs what they actually sent:\n\n"
+        + "\n\n".join(blocks)
+        + "\n\nWrite ONE concise behavior rule (plain imperative, max 25 words) "
+        "that would make future drafts match the operator's edits. Output ONLY "
+        "the rule text — no preamble, no quotes, no numbering."
+    )
 
 
 def edit_corr_insert(customer_id, original_text, sent_text, label, yacht,
@@ -2737,7 +2808,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
                              "/send-file", "/list-files",
-                             "/edit-capture", "/edit-feedback",
+                             "/edit-capture", "/edit-feedback", "/edit-rule",
                              "/nomod-webhook"):
             self._send(404, {"error": "not found"})
             return
@@ -2779,6 +2850,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_edit_capture(payload, self._send)
         elif self.path == "/edit-feedback":
             handle_edit_feedback(payload, self._send)
+        elif self.path == "/edit-rule":
+            handle_edit_rule(payload, self._send)
         elif self.path == "/learn":
             handle_learn(payload, self._send)
         elif self.path == "/rules":
