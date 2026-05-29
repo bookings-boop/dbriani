@@ -1416,6 +1416,19 @@ def handle_review(payload, send):
             elif lab in totals:
                 totals[lab] += 1
         rendered = render_review(scored, totals, mode=mode)
+        # Phase 4: monthly edit-learning digest — prepend to the report header
+        # on the 1st of the month (the cron's monthly summary) or on demand
+        # (payload.digest=true, used for testing).
+        try:
+            import datetime as _dt
+            if _dt.datetime.utcnow().day == 1 or payload.get("digest"):
+                from server import edit_learning_digest
+                _dg = edit_learning_digest(30)
+                if _dg:
+                    rendered["header_text"] = _dg + "\n\n" + rendered.get("header_text", "")
+                    rendered["telegram_text"] = _dg + "\n\n" + rendered.get("telegram_text", "")
+        except Exception as _e:
+            log("review digest err:", repr(_e))
         # Mark seen so the damping picks them up on the next /review.
         mark_review_seen(rendered.get("mark_seen_ids") or [])
         send(200, {

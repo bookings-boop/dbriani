@@ -1129,6 +1129,51 @@ def edit_corr_get(corr_id):
         return None, repr(e)
 
 
+def edit_learning_digest(days=30):
+    """Monthly edit-learning summary for the Pipeline Review (P4): most-corrected
+    patterns, rules generated, and consolidation suggestions over `days`.
+    Returns a text block, or '' when there's nothing to report."""
+    since = f"now() - interval '{int(days)} days'"
+
+    def _rows(sql):
+        out, err = _psql(sql)
+        if err:
+            return []
+        return [ln for ln in (out or "").strip().splitlines() if ln.strip()]
+
+    pat = _rows(
+        "SELECT reason_tag, COALESCE(NULLIF(context_label,''),'(any)'), count(*) "
+        "FROM edit_corrections WHERE reason_tag IS NOT NULL "
+        "AND created_at >= " + since
+        + " GROUP BY reason_tag, context_label ORDER BY count(*) DESC LIMIT 8")
+    nrules = (_rows("SELECT count(*) FROM behavior_rules WHERE "
+                    "source='edit_learning' AND created_at >= " + since) or ["0"])[0]
+    cons = _rows(
+        "SELECT reason_tag, COALESCE(NULLIF(context_label,''),'(any)'), count(*) "
+        "FROM edit_corrections WHERE reason_tag IS NOT NULL "
+        "AND rule_generated_from IS NULL AND created_at >= " + since
+        + " GROUP BY reason_tag, context_label HAVING count(*) >= 3 "
+        "ORDER BY count(*) DESC LIMIT 5")
+    if not pat and nrules.strip() in ("", "0"):
+        return ""
+
+    def _fmt(ln, suffix=""):
+        p = ln.split("|")
+        if len(p) < 3:
+            return None
+        return f"  • {p[0]} ({p[1]}): {p[2]}{suffix}"
+
+    blocks = [f"📚 EDIT-LEARNING — last {int(days)} days"]
+    pat_lines = [x for x in (_fmt(l) for l in pat) if x]
+    if pat_lines:
+        blocks.append("Most-corrected patterns:\n" + "\n".join(pat_lines))
+    blocks.append("Rules generated: " + nrules.strip())
+    cons_lines = [x for x in (_fmt(l, " — no rule yet") for l in cons) if x]
+    if cons_lines:
+        blocks.append("Suggested consolidations:\n" + "\n".join(cons_lines))
+    return "\n\n".join(blocks)
+
+
 def edit_corr_stamp_rule(rule_id, reason_tag, context_label):
     """Mark all untagged corrections that match this reason_tag + context as
     having generated rule_id. Returns (ok, err)."""
