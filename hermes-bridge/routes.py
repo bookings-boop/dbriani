@@ -1613,6 +1613,14 @@ def handle_info(payload, send):
                 break
         if importance_score or importance_reasoning or suggested_action:
             lines.append("")
+            # Honest verdict surfacing (safe-render 2026-05-30): a score of
+            # 0 means the analyzer judged the lead not worth pursuing
+            # (verdict 'close' — lost / spam / not converting). Flag it even
+            # when the sticky label still reads HOT, so /review states the
+            # facts instead of a misleading status.
+            if importance_score == 0:
+                lines.append("   ⚠️ *Analyzer verdict: likely LOST / not "
+                             "converting* — label may be stale; see reasoning.")
             lines.append(f"   🧠 *Hermes lead-analysis*"
                          f" (score {importance_score}/100)"
                          + (f" _as of {importance_at}_" if importance_at
@@ -1621,6 +1629,13 @@ def handle_info(payload, send):
                 lines.append(f"      _Reasoning:_ {importance_reasoning}")
             if suggested_action:
                 lines.append(f"      _Suggested:_ {suggested_action}")
+        else:
+            # #7 safe-render: unscored lead — say so rather than showing a
+            # blank HOT card (e.g. EnjoyBoat spam). Operator can use the
+            # buttons to assess or close.
+            lines.append("")
+            lines.append("   ⚠️ _Not yet analyzed by Hermes — verdict "
+                         "pending. Use the buttons to assess or close._")
 
         # ━━━ Recent paylinks (autonomous_sends, last 14d)
         out, _err = _psql(
