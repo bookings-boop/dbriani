@@ -2556,6 +2556,79 @@ def handle_draft_followup(payload, send):
                          "draft_text": "", "label": "WARM",
                          "notes_for_zayn": "", "customer_name": ""})
 
+def handle_reconcile_identities(payload, send):
+    """POST /reconcile-identities — merge @lid/@c.us duplicate customer
+    rows using WAHA's authoritative @lid->phone resolution. Deterministic
+    + reversible (sets merged_into; richer-history row stays canonical).
+    Futureproofs the identity-duality fix so new splits self-heal.
+    Body: {cap?: int}. Returns {ok, checked, merged, pairs}."""
+    import json as _json
+    import urllib.request as _u
+    from waha import WAHA_BASE, WAHA_API_KEY
+    cap = int(payload.get("cap") or 60)
+    out, err = _psql(
+        "SELECT customer_id || '|' || COALESCE(message_count,0) "
+        "FROM customer_facts WHERE customer_id LIKE '%@lid' "
+        f"AND merged_into IS NULL ORDER BY updated_at DESC LIMIT {cap}")
+    if err:
+        send(200, {"ok": False, "error": str(err)})
+        return
+    checked = merged = 0
+    pairs = []
+    for ln in (out or "").strip().splitlines():
+        parts = ln.split("|")
+        if len(parts) < 2:
+            continue
+        lid = parts[0].strip()
+        if not lid:
+            continue
+        try:
+            lmc = int(parts[1].strip())
+        except ValueError:
+            lmc = 0
+        checked += 1
+        # WAHA is the source of truth for @lid -> phone (@c.us).
+        try:
+            req = _u.Request(
+                WAHA_BASE + "/api/contacts?session=default&contactId=" + lid,
+                headers={"X-Api-Key": WAHA_API_KEY})
+            with _u.urlopen(req, timeout=8) as r:
+                cus = (_json.loads(r.read().decode()).get("id") or "").strip()
+        except Exception as e:
+            log(f"reconcile WAHA err lid={lid}: {e!r}")
+            continue
+        if not cus.endswith("@c.us") or cus == lid:
+            continue
+        crow, _e = _psql(
+            "SELECT COALESCE(message_count,0) FROM customer_facts "
+            f"WHERE customer_id = {_lit(cus)} AND merged_into IS NULL")
+        cline = (crow or "").strip()
+        if not cline:
+            continue
+        try:
+            cmc = int(cline.splitlines()[0])
+        except (ValueError, IndexError):
+            cmc = 0
+        # Canonical = the richer-history row (more messages).
+        canon, dup = (lid, cus) if lmc >= cmc else (cus, lid)
+        _psql(
+            f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
+            f"updated_at = now() WHERE customer_id = {_lit(dup)} "
+            "AND merged_into IS NULL")
+        _psql(
+            "INSERT INTO customer_label_history (customer_id, from_label, "
+            "to_label, signal, evidence, message_count, created_at, "
+            f"created_by) SELECT {_lit(dup)}, label, label, "
+            f"'auto:identity_merge', {_lit('WAHA-resolved dup -> ' + canon)}, "
+            f"COALESCE(message_count,0), now(), 'system' FROM customer_facts "
+            f"WHERE customer_id = {_lit(dup)}")
+        merged += 1
+        pairs.append(dup + " -> " + canon)
+    log(f"reconcile-identities: checked={checked} merged={merged}")
+    send(200, {"ok": True, "checked": checked, "merged": merged,
+                     "pairs": pairs[:25]})
+
+
 def handle_pipeline_analyze(payload, send):
     """POST /pipeline-analyze — hourly cron entry point. Walks active
     leads (NEW/WARM/HOT/WAITING_FOR_PAYMENT/NEEDS_ATTENTION/COLD), runs
@@ -2570,6 +2643,7 @@ def handle_pipeline_analyze(payload, send):
         _has_recent_payment_link_sent,
         _is_uae_working_hours,
         _name_fallback,
+        apply_label_transition,
         get_current_label_row,
         get_customer_facts,
         hermes_analyze_lead,
@@ -2674,6 +2748,29 @@ def handle_pipeline_analyze(payload, send):
                     f"suggested_action = {_lit(suggested_)}, "
                     "importance_analyzed_at = now() "
                     f"WHERE customer_id = {_lit(cid)}")
+                # #3 reconcile (2026-05-30): a 'close' verdict means the
+                # analyzer judged the lead not convertible (lost / booked
+                # elsewhere / spam / vendor). Demote the sticky label to
+                # COLD so /review stops showing it as HOT/"push to book"
+                # (operator can still 🛑 Disregard or /label it back).
+                # Guard: only active RETAIL labels, never paid stages
+                # (WAITING_FOR_PAYMENT/CONFIRMED), and respect snooze/locks.
+                if verdict_ == "close":
+                    prev_lbl_ = (row_.get("label") or "").strip()
+                    if prev_lbl_ in ("NEW", "WARM", "HOT", "NEEDS_ATTENTION"):
+                        lk_, _lke = _psql(
+                            "SELECT label_locked_until > now() FROM "
+                            f"customer_facts WHERE customer_id = {_lit(cid)}")
+                        if not (lk_ or "").strip().startswith("t"):
+                            try:
+                                apply_label_transition(
+                                    cid, prev_lbl_, "COLD",
+                                    "auto:analyzer_close",
+                                    reasoning_ or "analyzer: not convertible",
+                                    mc_, created_by="system")
+                            except Exception as _le:
+                                log("pipeline-analyze demote err "
+                                    f"cid={cid}: {_le!r}")
                 return ("analyzed", score_, cid,
                         facts_.get("name") or _name_fallback(cid),
                         reasoning_, verdict_)

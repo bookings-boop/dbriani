@@ -105,6 +105,7 @@ from routes import (  # noqa: F401
     handle_pipeline_analyze,
     handle_poll_payments,
     handle_queue,
+    handle_reconcile_identities,
     handle_refresh_facts,
     handle_review,
     handle_rules,
@@ -1758,11 +1759,16 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         "out of this band. Suggested action: 'B2B inquiry — surface "
         "to Zayn for management when convenient, not a sales "
         "priority.'\n\n"
-        "  RULE 4 — EXPLICIT REJECTION → verdict=close, score=0.\n"
+        "  RULE 4 — EXPLICIT REJECTION / BOOKED ELSEWHERE → "
+        "verdict=close, score=0.\n"
         "    Customer explicitly said 'not interested', 'found another "
-        "operator', 'cancelled trip', 'no longer needed', OR repeated "
-        "price rejection 3+ times with no flexibility, OR ghosted "
-        "14+ days after a clear rejection signal.\n\n"
+        "operator', 'cancelled trip', 'no longer needed', OR signalled "
+        "they already booked / are going with someone else ('already "
+        "booked', 'booked elsewhere', 'went with another (company/"
+        "operator)', 'we found a boat', 'sorted (it) already', 'no "
+        "longer looking', 'changed plans', 'too late we booked'), OR "
+        "repeated price rejection 3+ times with no flexibility, OR "
+        "ghosted 14+ days after a clear rejection signal.\n\n"
         "  RULE 5 — TIRE-KICKER / MULTI-VENDOR BLAST → "
         "verdict=keep_open, score=30-45 (hard cap).\n"
         "    Copy-paste shopping template, asks for 5+ yachts at "
@@ -2880,7 +2886,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/hourly-sweep",
                              "/review", "/draft-followup",
                              "/info", "/assist", "/label", "/snooze",
-                             "/queue",
+                             "/queue", "/reconcile-identities",
                              "/followup-action",
                              "/refresh-facts",
                              "/draft-freshness",
@@ -2991,6 +2997,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_lead_analyze_disregard(payload, self._send)
         elif self.path == "/pipeline-analyze":
             handle_pipeline_analyze(payload, self._send)
+        elif self.path == "/reconcile-identities":
+            handle_reconcile_identities(payload, self._send)
         else:
             handle_draft(payload, self._send)
 
