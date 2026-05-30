@@ -13,11 +13,27 @@
 # via n8n's /healthz and, on SUSTAINED failure (3 misses ~8s apart, to ignore
 # transient blips), runs `docker compose up -d` — the documented recovery that
 # re-attaches networks and starts anything down (a no-op for a healthy stack).
-# Logs to edge-watchdog.log.
+# Logs to edge-watchdog.log and pings the operator on Telegram (1h cooldown).
 URL="https://n8n.13-63-82-112.sslip.io/healthz"
 COMPOSE_DIR=/home/ubuntu/n8n
+ENVF=/home/ubuntu/hermes-bridge/.env
 LOG=/home/ubuntu/hermes-bridge/edge-watchdog.log
+COOLDOWN=/home/ubuntu/hermes-bridge/.edge-alert-cooldown
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Telegram alert with a 1h cooldown so a flapping edge can't spam the operator.
+alert() {
+  local now last tok chat
+  now=$(date +%s)
+  last=$(stat -c %Y "$COOLDOWN" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt 3600 ] && return 0
+  tok=$(grep '^ADMIN_TG_TOKEN' "$ENVF" 2>/dev/null | cut -d= -f2-)
+  chat=$(grep '^ADMIN_CHAT_ID' "$ENVF" 2>/dev/null | cut -d= -f2-)
+  [ -z "$tok" ] && return 0
+  curl -s --max-time 10 "https://api.telegram.org/bot${tok}/sendMessage" \
+    --data-urlencode "chat_id=${chat}" --data-urlencode "text=$1" >/dev/null 2>&1
+  touch "$COOLDOWN"
+}
 
 check() { curl -sS -o /dev/null -w "%{http_code}" --max-time 12 "$URL" 2>/dev/null; }
 
@@ -33,4 +49,6 @@ done
 
 echo "$TS edge DOWN (last http=$CODE) -> docker compose up -d" >> "$LOG"
 cd "$COMPOSE_DIR" && docker compose up -d >> "$LOG" 2>&1
-echo "$TS recovery attempted (exit $?)" >> "$LOG"
+RC=$?
+echo "$TS recovery attempted (exit $RC)" >> "$LOG"
+alert "⚠️ Hermes edge watchdog: the public edge was DOWN (http=${CODE}). Ran 'docker compose up -d' to recover (exit ${RC}). Inbound WhatsApp may have briefly dropped — please check the server."
