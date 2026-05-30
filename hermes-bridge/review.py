@@ -432,7 +432,9 @@ def render_review(scored, totals, mode="ondemand"):
                     (f"{totals.get('total', 0)} active · "
                      f"{totals.get('HOT', 0)} hot · "
                      f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
-                     f"{totals.get('COLD', 0)} cold")]
+                     f"{totals.get('COLD', 0)} cold"),
+                    "_Prioritised view — top leads per tier shown; "
+                    "`/review <tier>` (e.g. `/review hot`) for the full list._"]
     lines = list(header_lines) + [""]
     keyboards = []
     per_lead_messages = []
@@ -446,7 +448,11 @@ def render_review(scored, totals, mode="ondemand"):
         cap = sect["cap"]
         shown = items[:cap]
         overflow = len(items) - len(shown)
-        lines.append(f"*{sect['header']}* ({len(items)})")
+        if overflow > 0:
+            lines.append(
+                f"*{sect['header']}* — showing top {len(shown)} of {len(items)}")
+        else:
+            lines.append(f"*{sect['header']}* ({len(items)})")
         for i, (score, row) in enumerate(shown, 1):
             why = _why_line(row, label_key)
             # Hermes importance — append score + suggestion when present.

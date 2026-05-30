@@ -71,7 +71,7 @@ def main():
                  "WHERE created_at > now() - interval '24 hours' "
                  "ORDER BY created_at")
     L.append(f"\U0001f9e0 Behavior rules captured (24h): {len(rules)}")
-    for rt, sc, act in (r + ["", "", ""] for r in (x[:3] for x in rules[:10])):
+    for rt, sc, act in ((x + ["", "", ""])[:3] for x in rules[:10]):
         flag = "active" if act == "t" else "INACTIVE — needs your approval"
         L.append(f"  • [{sc}] {rt}  ({flag})")
     L.append("")
@@ -80,20 +80,43 @@ def main():
                 "trigger_type, COALESCE(trigger_context,'') FROM customer_triggers "
                 "WHERE status='pending' ORDER BY reminder_date LIMIT 12")
     L.append(f"⏰ Pending follow-ups: {len(trig)}")
-    for who, tt, ctx in (t + ["", "", ""] for t in (x[:3] for x in trig)):
+    for who, tt, ctx in ((x + ["", "", ""])[:3] for x in trig):
         L.append(f"  • {who} — {tt}: {ctx}")
     L.append("")
 
-    risk = psql("SELECT COALESCE(NULLIF(customer_name,''),customer_id), score, "
-                "COALESCE(reason,'') FROM conversation_health "
-                "WHERE score IN ('at_risk','cold') ORDER BY updated_at DESC LIMIT 12")
-    L.append(f"⚕️ At-risk conversations: {len(risk)}")
-    for who, sc, rs in (h + ["", "", ""] for h in (x[:3] for x in risk)):
-        L.append(f"  • {who} [{sc}] — {rs}")
+    # Live "needs attention" list from customer_facts (the authoritative
+    # pipeline table) — NOT the legacy conversation_health table, which had
+    # gone stale + test-seeded (fake Rajesh/James fixtures were showing in
+    # the digest, 2026-05-30). Resolve a human label: real name → formatted
+    # phone for @c.us → short WhatsApp-lead handle for @lid; never a raw id.
+    risk = psql(
+        "SELECT COALESCE(NULLIF(name,''), "
+        "CASE WHEN customer_id LIKE '%@c.us' "
+        "THEN '+'||split_part(customer_id,'@',1) "
+        "ELSE 'WhatsApp lead ••'||right(split_part(customer_id,'@',1),4) END), "
+        "label, "
+        "COALESCE(NULLIF(suggested_action,''),"
+        "LEFT(COALESCE(importance_reasoning,''),110)) "
+        "FROM customer_facts "
+        "WHERE label IN ('HOT','NEEDS_ATTENTION','WARM') "
+        "AND merged_into IS NULL "
+        "ORDER BY importance_score DESC NULLS LAST, label LIMIT 10")
+    L.append(f"⚠️ Active leads needing attention: {len(risk)}")
+    for who, lab, note in ((x + ["", "", ""])[:3] for x in risk):
+        L.append(f"  • {who} [{lab}] — {note}")
     L.append("")
 
-    modes = psql("SELECT DISTINCT ON (customer_id) customer_id, mode "
-                 "FROM conversation_modes ORDER BY customer_id, id DESC")
+    # Resolve a human name (never a raw @lid) for the approval-mode alert.
+    modes = psql(
+        "SELECT DISTINCT ON (cm.customer_id) "
+        "COALESCE(NULLIF(cf.name,''), "
+        "CASE WHEN cm.customer_id LIKE '%@c.us' "
+        "THEN '+'||split_part(cm.customer_id,'@',1) "
+        "ELSE 'WhatsApp lead ••'||right(split_part(cm.customer_id,'@',1),4) END), "
+        "cm.mode "
+        "FROM conversation_modes cm "
+        "LEFT JOIN customer_facts cf ON cf.customer_id = cm.customer_id "
+        "ORDER BY cm.customer_id, cm.id DESC")
     non_appr = [m for m in modes if (m[1] if len(m) > 1 else "") != "approval"]
     if non_appr:
         L.append(f"\U0001f501 Conversations NOT in approval mode: {len(non_appr)}")

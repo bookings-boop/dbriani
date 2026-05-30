@@ -2170,12 +2170,18 @@ HOURLY_SWEEP_BATCH_LIMIT = int(os.environ.get("HOURLY_SWEEP_BATCH_LIMIT", "200")
 HOURLY_SWEEP_HERMES_CAP = int(os.environ.get("HOURLY_SWEEP_HERMES_CAP", "30"))
 
 # Hourly pipeline analyzer — Hermes-driven importance ranking over active
-# leads. Cap=100 covers a healthy pipeline in one run; with parallel=5
-# workers and ~6s per customer, that's ~120s wall-clock worst-case, well
-# inside the 600s cron timeout. Rotation (oldest-analyzed-first) still
-# applies — if total pipeline ever exceeds the cap, the cap-spillover
-# gets picked up next hour.
-PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "100"))
+# leads, stalest-first (ORDER BY importance_analyzed_at ASC NULLS FIRST),
+# so the cap just bounds how many leads each run refreshes; the rest roll
+# over to the next hour.
+#
+# Cap lowered 100->24 (2026-05-30). The old cap assumed ~6s/customer at
+# parallel=5, but _HERMES_BG=1 SERIALIZES background analysis (one Hermes
+# subprocess at a time, ~40s each), so a 100-lead sweep actually grinds
+# ~50min — flooding the journal with WAITED waits and risking
+# sweep-over-sweep pileup (the load-36 incident). 24 drains in ~15min and
+# still rotates all ~75 active leads every few hours. A re-entrancy lock
+# in handle_pipeline_analyze prevents overlap regardless.
+PIPELINE_ANALYZE_CAP = int(os.environ.get("PIPELINE_ANALYZE_CAP", "24"))
 PIPELINE_ANALYZE_WORKERS = int(os.environ.get("PIPELINE_ANALYZE_WORKERS", "5"))
 
 # /review inline auto-heal — for customers with missing critical facts

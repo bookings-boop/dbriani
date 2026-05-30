@@ -13,6 +13,8 @@ upstream and calls into waha_fetch_history() etc.
 """
 import json
 import os
+import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -20,7 +22,76 @@ import urllib.request
 
 # --- credentials + base URL ----------------------------------------
 WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
-WAHA_BASE = os.environ.get("WAHA_BASE", "").rstrip("/")
+
+# WAHA_BASE precedence + SELF-HEALING container IP.
+#
+# WAHA's :3000 is NOT published to the host, so the bridge reaches WAHA by
+# its docker-bridge container IP — which docker REASSIGNS whenever the
+# container is recreated. Production incident 2026-05-30: a stack restart
+# moved WAHA 172.18.0.4 -> .5 and caddy took over .4; the pinned
+# WAHA_BASE then pointed at caddy -> ConnectionRefused on EVERY bridge
+# WAHA call (history/pushname/phone/flags/reconcile silently degraded for
+# hours — Hermes was drafting with no chat history). To make this class
+# of failure self-correct, we resolve the live container IP via
+# `docker inspect` (the same docker CLI db.py already shells into for
+# psql/redis — no new dependency), cache it, and re-resolve on any
+# connection-level failure.
+#
+# An explicit WAHA_BASE that is NOT a raw container IP (e.g. a hostname
+# like https://waha.<domain> or a published 127.0.0.1:<port>) is honoured
+# verbatim — it's already stable, so we don't second-guess the operator.
+WAHA_BASE_ENV = os.environ.get("WAHA_BASE", "").rstrip("/")
+WAHA_CONTAINER = os.environ.get("WAHA_CONTAINER", "n8n-waha-1")
+WAHA_PORT = os.environ.get("WAHA_PORT", "3000")
+
+_CONTAINER_IP_URL_RE = re.compile(r"^https?://(?:\d{1,3}\.){3}\d{1,3}:\d+$")
+_WAHA_BASE_CACHE = {"base": "", "exp": 0.0}
+_WAHA_BASE_TTL = 60.0  # seconds
+
+
+def _resolve_waha_container_ip():
+    """Return n8n-waha-1's current docker-bridge IPAddress, or '' on any
+    failure (docker missing, container down, timeout). Non-raising."""
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+             WAHA_CONTAINER],
+            capture_output=True, text=True, timeout=5)
+        ip = (r.stdout or "").strip()
+        return ip if (r.returncode == 0 and ip) else ""
+    except Exception:
+        return ""
+
+
+def waha_base(force_refresh=False):
+    """Resolve the WAHA base URL, auto-healing the container IP.
+
+    Precedence:
+      1. A STABLE explicit WAHA_BASE (hostname / published-port URL) wins.
+      2. Live container IP via docker inspect (cached _WAHA_BASE_TTL s).
+      3. WAHA_BASE_ENV (even a container IP) as a last-resort fallback
+         when docker inspect can't answer (e.g. docker not yet up on boot).
+    """
+    if WAHA_BASE_ENV and not _CONTAINER_IP_URL_RE.match(WAHA_BASE_ENV):
+        return WAHA_BASE_ENV
+    now = time.time()
+    if (not force_refresh and _WAHA_BASE_CACHE["base"]
+            and _WAHA_BASE_CACHE["exp"] > now):
+        return _WAHA_BASE_CACHE["base"]
+    ip = _resolve_waha_container_ip()
+    if ip:
+        base = "http://%s:%s" % (ip, WAHA_PORT)
+        _WAHA_BASE_CACHE["base"] = base
+        _WAHA_BASE_CACHE["exp"] = now + _WAHA_BASE_TTL
+        return base
+    return _WAHA_BASE_CACHE["base"] or WAHA_BASE_ENV
+
+
+# Back-compat constant for callers that import WAHA_BASE directly. Runtime
+# transport (_waha_get/_waha_post) calls waha_base() so it always uses the
+# live value; this snapshot is just a sane default resolved at import.
+WAHA_BASE = waha_base() or WAHA_BASE_ENV
 
 # In-process cache for WAHA pushName lookups — keyed by cid, value is
 # (push_name, expires_at_ts). 5-minute TTL is plenty; WAHA's chat list
@@ -37,26 +108,36 @@ _WAHA_SYSTEM_NAMES = ("WhatsApp Business", "Dubriani admin chat")
 def _waha_post(path, body, timeout=30):
     """POST against WAHA REST API. Returns
     (parsed_json_or_None, err_str_or_None). Always non-raising.
-    Used for sendText / sendImage / sendFile / etc."""
-    if not (WAHA_API_KEY and WAHA_BASE):
-        return None, "WAHA_API_KEY/WAHA_BASE not configured"
-    try:
-        req = urllib.request.Request(
-            WAHA_BASE + path,
-            data=json.dumps(body).encode("utf-8"),
-            method="POST",
-            headers={"X-Api-Key": WAHA_API_KEY,
-                     "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8")), None
-    except urllib.error.HTTPError as e:
+    Used for sendText / sendImage / sendFile / etc. On a connection-level
+    failure (the container IP may have drifted) we re-resolve the base
+    once via waha_base(force_refresh=True) and retry before giving up."""
+    if not WAHA_API_KEY:
+        return None, "WAHA_API_KEY not configured"
+    data = json.dumps(body).encode("utf-8")
+    for attempt in range(2):
+        base = waha_base(force_refresh=(attempt == 1))
+        if not base:
+            return None, "WAHA base URL unresolved"
         try:
-            detail = e.read().decode("utf-8")[:300]
-        except Exception:
-            detail = "?"
-        return None, f"WAHA HTTP {e.code}: {detail}"
-    except Exception as e:
-        return None, f"WAHA POST failed: {e!r}"
+            req = urllib.request.Request(
+                base + path, data=data, method="POST",
+                headers={"X-Api-Key": WAHA_API_KEY,
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8")), None
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode("utf-8")[:300]
+            except Exception:
+                detail = "?"
+            return None, f"WAHA HTTP {e.code}: {detail}"
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == 0:
+                continue  # re-resolve container IP and retry once
+            return None, f"WAHA POST failed: {e!r}"
+        except Exception as e:
+            return None, f"WAHA POST failed: {e!r}"
+    return None, "WAHA POST failed: exhausted retries"
 
 
 def waha_send_file(customer_id, file_url, caption="", filename=None):
@@ -120,20 +201,30 @@ def _waha_get(path, timeout=12):
     """GET against WAHA REST API. Returns
     (parsed_json_or_None, err_str_or_None). Always non-raising — the
     bridge degrades to cached state when WAHA is unreachable so we
-    never want this to bubble an exception up to the http server."""
-    if not (WAHA_API_KEY and WAHA_BASE):
-        return None, "WAHA_API_KEY/WAHA_BASE not configured"
-    try:
-        req = urllib.request.Request(
-            WAHA_BASE + path,
-            headers={"X-Api-Key": WAHA_API_KEY})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8")), None
-    except urllib.error.HTTPError as e:
-        return None, (f"WAHA {e.code}: "
-                      f"{(e.read() or b'').decode('utf-8', 'replace')[:160]}")
-    except Exception as e:
-        return None, f"WAHA req failed: {e!r}"
+    never want this to bubble an exception up to the http server. On a
+    connection-level failure (the container IP may have drifted) we
+    re-resolve the base once and retry before giving up."""
+    if not WAHA_API_KEY:
+        return None, "WAHA_API_KEY not configured"
+    for attempt in range(2):
+        base = waha_base(force_refresh=(attempt == 1))
+        if not base:
+            return None, "WAHA base URL unresolved"
+        try:
+            req = urllib.request.Request(
+                base + path, headers={"X-Api-Key": WAHA_API_KEY})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8")), None
+        except urllib.error.HTTPError as e:
+            return None, (f"WAHA {e.code}: "
+                          f"{(e.read() or b'').decode('utf-8', 'replace')[:160]}")
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == 0:
+                continue  # re-resolve container IP and retry once
+            return None, f"WAHA req failed: {e!r}"
+        except Exception as e:
+            return None, f"WAHA req failed: {e!r}"
+    return None, "WAHA req failed: exhausted retries"
 
 
 def waha_lookup_push_name(customer_id):
@@ -228,6 +319,26 @@ def phone_for_cid(customer_id):
     if phone:  # cache positive resolutions only
         _WAHA_PHONE_CACHE[cid] = (phone, now_ts + _WAHA_PHONE_TTL)
     return phone
+
+
+def lid_to_cus(lid_cid):
+    """Resolve a '<lid>@lid' customer_id to its authoritative
+    '<digits>@c.us' identity via WAHA's LID endpoint
+    (GET /api/default/lids/<lid>@lid -> {"pn": "<digits>@c.us"}).
+    Returns '' when unresolved.
+
+    Why not /api/contacts: that endpoint's `.id` is ABSENT for WhatsApp
+    *Business* contacts (it returns a businessProfile blob), so the
+    identity-reconcile silently skipped every business dup. The LID
+    endpoint returns `pn` for personal AND business contacts alike."""
+    lid = (lid_cid or "").strip()
+    if not lid.endswith("@lid"):
+        return ""
+    data, err = _waha_get("/api/default/lids/" + lid)
+    if err or not isinstance(data, dict):
+        return ""
+    pn = (data.get("pn") or "").strip()
+    return pn if pn.endswith("@c.us") else ""
 
 
 # ── Country flags for /review ──────────────────────────────────────

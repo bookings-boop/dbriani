@@ -2562,9 +2562,7 @@ def handle_reconcile_identities(payload, send):
     + reversible (sets merged_into; richer-history row stays canonical).
     Futureproofs the identity-duality fix so new splits self-heal.
     Body: {cap?: int}. Returns {ok, checked, merged, pairs}."""
-    import json as _json
-    import urllib.request as _u
-    from waha import WAHA_BASE, WAHA_API_KEY
+    from waha import lid_to_cus
     cap = int(payload.get("cap") or 60)
     out, err = _psql(
         "SELECT customer_id || '|' || COALESCE(message_count,0) "
@@ -2587,16 +2585,12 @@ def handle_reconcile_identities(payload, send):
         except ValueError:
             lmc = 0
         checked += 1
-        # WAHA is the source of truth for @lid -> phone (@c.us).
-        try:
-            req = _u.Request(
-                WAHA_BASE + "/api/contacts?session=default&contactId=" + lid,
-                headers={"X-Api-Key": WAHA_API_KEY})
-            with _u.urlopen(req, timeout=8) as r:
-                cus = (_json.loads(r.read().decode()).get("id") or "").strip()
-        except Exception as e:
-            log(f"reconcile WAHA err lid={lid}: {e!r}")
-            continue
+        # WAHA is the source of truth for @lid -> @c.us. Use the
+        # authoritative LID endpoint (resolves personal AND business
+        # contacts; self-heals the WAHA base IP) rather than
+        # /api/contacts.id, which is empty for WhatsApp Business profiles
+        # and so silently skipped every business dup (fixed 2026-05-30).
+        cus = lid_to_cus(lid)
         if not cus.endswith("@c.us") or cus == lid:
             continue
         crow, _e = _psql(
@@ -2656,6 +2650,19 @@ def handle_pipeline_analyze(payload, send):
         send(200, {
             "ok": True, "skipped": True,
             "skipped_reason": "outside_uae_working_hours",
+            "telegram_text": ""})
+        return
+    # Re-entrancy guard (2026-05-30). A sweep can run many minutes (each
+    # lead is a serialized background Hermes call); if the hourly cron
+    # fires while the previous run is still draining, sweeps stack and
+    # melt the box (load-36 incident). Take an NX lock that auto-expires
+    # (crash-safe) and release it in finally on normal completion.
+    _ANALYZE_LOCK = "lock:pipeline_analyze"
+    _lk, _ = _redis(["SET", _ANALYZE_LOCK, "1", "NX", "EX", "2400"])
+    if (_lk or "").strip() != "OK":
+        send(200, {
+            "ok": True, "skipped": True,
+            "skipped_reason": "previous_sweep_still_running",
             "telegram_text": ""})
         return
     try:
@@ -2755,7 +2762,14 @@ def handle_pipeline_analyze(payload, send):
                 # (operator can still 🛑 Disregard or /label it back).
                 # Guard: only active RETAIL labels, never paid stages
                 # (WAITING_FOR_PAYMENT/CONFIRMED), and respect snooze/locks.
-                if verdict_ == "close":
+                # Demote dead leads out of active labels. Fire on EITHER an
+                # explicit close verdict OR importance_score==0 — the model
+                # sometimes writes the correct "Rule 4: rejection" reasoning
+                # + score 0 but forgets verdict='close' (Madawi 2026-05-30 sat
+                # HOT despite "booked elsewhere"), and "booking date passed"
+                # scores 0 without a close verdict. Score 0 = analyzer judged
+                # it not worth pursuing, so it must not stay HOT/WARM/NEW.
+                if verdict_ == "close" or score_ == 0:
                     prev_lbl_ = (row_.get("label") or "").strip()
                     if prev_lbl_ in ("NEW", "WARM", "HOT", "NEEDS_ATTENTION"):
                         lk_, _lke = _psql(
@@ -2763,9 +2777,11 @@ def handle_pipeline_analyze(payload, send):
                             f"customer_facts WHERE customer_id = {_lit(cid)}")
                         if not (lk_ or "").strip().startswith("t"):
                             try:
+                                _sig = ("auto:analyzer_close"
+                                        if verdict_ == "close"
+                                        else "auto:analyzer_score0")
                                 apply_label_transition(
-                                    cid, prev_lbl_, "COLD",
-                                    "auto:analyzer_close",
+                                    cid, prev_lbl_, "COLD", _sig,
                                     reasoning_ or "analyzer: not convertible",
                                     mc_, created_by="system")
                             except Exception as _le:
@@ -2832,6 +2848,8 @@ def handle_pipeline_analyze(payload, send):
         send(200, {"ok": False, "degraded": True,
                          "telegram_text":
                          f"⚠️ Pipeline analyze error: {e}"})
+    finally:
+        _redis(["DEL", _ANALYZE_LOCK])
 
 # (moved to routes.py — module-level resolve_target / update_last_analysis)
 
