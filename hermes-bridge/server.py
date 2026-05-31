@@ -2109,6 +2109,29 @@ def build_quality_query(p):
             "\n--- ACTIVE BEHAVIOR RULES (learned corrections — must follow) ---\n"
             + "\n".join("- " + r for r in rules)
         )
+    # Lead analysis so the score reflects whether the draft FITS the customer's
+    # actual state — a polished sales push to a lead the analyzer judged lost is
+    # a rule_violation, not an 8/10 (operator 2026-05-31: "scorecard not aligning
+    # with the hermes analysis").
+    cid_q = (p.get("customer_id") or "").strip()
+    if cid_q:
+        irow, _ie = _psql(
+            "SELECT COALESCE(label,'') || '~~' || "
+            "COALESCE(importance_score::text,'') || '~~' || "
+            "COALESCE(importance_reasoning,'') FROM customer_facts "
+            "WHERE customer_id = " + _lit(cid_q) + " AND merged_into IS NULL")
+        irow = (irow or "").strip()
+        if irow:
+            lbl_, isc_, irea_ = (irow.splitlines()[0].split("~~") + ["", "", ""])[:3]
+            if irea_ or isc_:
+                parts.append(
+                    "\n--- LEAD ANALYSIS (the draft must FIT this) ---\n"
+                    f"Label: {lbl_ or '?'} · Importance: {isc_ or '?'}/100\n"
+                    f"Analyzer verdict: {irea_ or '(none)'}\n"
+                    "A strong draft is APPROPRIATE for this state. If the analyzer "
+                    "judged the lead lost / not-convertible / a vendor pitch, a "
+                    "sales push is a rule_violation — score it LOW; never reward a "
+                    "polished-but-wrong reply with a high score.")
     cur = p.get("current_draft")
     if isinstance(cur, list):
         cur = "\n\n".join(str(m) for m in cur)
