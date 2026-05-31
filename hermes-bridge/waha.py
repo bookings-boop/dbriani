@@ -442,6 +442,30 @@ def display_phone_for_cid(customer_id):
     return ""
 
 
+_SESSION_HEALTH = {"ok": True, "status": "", "exp": 0.0}
+
+
+def waha_session_ok(ttl=30.0):
+    """(ok, status) for the default WAHA session, cached `ttl`s so it is cheap
+    to call on the draft path. ok=True only when status == 'WORKING'. A probe
+    error → (False, 'UNREACHABLE'). Advisory only — callers WARN, never block.
+    `_waha_get` already retries + self-heals the container IP, so an error here
+    means WAHA is genuinely not answering (operator 2026-05-31)."""
+    now = time.time()
+    if now < _SESSION_HEALTH["exp"]:
+        return _SESSION_HEALTH["ok"], _SESSION_HEALTH["status"]
+    data, err = _waha_get("/api/sessions/default", timeout=5)
+    if err:
+        ok, status = False, "UNREACHABLE"
+    elif isinstance(data, dict):
+        status = str(data.get("status") or "").upper()
+        ok = (status == "WORKING")
+    else:
+        ok, status = False, "UNKNOWN"
+    _SESSION_HEALTH.update(ok=ok, status=status, exp=now + ttl)
+    return ok, status
+
+
 def waha_fetch_history(customer_id, limit=30):
     """Pull last N messages from WAHA + pushName. Returns dict:
       {history: '...',     ← oldest-first, last 20 with non-empty body

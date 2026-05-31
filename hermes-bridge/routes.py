@@ -2344,11 +2344,37 @@ def _format_quality_badge(qp):
     flags = qp.get("flags") if isinstance(qp.get("flags"), list) else []
     reason = ", ".join(str(f).replace("_", " ") for f in flags[:3]).strip()
     if score >= 8:
-        return f"🟢 {score}/10"
-    if score >= 5:
-        return f"🟡 {score}/10" + (f" — {reason}" if reason else "")
-    return (f"🔴 {score}/10" + (f" — {reason}" if reason else "")
-            + " · tap 🔁 Regen")
+        badge = f"🟢 {score}/10"
+    elif score >= 5:
+        badge = f"🟡 {score}/10" + (f" — {reason}" if reason else "")
+    else:
+        badge = (f"🔴 {score}/10" + (f" — {reason}" if reason else "")
+                 + " · tap 🔁 Regen")
+    # Prepend a WhatsApp-connection warning when the WAHA session isn't WORKING,
+    # so the operator never approves a draft that will silently fail to send
+    # (operator 2026-05-31). Cached health check → cheap on the draft path; the
+    # message is status-accurate (the watchdog only auto-restarts STOPPED).
+    try:
+        from waha import waha_session_ok
+        ok, status = waha_session_ok()
+        if not ok:
+            st = status or "UNREACHABLE"
+            label_map = {
+                "STOPPED": ("Stopped", "the auto-watchdog is restarting it"),
+                "STARTING": ("Starting", "give it a moment, then retry"),
+                "SCAN_QR_CODE": ("Logged out",
+                                 "re-scan the QR in WAHA to reconnect"),
+                "FAILED": ("Failed", "check the WhatsApp connection"),
+                "UNREACHABLE": ("Unreachable",
+                                "check the WhatsApp connection first"),
+            }
+            disp, tail = label_map.get(
+                st, (st.title(), "check the WhatsApp connection first"))
+            badge = (f"⚠️ WhatsApp connection issue ({disp}) — sending may "
+                     f"fail; {tail}\n" + badge)
+    except Exception:
+        pass
+    return badge
 
 
 def handle_draft_followup(payload, send):
