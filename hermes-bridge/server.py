@@ -2156,6 +2156,13 @@ def build_learn_query(p):
     if isinstance(draft, list):
         draft = "\n\n".join(str(m) for m in draft)
     name = (p.get("customer_name") or "the customer").strip()
+    # Existing active rules — so the model REJECTS feedback already covered,
+    # preventing the rule set from re-exploding into dozens of near-duplicates
+    # (the root cause of the 71-rule mess that drowned drafts; 2026-05-31).
+    existing = fetch_behavior_rules(p.get("customer_id"))
+    existing_block = (
+        "\nEXISTING ACTIVE RULES — do NOT duplicate any of these:\n"
+        + "\n".join("- " + r for r in existing)) if existing else ""
     return "\n".join([
         "TASK: An operator (Zayn) reviewed a drafted WhatsApp reply for "
         "Dubriani Yachts and gave a correction. Decide whether that correction "
@@ -2164,11 +2171,14 @@ def build_learn_query(p):
         "to a one-off tweak to this single message.",
         f"\nThe draft (for {name}) was:\n" + str(draft or "").strip(),
         "\nThe operator's correction was:\n" + fb,
+        existing_block,
         "\nRespond with ONLY one JSON object — no fences, no commentary:\n"
         '{"is_rule": true|false, "rule_text": "<if is_rule: a concise '
         'imperative rule, 25 words max>", "scope": "global" (applies to all '
         'customers) or "customer" (only this one), "reasoning": "<one line>"}\n'
-        'If the correction is a one-off tweak, return {"is_rule": false}.',
+        'Return {"is_rule": false} if the correction is a one-off tweak OR if '
+        'it is ALREADY COVERED by an existing active rule above (even '
+        'paraphrased) — never create a duplicate or near-duplicate rule.',
     ])
 
 

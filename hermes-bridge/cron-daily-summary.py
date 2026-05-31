@@ -74,6 +74,10 @@ def main():
     for rt, sc, act in ((x + ["", "", ""])[:3] for x in rules[:10]):
         flag = "active" if act == "t" else "INACTIVE — needs your approval"
         L.append(f"  • [{sc}] {rt}  ({flag})")
+    _ac = psql("SELECT count(*) FROM behavior_rules WHERE active=true")
+    _nac = int(_ac[0][0]) if (_ac and _ac[0] and _ac[0][0].isdigit()) else 0
+    L.append(f"  → {_nac} active rules total"
+             + ("  ⚠️ getting large — ask Claude to consolidate" if _nac > 40 else ""))
     L.append("")
 
     trig = psql("SELECT COALESCE(NULLIF(customer_name,''),customer_id), "
