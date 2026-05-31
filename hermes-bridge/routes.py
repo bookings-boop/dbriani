@@ -2862,19 +2862,54 @@ def handle_pipeline_analyze(payload, send):
         # 'If has_summary?' gate short-circuits and stays quiet.
         telegram_text = ""
         if closed:
-            close_lines = [
-                f"🛑 *Hermes flagged {len(closed)} lead(s) as "
-                "not-convertible* — tap 🛑 Disregard on the matching "
-                "/review card to close, or override with `/label "
-                "<name> WARM`.",
-                "",
-            ]
-            for cid, nm, r in closed[:5]:
-                close_lines.append(f"  • *{nm}* — {r}")
-            if len(closed) > 5:
-                close_lines.append(
-                    f"  _…and {len(closed) - 5} more — see /review_")
-            telegram_text = "\n".join(close_lines)
+            # Operator 2026-05-31: post ONE card per flagged lead, each with
+            # its own [🛑 Disregard] [ℹ️ Info] buttons (callback_data matches
+            # the /review cards, so n8n routes them) — so the operator can act
+            # straight from the alert instead of hunting the /review card.
+            # Per-lead Redis dedup (closecard:<cid>, 20h) so the hourly sweep
+            # doesn't re-post the same COLD leads every hour. Posted directly
+            # via _tg_post; telegram_text stays "" so the cron doesn't double-post.
+            try:
+                from server import _tg_post, DEFAULT_ADMIN_CHAT
+                fresh = []
+                for c, nm, r in closed:
+                    seen, _se = _redis(
+                        ["SET", f"closecard:{c}", "1", "NX", "EX", "72000"])
+                    if (seen or "").strip() == "OK":
+                        fresh.append((c, nm, r))
+                if fresh:
+                    _tg_post("sendMessage", {
+                        "chat_id": DEFAULT_ADMIN_CHAT,
+                        "text": (f"🛑 Hermes flagged {len(fresh)} lead(s) as "
+                                 "not-convertible — tap Disregard to close, or "
+                                 "override with /label <name> WARM"),
+                    })
+                    for c, nm, r in fresh:
+                        _tg_post("sendMessage", {
+                            "chat_id": DEFAULT_ADMIN_CHAT,
+                            "text": f"🛑 {nm}\n{r}",
+                            "reply_markup": {"inline_keyboard": [[
+                                {"text": "🛑 Disregard",
+                                 "callback_data": f"disregard:{c}"},
+                                {"text": "ℹ️ Info",
+                                 "callback_data": f"inf:{c}"},
+                            ]]},
+                        })
+                    log(f"pipeline-analyze posted {len(fresh)} disregard "
+                        f"card(s) of {len(closed)} closed")
+            except Exception as _ce:
+                # Never lose the alert — fall back to a single text message.
+                log("pipeline-analyze close-card err:", repr(_ce))
+                close_lines = [
+                    f"🛑 Hermes flagged {len(closed)} lead(s) as "
+                    "not-convertible — Disregard on /review or /label "
+                    "<name> WARM.", ""]
+                for cid, nm, r in closed[:5]:
+                    close_lines.append(f"  • {nm} — {r}")
+                if len(closed) > 5:
+                    close_lines.append(
+                        f"  …and {len(closed) - 5} more — see /review")
+                telegram_text = "\n".join(close_lines)
         send(200, {
             "ok": True, "analyzed": analyzed, "errors": errors,
             "close_recommended": len(closed),
