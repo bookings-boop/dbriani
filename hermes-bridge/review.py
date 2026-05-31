@@ -620,9 +620,14 @@ def render_review(scored, totals, mode="ondemand"):
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is
                 # the destructive action, parked alone on row 2 next to Info
                 # so the operator doesn't fat-finger it next to Draft nudge.
+                # AWAITING_REPLY leads owe a direct answer, so the primary verb
+                # is "Draft reply", not "nudge" (same callback/draft path).
+                _draft_txt = ("✍️ Draft reply"
+                              if label_key == "AWAITING_REPLY"
+                              else "💬 Draft nudge")
                 kb = [
                     [
-                        {"text": "💬 Draft nudge",
+                        {"text": _draft_txt,
                          "callback_data": f"nudge:{sid}"},
                         {"text": "💤 Snooze 4h",
                          "callback_data": f"snz:{sid}:4h"},

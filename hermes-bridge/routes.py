@@ -2469,6 +2469,14 @@ def handle_draft_followup(payload, send):
                 directive += (" KNOWN FACTS to anchor on (do NOT ask the "
                               "customer to repeat these): "
                               + " · ".join(facts_bits) + ".")
+            # Awaiting-reply priority: if the customer's last message is an
+            # unanswered question/request, the draft must ANSWER it, not nudge.
+            # Conditional clause → no-op when nothing is pending, so it is safe
+            # for every follow-up draft (operator 2026-05-31).
+            directive += (
+                " If their most recent message contains a question or request "
+                "you have not answered yet, ANSWER it directly and "
+                "specifically first — do not deflect to a generic check-in.")
         # Operator-directed override — production bug 2026-05-28:
         # "draft a nudge to Madawi and tell him we can't call now,
         # sunday before 4 or after 8pm — what's convenient?" produced
