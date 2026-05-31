@@ -362,6 +362,18 @@ _CALLING_CODE_FLAG = {
     "65": "🇸🇬", "60": "🇲🇾", "62": "🇮🇩", "63": "🇵🇭",
     "66": "🇹🇭", "84": "🇻🇳", "81": "🇯🇵", "82": "🇰🇷",
     "61": "🇦🇺", "64": "🇳🇿",
+    # Baltics, Nordics, Central/SE Europe, CIS — common Dubriani EU clientele
+    "370": "🇱🇹", "371": "🇱🇻", "372": "🇪🇪", "358": "🇫🇮",
+    "46": "🇸🇪", "47": "🇳🇴", "45": "🇩🇰", "354": "🇮🇸",
+    "420": "🇨🇿", "421": "🇸🇰", "36": "🇭🇺", "359": "🇧🇬",
+    "385": "🇭🇷", "386": "🇸🇮", "381": "🇷🇸", "382": "🇲🇪",
+    "389": "🇲🇰", "355": "🇦🇱", "357": "🇨🇾", "356": "🇲🇹",
+    "352": "🇱🇺", "375": "🇧🇾", "373": "🇲🇩", "374": "🇦🇲",
+    "377": "🇲🇨", "350": "🇬🇮",
+    # Asia-Pacific & others
+    "852": "🇭🇰", "886": "🇹🇼", "853": "🇲🇴", "960": "🇲🇻",
+    "673": "🇧🇳", "855": "🇰🇭", "856": "🇱🇦", "95": "🇲🇲",
+    "976": "🇲🇳",
 }
 
 # Bulk lid→phone map, cached. /review resolves many @lid customers at
@@ -413,6 +425,21 @@ def country_flag_for_cid(customer_id):
         if flag:
             return flag
     return "🏳️"  # resolved a number but unknown country code
+
+
+def display_phone_for_cid(customer_id):
+    """'+<digits>' for a cid using the SAME cached sources as the country flag
+    (@c.us digits; @lid via the cached bulk lid map) — cheap for /review which
+    resolves many leads at once. '' when unresolvable. Lets the operator find a
+    lead by NUMBER, not just name (operator 2026-05-31)."""
+    cid = (customer_id or "").strip()
+    if cid.endswith("@c.us"):
+        d = cid.split("@", 1)[0]
+        return "+" + d if d.isdigit() else ""
+    if cid.endswith("@lid"):
+        d = _get_lid_phone_map().get(cid, "")
+        return "+" + d if (d and d.isdigit()) else ""
+    return ""
 
 
 def waha_fetch_history(customer_id, limit=30):

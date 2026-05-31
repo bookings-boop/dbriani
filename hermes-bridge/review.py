@@ -342,6 +342,38 @@ def _fmt_dur(secs):
 
 
 
+# Cyrillic → Latin transliteration so the operator can read non-English
+# customer names (operator 2026-05-31: a Russian-named lead "Богдан" was
+# unrecognisable). Russian/Ukrainian coverage; unknown chars pass through.
+_CYR2LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "ґ": "g", "д": "d", "е": "e",
+    "ё": "yo", "є": "ye", "ж": "zh", "з": "z", "и": "i", "і": "i", "ї": "yi",
+    "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p",
+    "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e",
+    "ю": "yu", "я": "ya",
+}
+
+
+def _translit_name(name):
+    """Latin transliteration of a Cyrillic name ('Богдан' -> 'Bogdan') so the
+    operator can read it. '' if the name has no Cyrillic or is unchanged."""
+    s = name or ""
+    if not any("Ѐ" <= ch <= "ӿ" for ch in s):
+        return ""
+    out = []
+    for ch in s:
+        lat = _CYR2LAT.get(ch.lower())
+        if lat is None:
+            out.append(ch)
+            continue
+        if ch.isupper() and lat:
+            lat = lat[0].upper() + lat[1:]
+        out.append(lat)
+    res = "".join(out).strip()
+    return res if (res and res.lower() != s.lower()) else ""
+
+
 def render_review(scored, totals, mode="ondemand"):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -361,6 +393,9 @@ def render_review(scored, totals, mode="ondemand"):
       }
     """
     sections = {
+        "AWAITING_REPLY":  {"items": [], "cap": 30,
+                            "header": "📨 AWAITING YOUR REPLY — customer messaged, no reply yet",
+                            "emoji": "📨"},
         "WAITING_FOR_PAYMENT": {"items": [], "cap": 20,
                             "header": "⏳ WAITING FOR PAYMENT — link sent, awaiting payment",
                             "emoji": "⏳"},
@@ -399,7 +434,20 @@ def render_review(scored, totals, mode="ondemand"):
             continue
         if label not in sections:
             continue
-        sections[label]["items"].append((score, row))
+        # AWAITING REPLY — the customer messaged after our last outbound (or we
+        # never replied): we OWE a reply. Pull these into a top, uncapped
+        # section so an unanswered customer (especially a question) is NEVER
+        # buried in a capped tier's overflow (operator 2026-05-31: HOT lead
+        # 'Богдан' with an unanswered question was hidden by the HOT cap).
+        _cs = row.get("last_customer_message_at_seconds")
+        _rs = row.get("last_operator_reply_at_seconds")
+        _ns = row.get("last_nudge_drafted_at_seconds")
+        _outs = [s for s in (_rs, _ns) if isinstance(s, (int, float))]
+        _out = min(_outs) if _outs else None
+        if isinstance(_cs, (int, float)) and (_out is None or _cs < _out):
+            sections["AWAITING_REPLY"]["items"].append((score, row))
+        else:
+            sections[label]["items"].append((score, row))
         seen_ids.append(row["customer_id"])
 
     # Sort NEW section by last_customer_message_at DESC NULLS LAST — most
@@ -411,6 +459,10 @@ def render_review(scored, totals, mode="ondemand"):
         secs = item[1].get("last_customer_message_at_seconds")
         return (secs is None, secs if secs is not None else 0)
     sections["NEW"]["items"].sort(key=_recency_key)
+    # AWAITING_REPLY: longest-waiting customer first (most urgent on top).
+    sections["AWAITING_REPLY"]["items"].sort(
+        key=lambda it: it[1].get("last_customer_message_at_seconds") or 0,
+        reverse=True)
 
     # STRICT rate-first ordering within each value-relevant section
     # (operator 2026-05-29): order by the highest hourly rate of the
@@ -439,8 +491,8 @@ def render_review(scored, totals, mode="ondemand"):
     keyboards = []
     per_lead_messages = []
 
-    for label_key in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
-                      "WARM", "NEW", "COLD", "CONFIRMED"):
+    for label_key in ("AWAITING_REPLY", "WAITING_FOR_PAYMENT", "HOT",
+                      "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -534,8 +586,18 @@ def render_review(scored, totals, mode="ondemand"):
             except Exception:
                 _flag = ""
             _nm = row.get("name") or _name_fallback(row.get("customer_id"))
+            # Non-English name → append a Latin transliteration; show the phone
+            # so the operator can find a lead by NUMBER too (operator 2026-05-31).
+            _tr = _translit_name(_nm)
+            _nm_disp = _nm + (f" ({_tr})" if _tr else "")
+            try:
+                from waha import display_phone_for_cid
+                _ph = display_phone_for_cid(row.get("customer_id"))
+            except Exception:
+                _ph = ""
+            _idline = f"*{_nm_disp}*" + (f"  {_ph}" if _ph else "")
             lead_body = (
-                f"{(_flag + ' ') if _flag else ''}*{_nm}* — "
+                f"{(_flag + ' ') if _flag else ''}{_idline} — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
                 f"{(row.get('dates') or 'no date')} · "
                 f"msg #{row.get('message_count')}\n"
