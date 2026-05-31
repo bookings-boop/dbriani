@@ -2331,6 +2331,26 @@ def handle_assist(payload, send):
     })
 
 
+def _format_quality_badge(qp):
+    """Render a draft scorecard badge from a quality result {score, flags}
+    — mirrors the main draft's 'Apply Improvement' badge so the refine/regen/
+    nudge cards show the same 🟢/🟡/🔴 N/10 scorecard (operator 2026-05-31)."""
+    if not isinstance(qp, dict):
+        return ""
+    try:
+        score = max(1, min(10, round(float(qp.get("score") or 0))))
+    except (TypeError, ValueError):
+        return ""
+    flags = qp.get("flags") if isinstance(qp.get("flags"), list) else []
+    reason = ", ".join(str(f).replace("_", " ") for f in flags[:3]).strip()
+    if score >= 8:
+        return f"🟢 {score}/10"
+    if score >= 5:
+        return f"🟡 {score}/10" + (f" — {reason}" if reason else "")
+    return (f"🔴 {score}/10" + (f" — {reason}" if reason else "")
+            + " · tap 🔁 Regen")
+
+
 def handle_draft_followup(payload, send):
     """POST /draft-followup — generate a follow-up draft via Hermes.
     Body: {customer_id, history?, customer_name?, silence_window?, silence_hours?}.
@@ -2541,11 +2561,31 @@ def handle_draft_followup(payload, send):
         log(f"draft-followup cid={cid!r} label={label} "
             f"waha_used={waha_used} waha_count={waha_count} "
             f"draft_len={len(draft_text)} elapsed={elapsed}s")
+        # Quality badge so the nudge card shows a scorecard (operator
+        # 2026-05-31: the nudge path had no scorecard). Analysis-aware via
+        # build_quality_query. Best-effort — never blocks the nudge.
+        quality_badge = ""
+        if draft_text:
+            try:
+                from server import build_quality_query
+                qq = build_quality_query({
+                    "customer_id": cid, "customer_name": name,
+                    "history": history,
+                    "incoming_message": f"[{tag}] {directive}",
+                    "current_draft": draft_text})
+                qrc, qout, _qe, _ = run_hermes(
+                    qq, timeout=45, priority="interactive")
+                qp, _ = extract_json(qout)
+                if qrc == 0:
+                    quality_badge = _format_quality_badge(qp)
+            except Exception as _qe2:
+                log("draft_followup quality err:", repr(_qe2))
         send(200, {
             "ok": True, "customer_id": cid, "label": label,
             "draft_text": draft_text,
             "notes_for_zayn": notes_for_zayn,
             "customer_name": name,
+            "quality_badge": quality_badge,
             "approval_card_header": (
                 f"🔔 PROACTIVE FOLLOW-UP — {label.lower()}"),
             "session_id": extract_session(out, err),
