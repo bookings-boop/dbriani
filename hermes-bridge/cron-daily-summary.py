@@ -67,6 +67,38 @@ def main():
     dubai = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=4)
     L = [f"☀️ Dubriani — daily digest ({dubai:%a %d %b})", ""]
 
+    # 📨 Awaiting YOUR reply — customers who messaged after our last outbound
+    # (reply or nudge), or we never replied. Same "unanswered on top" rule as
+    # /review (operator 2026-05-31). Leads the digest; active leads first, then
+    # CONFIRMED post-booking messages; longest-waiting first within each group.
+    awaiting = psql(
+        "SELECT COALESCE(NULLIF(name,''), "
+        "CASE WHEN customer_id LIKE '%@c.us' "
+        "THEN '+'||split_part(customer_id,'@',1) "
+        "ELSE 'WhatsApp lead ••'||right(split_part(customer_id,'@',1),4) END), "
+        "label, "
+        "GREATEST(0, EXTRACT(epoch FROM now()-last_customer_message_at))::bigint "
+        "FROM v_lead_summary "
+        "WHERE last_customer_message_at IS NOT NULL "
+        "AND label <> 'DISREGARDED' AND label NOT LIKE 'PAUSED_%' "
+        "AND last_customer_message_at > GREATEST("
+        "COALESCE(last_operator_reply_at,'epoch'::timestamptz),"
+        "COALESCE(last_nudge_drafted_at,'epoch'::timestamptz)) "
+        "ORDER BY (label='CONFIRMED'), last_customer_message_at ASC LIMIT 12")
+    if awaiting:
+        L.append(f"\U0001f4e8 Awaiting YOUR reply: {len(awaiting)} "
+                 f"— answer these first")
+        for who, lab, wait in ((x + ["", "", ""])[:3] for x in awaiting):
+            try:
+                sec = int(wait)
+                hrs = sec // 3600
+                wtxt = (f"{hrs // 24}d" if hrs >= 24
+                        else f"{hrs}h" if hrs else f"{max(1, sec // 60)}m")
+            except (ValueError, TypeError):
+                wtxt = "?"
+            L.append(f"  • {who} [{lab}] — waiting {wtxt}")
+        L.append("")
+
     rules = psql("SELECT rule_text, scope, active FROM behavior_rules "
                  "WHERE created_at > now() - interval '24 hours' "
                  "ORDER BY created_at")

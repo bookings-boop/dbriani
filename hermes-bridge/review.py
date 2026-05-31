@@ -459,10 +459,14 @@ def render_review(scored, totals, mode="ondemand"):
         secs = item[1].get("last_customer_message_at_seconds")
         return (secs is None, secs if secs is not None else 0)
     sections["NEW"]["items"].sort(key=_recency_key)
-    # AWAITING_REPLY: longest-waiting customer first (most urgent on top).
+    # AWAITING_REPLY: active leads (an unanswered live lead = revenue at risk)
+    # rank ABOVE CONFIRMED post-booking messages (often just a "thanks"); within
+    # each group, longest-waiting first (SLA fairness).
     sections["AWAITING_REPLY"]["items"].sort(
-        key=lambda it: it[1].get("last_customer_message_at_seconds") or 0,
-        reverse=True)
+        key=lambda it: (
+            (it[1].get("label") or "") == "CONFIRMED",
+            -(it[1].get("last_customer_message_at_seconds") or 0),
+        ))
 
     # STRICT rate-first ordering within each value-relevant section
     # (operator 2026-05-29): order by the highest hourly rate of the
