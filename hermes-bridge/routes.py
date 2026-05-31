@@ -4107,10 +4107,12 @@ def handle_quality_check(payload, send):
     flags = parsed.get("flags")
     flags = [str(f) for f in flags][:3] if isinstance(flags, list) else []
     summary = str(parsed.get("summary") or "")
+    badge = _format_quality_badge({"score": score, "flags": flags})
     log(f"quality-check OK customer={payload.get('customer_name')!r} "
         f"score={score} flags={flags} elapsed={elapsed}ms")
     send(200, {"ok": True, "score": score, "flags": flags,
-                     "summary": summary, "elapsed_ms": elapsed})
+                     "summary": summary, "badge": badge,
+                     "elapsed_ms": elapsed})
 
 
 def handle_learn(payload, send):
