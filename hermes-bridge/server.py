@@ -914,6 +914,27 @@ def resolve_customer_by_phone(phone):
     return None, matches
 
 
+# RULE #1 for the DRAFTER — prepended to behavioral_context().formatted so it
+# LEADS the dynamic context the drafter actually reads (n8n Fetch Behavioral
+# Context). 2026-06-01 incident: the drafter invented a "375 AED" fine-dining
+# price even though the no-invent rule existed — buried in the 50KB base prompt
+# + 40 learned rules. Leading with it (highest salience) counters that dilution.
+NO_INVENT_DIRECTIVE = (
+    "============================================================\n"
+    "🚨 RULE #1 — NEVER INVENT A NUMBER (this overrides everything below):\n"
+    "============================================================\n"
+    "Do NOT state any price, menu/add-on cost, yacht spec, capacity, or "
+    "availability unless that EXACT figure is given in the rules below, the "
+    "conversation history, or the yacht catalog in your base prompt. Quote "
+    "those exact figures — never round, estimate, or fill in a plausible "
+    "number. If a figure the customer asked for is genuinely NOT available to "
+    "you, do NOT guess: reply ONLY with a short holding line — \"let me "
+    "confirm the exact price and come right back to you\" — and stop there. A "
+    "guessed or approximated price is an automatic rejection (production "
+    "incident 2026-06-01: an invented \"375 AED\" fine-dining price went out)."
+)
+
+
 def behavioral_context(customer_id):
     """Active behavioural rules + notes for a customer. Used by drafts.
     Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
@@ -998,6 +1019,10 @@ def behavioral_context(customer_id):
     lead_block = _lead_state_block(customer_id)
     if lead_block:
         formatted = lead_block + ("\n\n" + formatted if formatted else "")
+    # RULE #1 leads ALWAYS — even when there are no learned rules / no lead
+    # block — so the drafter can never compose without the no-invent mandate
+    # at the very top of its dynamic context (2026-06-01 fabrication incident).
+    formatted = NO_INVENT_DIRECTIVE + ("\n\n" + formatted if formatted else "")
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
 
