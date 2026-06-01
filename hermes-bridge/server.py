@@ -134,7 +134,11 @@ QUEUE_TTL = int(os.environ.get("BRIDGE_QUEUE_TTL", "86400"))  # 24h — drafts a
 
 # --- /feedback (operator behavioural-feedback command) ---------------------
 FEEDBACK_TTL = int(os.environ.get("BRIDGE_FEEDBACK_TTL", "600"))
-FEEDBACK_MAX_GLOBAL = int(os.environ.get("FEEDBACK_MAX_GLOBAL", "20"))
+# 40, not 20: there are ~34 active global rules (28 consolidated + recent
+# feedback) and behavioral_context's LIMIT was silently hiding the 14 oldest
+# from the drafter — i.e. operator feedback captured but never applied
+# (operator 2026-06-01). The daily digest warns past 40 → re-consolidate then.
+FEEDBACK_MAX_GLOBAL = int(os.environ.get("FEEDBACK_MAX_GLOBAL", "40"))
 FEEDBACK_MAX_SCENARIO = int(os.environ.get("FEEDBACK_MAX_SCENARIO", "5"))
 FEEDBACK_MAX_PER_CUSTOMER = int(os.environ.get("FEEDBACK_MAX_PER_CUSTOMER", "5"))
 
