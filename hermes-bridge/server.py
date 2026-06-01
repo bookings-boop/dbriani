@@ -982,8 +982,48 @@ def behavioral_context(customer_id):
         formatted = "\n".join(header_lines) + "\n".join(blocks)
     else:
         formatted = ""
+    # Pillar B (operator 2026-06-01 "wrong drafts — the system already knows"):
+    # give the DRAFTER the same lead analysis the /quality-check SCORER judges
+    # against, so it stops writing confident sales pushes to leads the analyzer
+    # already flagged lost / vendor / spam — the #1 source of low-scoring drafts.
+    lead_block = _lead_state_block(customer_id)
+    if lead_block:
+        formatted = lead_block + ("\n\n" + formatted if formatted else "")
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
+
+
+def _lead_state_block(customer_id):
+    """The lead's current analyzer state, framed so the DRAFTER fits its reply
+    to it — mirrors what build_quality_query hands the SCORER (Pillar B). ''
+    when there's no analysis yet, so it's safe to concatenate."""
+    cid = (customer_id or "").strip()
+    if not cid:
+        return ""
+    row, _ = _psql(
+        "SELECT COALESCE(label,'') || '~~' || "
+        "COALESCE(importance_score::text,'') || '~~' || "
+        "COALESCE(importance_reasoning,'') FROM customer_facts "
+        "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
+    row = (row or "").strip()
+    if not row:
+        return ""
+    lbl, isc, irea = (row.splitlines()[0].split("~~") + ["", "", ""])[:3]
+    if not (irea or isc or lbl):
+        return ""
+    bar = "=" * 60
+    return "\n".join([
+        bar,
+        "## 🎯 THIS LEAD'S CURRENT STATE — your reply MUST fit it",
+        bar,
+        f"Label: {lbl or '?'} · Importance: {isc or '?'}/100",
+        f"Analyzer's read: {irea or '(none yet)'}",
+        "",
+        "Write a reply APPROPRIATE for this state. If the analyzer judged this "
+        "lead lost, not-convertible, a vendor / B2B pitch, or spam, do NOT write "
+        "a sales push or chase a booking — that is a WRONG draft and will be "
+        "rejected. Match the reply to where this lead actually is.",
+    ])
 
 
 def feedback_apply_cap(table, cap, scope=None, scope_value=None, customer_id=None):
