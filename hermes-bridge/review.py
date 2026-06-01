@@ -92,6 +92,72 @@ def _is_uae_working_hours(now_epoch=None):
     return UAE_WORK_HOURS_START <= dubai_hour < UAE_WORK_HOURS_END
 
 
+# --- /review section router (pure, unit-tested) -------------------
+# Analyzer verdicts that mean "this conversation is over — no active sale
+# left" (distinct from cold_decay, which is dormant and may re-engage).
+# A FRESH one of these on an owed-reply lead routes it out of AWAITING into
+# the 💤 NO ACTIVE SALE bucket (#2 fix, 2026-06-01) — see test_awaiting_section.
+_TERMINAL_SIGNALS = ("confirmed_terminal", "date_passed")
+
+
+def _awaiting_section_for(row, score):
+    """Route a (non-paused, valid-label) lead to a /review section.
+
+    Returns 'AWAITING_REPLY', 'NOT_A_CUSTOMER', or '' (render in its own
+    label section). Pure: derives everything from row fields + score.
+
+    Seconds fields are AGE-in-seconds (smaller = more recent), so:
+      owe            = customer messaged after our last reply/nudge (_cs < _out)
+      fresh terminal = analysis at least as recent as the customer's last
+                       message (_anz <= _cs); a customer who messaged AFTER a
+                       terminal verdict is re-engaging and stays owed.
+    """
+    label = row.get("label") or "NEW"
+    if label == "CONFIRMED":
+        # A won/finished booking renders in CONFIRMED, never "awaiting reply".
+        return ""
+    _cs = row.get("last_customer_message_at_seconds")
+    _rs = row.get("last_operator_reply_at_seconds")
+    _ns = row.get("last_nudge_drafted_at_seconds")
+    _outs = [s for s in (_rs, _ns) if isinstance(s, (int, float))]
+    _out = min(_outs) if _outs else None
+    _owe = isinstance(_cs, (int, float)) and (_out is None or _cs < _out)
+    _imp = row.get("importance_score")
+    try:
+        _imp_zero = (_imp is not None and int(_imp) == 0)
+    except (TypeError, ValueError):
+        _imp_zero = False
+    _sig = (row.get("last_analysis_signal") or "").strip()
+    _anz = row.get("last_analyzed_at_seconds")
+    _sig_fresh = (isinstance(_anz, (int, float))
+                  and isinstance(_cs, (int, float)) and _anz <= _cs)
+    _terminal = (_sig in _TERMINAL_SIGNALS) and _sig_fresh
+    if _owe and not _imp_zero and not _terminal:
+        return "AWAITING_REPLY"
+    if _imp_zero or (_owe and _terminal):
+        return "NOT_A_CUSTOMER"
+    return ""
+
+
+# Human-readable reason shown in the 💤 NO ACTIVE SALE bucket for a lead
+# routed there by a terminal verdict (clearer than stale positive reasoning).
+_NO_SALE_REASON_BY_SIGNAL = {
+    "date_passed": "booking date has already passed",
+    "confirmed_terminal": "booking completed — no open sale",
+}
+
+
+def _no_sale_reason(row):
+    """Reason line for the 💤 NO ACTIVE SALE bucket. Prefer the analyzer's
+    terminal signal (clearest, freshest), then its reasoning, then a
+    score-0 fallback. Pure."""
+    sig = (row.get("last_analysis_signal") or "").strip()
+    if sig in _NO_SALE_REASON_BY_SIGNAL:
+        return _NO_SALE_REASON_BY_SIGNAL[sig]
+    rea = (row.get("importance_reasoning") or "").strip()
+    return rea[:160] if rea else "analyzer scored 0 — no open sale"
+
+
 # --- customer-facts pure helpers ----------------------------------
 
 def _facts_extract_gate(incoming_message):
@@ -447,34 +513,22 @@ def render_review(scored, totals, mode="ondemand"):
         # section so an unanswered customer (especially a question) is NEVER
         # buried in a capped tier's overflow (operator 2026-05-31: HOT lead
         # 'Богдан' with an unanswered question was hidden by the HOT cap).
-        _cs = row.get("last_customer_message_at_seconds")
-        _rs = row.get("last_operator_reply_at_seconds")
-        _ns = row.get("last_nudge_drafted_at_seconds")
-        _outs = [s for s in (_rs, _ns) if isinstance(s, (int, float))]
-        _out = min(_outs) if _outs else None
-        _owe = isinstance(_cs, (int, float)) and (_out is None or _cs < _out)
-        # Only a GENUINE active prospect belongs in AWAITING_REPLY. Exclude any
-        # lead the analyzer scored exactly 0 = non-customer / supplier / spam /
-        # a finished-and-done trip (operator 2026-06-01: a fruit SUPPLIER 'Alma'
-        # and a completed trip 'Émilie', both importance 0, sat on top of the
-        # pipeline as "awaiting reply"). A NULL/unscored new lead is still allowed.
-        _imp = row.get("importance_score")
-        try:
-            _imp_zero = (_imp is not None and int(_imp) == 0)
-        except (TypeError, ValueError):
-            _imp_zero = False
-        # CONFIRMED = a won/finished booking, not a lead "awaiting reply"
-        # (operator 2026-06-01: Luke, trip finished, was showing as awaiting
-        # reply). It stays in the CONFIRMED section instead.
-        if _owe and not _imp_zero and label != "CONFIRMED":
-            sections["AWAITING_REPLY"]["items"].append((score, row))
-        elif _imp_zero and label != "CONFIRMED":
-            # operator 2026-06-01: a fruit supplier (Alma) + ~28 other analyzer-
-            # scored-0 leads (suppliers, spam, completed/closed trips) cluttered
-            # the active pipeline as if they were live deals. Group them in a
-            # clearly-labelled bucket showing the analyzer's actual reason.
-            # CONFIRMED bookings stay in CONFIRMED (a real booking, not "no sale").
-            sections["NOT_A_CUSTOMER"]["items"].append((score, row))
+        # Routing is centralised in _awaiting_section_for (pure, unit-tested):
+        #   AWAITING_REPLY  — genuine active prospect we owe a reply to (pulled
+        #                     into a top, uncapped section so an unanswered
+        #                     customer is never buried in a capped tier's
+        #                     overflow — operator 2026-05-31, HOT lead 'Богдан').
+        #   NOT_A_CUSTOMER  — analyzer scored 0 (supplier/spam/completed, e.g.
+        #                     'Alma'/'Émilie') OR FRESHLY judged terminal
+        #                     (booking done / date passed) on an owed lead
+        #                     (#2 fix 2026-06-01): grouped in the 💤 NO ACTIVE
+        #                     SALE bucket showing the analyzer's reason instead
+        #                     of masquerading as a live "awaiting reply" deal.
+        #   ''              — render in its own label section (CONFIRMED stays
+        #                     in CONFIRMED — a won booking, not "awaiting reply").
+        _dest = _awaiting_section_for(row, score)
+        if _dest:
+            sections[_dest]["items"].append((score, row))
         else:
             sections[label]["items"].append((score, row))
         seen_ids.append(row["customer_id"])
@@ -554,9 +608,7 @@ def render_review(scored, totals, mode="ondemand"):
             imp = row.get("importance_score")
             imp_bits = ""
             if label_key == "NOT_A_CUSTOMER":
-                _rea = (row.get("importance_reasoning") or "").strip()
-                imp_bits = "\n↳ " + (_rea[:160] if _rea
-                                     else "analyzer scored 0 — no open sale")
+                imp_bits = "\n↳ " + _no_sale_reason(row)
             elif isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                 if label_key == "CONFIRMED":

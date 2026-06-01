@@ -2746,7 +2746,16 @@ def read_lead_summary(filter_label=None):
         "COALESCE(importance_score::text,''), "
         "COALESCE(importance_reasoning,''), "
         "COALESCE(suggested_action,''), "
-        "COALESCE(to_char(importance_analyzed_at,'YYYY-MM-DD HH24:MI:SSOF'),'') "
+        "COALESCE(to_char(importance_analyzed_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        # conversation-level analysis signal + when it ran (#2 fix: AWAITING
+        # respects a FRESH terminal verdict). v_lead_summary doesn't expose
+        # these, so read them from conversation_state directly via correlated
+        # subqueries — avoids altering the shared view.
+        "COALESCE((SELECT last_analysis_signal FROM conversation_state cs2 "
+        "  WHERE cs2.customer_id = v_lead_summary.customer_id),''), "
+        "COALESCE(to_char((SELECT last_analyzed_at FROM conversation_state cs2 "
+        "  WHERE cs2.customer_id = v_lead_summary.customer_id),"
+        "'YYYY-MM-DD HH24:MI:SSOF'),'') "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -2793,6 +2802,9 @@ def read_lead_summary(filter_label=None):
             "suggested_action": parts[22].strip() if len(parts) > 22 else "",
             "importance_analyzed_at_seconds":
                 _seconds_since(parts[23]) if len(parts) > 23 else None,
+            "last_analysis_signal": parts[24].strip() if len(parts) > 24 else "",
+            "last_analyzed_at_seconds":
+                _seconds_since(parts[25]) if len(parts) > 25 else None,
         }
         rows.append(row)
     return rows
