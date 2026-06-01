@@ -2490,6 +2490,31 @@ def handle_draft_followup(payload, send):
                                     "lock it in. ≤ 2 sentences."),
             }
             directive = directive_map.get(label, directive_map["WARM"])
+            # Owe-reply override (operator 2026-06-01): if the customer's last
+            # message is UNANSWERED, this is a direct REPLY, not a proactive
+            # nudge. Without this, the "proactive follow-up" framing combined
+            # with an analyzer note like "response overdue, no nudge needed"
+            # made Hermes return notes only (no message) → "Hermes returned no
+            # draft", and the failed attempt still hid the lead from /review.
+            _owe = False
+            try:
+                _ot, _ = _psql(
+                    "SELECT (last_customer_message_at > "
+                    "COALESCE(last_operator_reply_at,'epoch'::timestamptz))::text"
+                    " FROM conversation_state WHERE customer_id = " + _lit(cid))
+                _owe = (_ot or "").strip().lower().startswith("t")
+            except Exception:
+                _owe = False
+            if _owe:
+                directive = (
+                    "DIRECT REPLY — the customer's most recent message is "
+                    "UNANSWERED and they are waiting on you. Write the reply that "
+                    "answers their last message directly: address their question "
+                    "or request, anchor to the yacht/date/price already discussed, "
+                    "and move toward booking. This is NOT a proactive nudge — you "
+                    "MUST output a customer-facing message in `messages`; never "
+                    "decline with 'no nudge needed' or return notes only. "
+                    "≤ 3 sentences.")
             # Inject cached customer_facts so Hermes anchors on the
             # yacht/date/party-size it already knows about, instead of
             # asking the customer to repeat themselves or going generic.

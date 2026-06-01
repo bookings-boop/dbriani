@@ -444,7 +444,18 @@ def render_review(scored, totals, mode="ondemand"):
         _ns = row.get("last_nudge_drafted_at_seconds")
         _outs = [s for s in (_rs, _ns) if isinstance(s, (int, float))]
         _out = min(_outs) if _outs else None
-        if isinstance(_cs, (int, float)) and (_out is None or _cs < _out):
+        _owe = isinstance(_cs, (int, float)) and (_out is None or _cs < _out)
+        # Only a GENUINE active prospect belongs in AWAITING_REPLY. Exclude any
+        # lead the analyzer scored exactly 0 = non-customer / supplier / spam /
+        # a finished-and-done trip (operator 2026-06-01: a fruit SUPPLIER 'Alma'
+        # and a completed trip 'Émilie', both importance 0, sat on top of the
+        # pipeline as "awaiting reply"). A NULL/unscored new lead is still allowed.
+        _imp = row.get("importance_score")
+        try:
+            _imp_zero = (_imp is not None and int(_imp) == 0)
+        except (TypeError, ValueError):
+            _imp_zero = False
+        if _owe and not _imp_zero:
             sections["AWAITING_REPLY"]["items"].append((score, row))
         else:
             sections[label]["items"].append((score, row))
