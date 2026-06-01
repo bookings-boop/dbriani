@@ -29,6 +29,14 @@ def test_directive_is_substantial():
     assert len(NO_INVENT_DIRECTIVE.strip()) > 120
 
 
+def test_directive_covers_brand_and_model():
+    # 2026-06-01: drafter invented a jet-ski make/model ("Sea-Doo RXT-X").
+    # The no-invent rule must cover brand/make/model of equipment too, not
+    # just prices/specs.
+    d = NO_INVENT_DIRECTIVE.lower()
+    assert "brand" in d and "model" in d
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

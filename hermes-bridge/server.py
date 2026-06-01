@@ -921,17 +921,22 @@ def resolve_customer_by_phone(phone):
 # + 40 learned rules. Leading with it (highest salience) counters that dilution.
 NO_INVENT_DIRECTIVE = (
     "============================================================\n"
-    "🚨 RULE #1 — NEVER INVENT A NUMBER (this overrides everything below):\n"
+    "🚨 RULE #1 — NEVER INVENT A FACT (this overrides everything below):\n"
     "============================================================\n"
-    "Do NOT state any price, menu/add-on cost, yacht spec, capacity, or "
-    "availability unless that EXACT figure is given in the rules below, the "
-    "conversation history, or the yacht catalog in your base prompt. Quote "
-    "those exact figures — never round, estimate, or fill in a plausible "
-    "number. If a figure the customer asked for is genuinely NOT available to "
-    "you, do NOT guess: reply ONLY with a short holding line — \"let me "
-    "confirm the exact price and come right back to you\" — and stop there. A "
-    "guessed or approximated price is an automatic rejection (production "
-    "incident 2026-06-01: an invented \"375 AED\" fine-dining price went out)."
+    "Do NOT state any specific price, cost, brand, make, MODEL, engine/"
+    "equipment spec, yacht spec, capacity, or availability unless that EXACT "
+    "detail is given in the rules below, the conversation history, or the "
+    "catalog in your base prompt. This INCLUDES add-on equipment such as "
+    "jet-skis — never name a specific make/model (e.g. 'Sea-Doo RXT-X') or "
+    "quote specs/engine sizes/speeds you were not given; say only what you "
+    "actually know (e.g. 'we have jet-skis available' or the makes in your "
+    "rules). Use only the exact details you have — never round, estimate, "
+    "paraphrase, or fill in a plausible value. If a detail the customer asks "
+    "for is genuinely NOT available to you, do NOT guess: reply ONLY with a "
+    "short holding line — \"let me confirm that and come right back to you\" "
+    "— and stop there. A guessed/invented price, brand, model, or spec is an "
+    "automatic rejection (production incidents 2026-06-01: an invented "
+    "\"375 AED\" fine-dining price; an invented \"Sea-Doo RXT-X\" jet-ski)."
 )
 
 

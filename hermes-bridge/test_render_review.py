@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Integration tests for render_review passed-date visibility (R1, 2026-06-01).
+
+Marimuthu incident: a COLD passed-date lead the operator had re-engaged was
+INVISIBLE because (a) score_lead damped it to a negative score, and the
+`score < 0` guard shunted it to the hidden pause-tail BEFORE the NO-ACTIVE-SALE
+routing ran; and (b) even if routed, the 55-lead bucket (cap 12) buried it.
+
+Fix: the pause-tail guard exempts passed-date leads, and the NOT_A_CUSTOMER
+bucket floats re-engaged graceful-exits (passed date + a recent operator
+reply) to the top so they're visible.
+
+Run: python3 hermes-bridge/test_render_review.py
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from review import render_review  # noqa: E402
+
+
+def _row(cid, label="COLD", **ov):
+    base = {
+        "customer_id": cid, "name": "", "label": label,
+        "label_updated_at": "", "label_locked_until": "",
+        "label_locked_active": False, "message_count": 2, "yachts": "",
+        "dates": "", "party_size": "", "last_customer_message_at": "",
+        "last_customer_message_at_seconds": 1000,
+        "last_operator_reply_at_seconds": None,
+        "last_review_seen_at_seconds": None,
+        "last_nudge_drafted_at_seconds": None,
+        "last_payment_link_at_seconds": None,
+        "last_payment_promised_at_seconds": None,
+        "last_booking_intent_at": "", "last_rejection_at_seconds": None,
+        "last_rejection_kind": "", "recent_notes": "",
+        "importance_score": 0, "importance_reasoning": "",
+        "suggested_action": "", "importance_analyzed_at_seconds": None,
+        "last_analysis_signal": "", "last_analyzed_at_seconds": None,
+    }
+    base.update(ov)
+    return base
+
+
+def _shown_cids(res):
+    return [m.get("customer_id") for m in (res.get("per_lead_messages") or [])]
+
+
+def test_reengaged_passed_date_visible_despite_negative_score_and_overflow():
+    # 20 score-0 supplier/spam fillers fill the NO ACTIVE SALE bucket (cap 12),
+    # ordered before Marimuthu (caller sorts score-desc) so without the sort he
+    # overflows. Marimuthu: COLD, passed date, we re-engaged (recent reply),
+    # score -100 (damped).
+    fillers = [(0, _row(f"sup{i}@lid", name=f"Sup{i}",
+                        last_analysis_signal="cold_decay")) for i in range(20)]
+    mari = _row("mari@lid", name="Marimuthu", dates="Jan 1 2020",
+                last_customer_message_at_seconds=900000,
+                last_operator_reply_at_seconds=3600)
+    scored = fillers + [(-100, mari)]
+    res = render_review(scored, {}, "on-demand")
+    assert "mari@lid" in _shown_cids(res), \
+        "re-engaged passed-date lead must be visible in NO ACTIVE SALE"
+
+
+def test_future_date_negative_score_still_hidden():
+    # regression: a non-passed-date lead with score < 0 stays in the hidden
+    # pause-tail (unchanged behaviour).
+    fut = _row("fut@lid", dates="Dec 31 2099",
+               last_customer_message_at_seconds=900000,
+               last_operator_reply_at_seconds=3600)
+    res = render_review([(-100, fut)], {}, "on-demand")
+    assert "fut@lid" not in _shown_cids(res)
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in list(globals().items())
+           if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn()
+        print("PASS", fn.__name__)
+    print(f"all {len(fns)} render_review tests passed")

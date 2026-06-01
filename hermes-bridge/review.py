@@ -197,6 +197,21 @@ def _no_sale_reason(row):
     return rea[:160] if rea else "analyzer scored 0 — no open sale"
 
 
+def _nac_key(item):
+    """NO ACTIVE SALE sort key: float the operator's ACTIVE graceful-exits
+    (passed-date leads we've re-engaged = a recent operator reply) to the TOP,
+    most-recently-actioned first, so they stay visible above stale suppliers/
+    spam in the capped bucket (2026-06-01: Marimuthu). Pure."""
+    score, row = item
+    rs = row.get("last_operator_reply_at_seconds")
+    reengaged = _booking_date_passed(row) and isinstance(rs, (int, float))
+    return (
+        0 if reengaged else 1,                              # graceful-exits first
+        rs if reengaged else 10 ** 12,                      # most-recent reply first
+        -(score if isinstance(score, (int, float)) else 0),  # then higher score
+    )
+
+
 def _card_draft_label(label_key, last_analysis_signal):
     """Draft-button verb for a /review card. AWAITING_REPLY owes a direct
     reply; a passed-date lead gets a gentle re-engage CHECK-IN (#5); everyone
@@ -554,7 +569,12 @@ def render_review(scored, totals, mode="ondemand"):
             continue
         # PAUSED_* always tail. CONFIRMED is success — keep on the report,
         # but in its own section without nudge buttons (handled below).
-        if label.startswith("PAUSED_") or score < 0:
+        # EXEMPT passed-date leads: score_lead damps them negative, but a
+        # passed-date "graceful exit" the operator is working must stay
+        # VISIBLE (routed to NO ACTIVE SALE by _awaiting_section_for), not
+        # vanish into the hidden pause-tail (2026-06-01: Marimuthu, score -100).
+        if label.startswith("PAUSED_") or (
+                score < 0 and not _booking_date_passed(row)):
             pause_tail.append(row)
             continue
         if label not in sections:
@@ -620,6 +640,10 @@ def render_review(scored, totals, mode="ondemand"):
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
                 "WARM", "COLD", "CONFIRMED"):
         sections[_lk]["items"].sort(key=_rate_key, reverse=True)
+    # NO ACTIVE SALE: float the operator's active graceful-exits (passed-date
+    # leads we've re-engaged) to the top so they're visible above stale
+    # suppliers/spam within the capped bucket (2026-06-01: Marimuthu).
+    sections["NOT_A_CUSTOMER"]["items"].sort(key=_nac_key)
 
     # ---- Single-message render (backward compat) ----------------------------
     when = ("Scheduled review" if mode == "scheduled"
