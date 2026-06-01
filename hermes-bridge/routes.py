@@ -2678,15 +2678,26 @@ def handle_draft_followup(payload, send):
                 from server import _is_past_booking_date
                 _trip_done = _is_past_booking_date((row or {}).get("dates") or "")
                 if _isc == 0 or _trip_done:
-                    directive = (
-                        "This customer's booking/trip is COMPLETED. Draft a "
-                        "short, warm, genuine post-trip CHECK-IN asking how their "
-                        "experience was — e.g. \"hi, just checking in — how was "
-                        "your time on the <yacht>?\". This is a relationship / "
-                        "feedback message, NOT a sale: do NOT pitch anything, and "
-                        "do NOT ask for a review in this message. One short "
-                        "message. (If they reply that they enjoyed it, the "
-                        "operator will follow up to ask for a Google review.)")
+                    # #6-auto-B: first draft on a completed booking = the
+                    # feedback check-in (+ mark fbasked); after that the SAME
+                    # button (relabelled "⭐ Ask for review" in /review) drafts
+                    # the Google-review request. Manual — the operator taps it
+                    # only after a positive reply, never auto-sentiment.
+                    _fb_asked, _ = _redis(["GET", "fbasked:" + cid])
+                    if (_fb_asked or "").strip():
+                        from labels import _review_ask_directive
+                        directive = _review_ask_directive(
+                            os.environ.get("GOOGLE_REVIEW_URL", ""))
+                    else:
+                        directive = (
+                            "This customer's booking/trip is COMPLETED. Draft a "
+                            "short, warm, genuine post-trip CHECK-IN asking how "
+                            "their experience was — e.g. \"hi, just checking in "
+                            "— how was your time on the <yacht>?\". This is a "
+                            "relationship / feedback message, NOT a sale: do NOT "
+                            "pitch anything, and do NOT ask for a review in "
+                            "this message. One short message.")
+                        _redis(["SET", "fbasked:" + cid, "1", "EX", "5184000"])
                 else:
                     directive = (
                         "This is a CONFIRMED, upcoming booking. Confirm boarding "

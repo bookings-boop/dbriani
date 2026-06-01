@@ -720,9 +720,31 @@ def render_review(scored, totals, mode="ondemand"):
             # (no auto-nudges to suppress on a confirmed booking) and
             # Disregard (already-won deals don't need closing).
             if label_key == "CONFIRMED":
+                # #6-auto-B: a completed booking (trip date passed) flips the
+                # draft button to "⭐ Ask for review" once the feedback check-in
+                # was sent (Redis fbasked marker). Upcoming bookings keep
+                # "💬 Draft message". Same nudge: callback — handle_draft_followup
+                # decides feedback-vs-review off the same marker.
+                from labels import _completed_card_label
+                _cf_passed = False
+                try:
+                    import datetime as _dt
+                    from labels import _parse_booking_date
+                    _td = _parse_booking_date(row.get("dates") or "")
+                    _cf_passed = bool(_td and (_dt.date.today() - _td).days >= 1)
+                except Exception:
+                    _cf_passed = False
+                _cf_asked = False
+                try:
+                    from db import _redis
+                    _a, _ = _redis(["GET", "fbasked:" + sid])
+                    _cf_asked = bool((_a or "").strip())
+                except Exception:
+                    _cf_asked = False
                 kb = [[
-                    {"text": "💬 Draft message", "callback_data": f"nudge:{sid}"},
-                    {"text": "ℹ️ Info",          "callback_data": f"inf:{sid}"},
+                    {"text": _completed_card_label(_cf_passed, _cf_asked),
+                     "callback_data": f"nudge:{sid}"},
+                    {"text": "ℹ️ Info", "callback_data": f"inf:{sid}"},
                 ]]
             else:
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is

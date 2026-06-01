@@ -106,6 +106,32 @@ def _is_feedback_due(trip_date, today, window_days=3):
     return 1 <= delta <= window_days
 
 
+def _completed_card_label(trip_passed, feedback_asked):
+    """#6-auto-B: draft-button verb for a CONFIRMED booking card. Upcoming →
+    logistics/upsell ('Draft message'); completed + no feedback sent yet →
+    'Draft feedback check-in'; completed + feedback already sent → 'Ask for
+    review' (operator taps it after a positive reply). Pure."""
+    if not trip_passed:
+        return "💬 Draft message"
+    if feedback_asked:
+        return "⭐ Ask for review"
+    return "💬 Draft feedback check-in"
+
+
+def _review_ask_directive(review_url):
+    """#6-auto-B: directive for a Google-review request after a positive
+    post-trip reply. Warm + low-pressure; includes the review link when set.
+    Pure; safe with no/blank url (no broken link)."""
+    url = (review_url or "").strip()
+    link = (f" Include this exact link at the end: {url}" if url else "")
+    return (
+        "This customer had a COMPLETED trip and just replied POSITIVELY. Draft "
+        "a short, warm message that genuinely THANKS them for the kind words "
+        "and gently asks if they'd mind leaving a quick Google review — no "
+        "pressure, only because they enjoyed it." + link
+        + " One short, sincere message — do not pitch anything else.")
+
+
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 
