@@ -1054,7 +1054,7 @@ def _lead_state_block(customer_id):
         f"Label: {lbl or '?'} · Importance: {isc or '?'}/100",
         f"Analyzer's read: {irea or '(none yet)'}",
     ]
-    _pd = _passed_date_note(dts)
+    _pd = _passed_date_note(dts, irea)
     if _pd:
         lines.append(_pd)
     lines += [
@@ -2223,7 +2223,7 @@ def build_quality_query(p):
                     "judged the lead lost / not-convertible / a vendor pitch, a "
                     "sales push is a rule_violation — score it LOW; never reward a "
                     "polished-but-wrong reply with a high score.")
-                _pdn = _passed_date_note(dts_)
+                _pdn = _passed_date_note(dts_, irea_)
                 if _pdn:
                     _blk += "\n" + _pdn
                 parts.append(_blk)
@@ -2406,17 +2406,25 @@ def _is_past_booking_date(dates_str):
     return (_dt.date.today() - d).days >= 1
 
 
-def _passed_date_note(dates):
+_PASSED_REASONING_MARKERS = (
+    "has passed", "already passed", "date passed", "date is in the past",
+    "is moot", "lead is moot", "passed date", "date has gone")
+
+
+def _passed_date_note(dates, reasoning=""):
     """Guidance for the DRAFTER and SCORER when the customer's booking date has
-    parseably PASSED (2026-06-01 Marimuthu incident: analyzer said 'ask for the
-    date', scorer flagged a correct graceful exit as 'ignores known date').
-    Tells both that a warm forward-looking graceful exit IS the correct reply
-    and must not be penalised. '' when the date is future/unparseable (never
-    guess). Pure (date parse only)."""
-    if not _is_past_booking_date(dates or ""):
+    PASSED. Fires when the date PARSES as past OR the analyzer's reasoning says
+    it passed — the reasoning path catches RELATIVE free-text dates the parser
+    can't resolve ('today'/'tomorrow'/'Friday night': 2026-06-01 Elise/Mustafa/
+    Marimuthu). Tells both that a warm forward-looking graceful exit IS the
+    correct reply and must NOT be penalised. '' otherwise. Pure."""
+    parsed_past = _is_past_booking_date(dates or "")
+    _rea = (reasoning or "").lower()
+    reasoning_past = any(m in _rea for m in _PASSED_REASONING_MARKERS)
+    if not (parsed_past or reasoning_past):
         return ""
     d = _parse_booking_date(dates or "")
-    when = d.isoformat() if d else (dates or "").strip()[:40]
+    when = d.isoformat() if d else "the requested date"
     return (
         f"⚠️ BOOKING DATE HAS PASSED ({when}): the date this customer asked "
         "about is in the PAST. The CORRECT reply is a warm, forward-looking "

@@ -37,6 +37,25 @@ def test_empty_no_note():
     assert _passed_date_note(None) == ""
 
 
+# --- reasoning-based trigger (relative dates the parser can't resolve) -------
+def test_reasoning_says_passed_fires_even_when_unparseable():
+    # "today" can't parse, but the analyzer's reasoning says it passed (Elise)
+    n = _passed_date_note(
+        "today",
+        "Booking date was 'today' 7 days ago — that date has passed. "
+        "Lead is moot; no future date discussed.").lower()
+    assert "graceful" in n and "passed" in n
+
+
+def test_unparseable_without_passed_reasoning_no_note():
+    assert _passed_date_note("today", "") == ""
+    assert _passed_date_note("today", "customer wants a quote this week") == ""
+
+
+def test_future_with_neutral_reasoning_no_note():
+    assert _passed_date_note("Dec 31 2099", "keen, wants pricing") == ""
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
