@@ -279,3 +279,55 @@ def _parse_booking_date(dates_str):
         return _dt.date(year, month, day)
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# R4 — no-draft fallback (2026-06-02)
+# ---------------------------------------------------------------------------
+# handle_draft_followup used to surface "Hermes returned no draft" when the
+# drafter (cloud gate + local Hermes) produced no usable message — most often
+# `messages` that are dicts MISSING the 'text' key. These two pure helpers let
+# it instead funnel that empty state into a fact-anchored placeholder the
+# operator can edit, flagged via `fallback_used` + a warning badge.
+
+def _join_draft_parts(messages):
+    """Extract text parts from Hermes' `messages` list, tolerant of the two
+    shapes it emits: bare strings, or dicts {"role","text"}. A dict missing
+    the 'text' key contributes an empty string (the caller filters empties),
+    which is the signal the drafter produced no usable message → R4 fallback.
+    Non-str/non-dict items are skipped. Pure; mirrors the inline extraction in
+    handle_draft_followup so the 'dict-without-text' path is unit-testable."""
+    parts = []
+    for m in (messages or []):
+        if isinstance(m, str):
+            parts.append(m.strip())
+        elif isinstance(m, dict):
+            parts.append((m.get("text") or "").strip())
+    return parts
+
+
+def _fact_anchored_fallback(name="", yacht="", date="", party=""):
+    """Last-resort follow-up draft when the drafter returns no usable message
+    (R4). Anchors on the facts we already know (yacht / date / party) in
+    Maria's warm lowercase default voice rather than a generic 'just checking
+    in'. NEVER returns empty — the point is that the operator always has a
+    fact-anchored placeholder to edit instead of seeing 'Hermes returned no
+    draft'. The caller sets `fallback_used` + a warning badge so this is never
+    mistaken for a normal high-quality draft. Pure / deterministic."""
+    nm = (name or "").strip()
+    first = nm.split(" ")[0] if nm else ""
+    yacht = (yacht or "").strip()
+    date = (date or "").strip()
+    party = str(party or "").strip()
+    greet = f"hi {first}" if first else "hi there"
+    anchor = ""
+    if yacht:
+        anchor += f" about the {yacht}"
+    if date:
+        anchor += f" for {date}"
+    if party and party not in ("0", "0.0"):
+        anchor += f" for {party} guests"
+    if not anchor:
+        anchor = " on your enquiry"
+    return (f"{greet}, just following up{anchor} — happy to help you lock it "
+            f"in or answer any questions whenever suits. let me know!")

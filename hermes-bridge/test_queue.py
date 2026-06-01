@@ -14,7 +14,6 @@ All test draft ids start with `__test__` so they're easy to clean up.
 """
 import json
 import os
-import shutil
 import sys
 import time
 
@@ -22,13 +21,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
 
 
-# Environment guard — this suite exercises the LIVE Redis on the box
-# via subprocess(redis-cli). On a laptop without redis-cli installed,
-# every test would raise FileNotFoundError and run_tests.py would
-# report 7 spurious failures. Skip cleanly with a clear message so
-# the rest of the local test suite stays green.
-if not shutil.which("redis-cli"):
-    print("SKIP test_queue.py — redis-cli not on PATH "
+# Environment guard — this suite exercises the LIVE Redis, which the bridge
+# reaches via `docker exec <redis container> redis-cli` (db.py._redis), NOT a
+# host redis-cli binary. Probe the REAL transport (a PING) rather than
+# shutil.which("redis-cli"): the box has no host redis-cli, so the old which()
+# guard skipped this suite on the box even though _redis works fine. Skips
+# cleanly where redis isn't reachable (e.g. a laptop without the docker stack).
+try:
+    _pong, _ = server._redis(["PING"])
+except Exception:  # pragma: no cover
+    _pong = ""
+if "PONG" not in (_pong or "").upper():
+    print("SKIP test_queue.py — redis not reachable via _redis "
           "(run on the box: ssh dubriani-ec2 "
           "'python3 ~/hermes-bridge/test_queue.py')")
     sys.exit(0)
@@ -137,7 +141,7 @@ def test_update_missing_draft():
 
 
 def test_latest_for_customer_picks_newest():
-    print("\n--- latest-for-customer picks newest by score ---")
+    print("\n--- latest-for-customer + auto-supersede semantics ---")
     cid = TEST_PREFIX + "cust"
     did_old = TEST_PREFIX + "old"
     did_new = TEST_PREFIX + "new"
@@ -145,16 +149,33 @@ def test_latest_for_customer_picks_newest():
     server._draft_save({"id": did_old, "customer_phone": cid,
                         "status": "pending"})
     time.sleep(0.05)  # ensure a later timestamp
+    # Saving a newer pending draft AUTO-SUPERSEDES the older one
+    # (server._draft_save, Luke double-drafts fix 2026-05-27), so a
+    # customer never has two pending drafts at once. The old test asserted
+    # a "next-newest pending" that auto-supersede made impossible — updated
+    # 2026-06-02 to encode the real (correct) behavior instead.
     server._draft_save({"id": did_new, "customer_phone": cid,
                         "status": "pending"})
+    old_now, _ = server._draft_get(did_old)
+    check("older pending auto-superseded on newer save",
+          old_now and old_now.get("status") == "superseded",
+          f"got={old_now.get('status') if old_now else None}")
     d, err = server._draft_latest_for_customer(cid)
     check("returned the newest draft id",
           d and d.get("id") == did_new and err is None,
           f"got={d.get('id') if d else None}  err={err}")
-    # filtered by status
+    d, _ = server._draft_latest_for_customer(cid, want_status="pending")
+    check("newest IS the only pending draft",
+          d and d.get("id") == did_new,
+          f"got={d.get('id') if d else None}")
+    # Once the sole pending draft is sent, NO pending remains (the older one
+    # is superseded, not pending) → None is correct.
     server._draft_update(did_new, {"status": "sent"})
     d, _ = server._draft_latest_for_customer(cid, want_status="pending")
-    check("filtered by status returns next-newest",
+    check("no pending left after sending the newest → None",
+          d is None, f"got={d.get('id') if d else None}")
+    d, _ = server._draft_latest_for_customer(cid, want_status="superseded")
+    check("superseded filter still finds the older draft",
           d and d.get("id") == did_old,
           f"got={d.get('id') if d else None}")
     d, _ = server._draft_latest_for_customer(cid, want_status="skipped")

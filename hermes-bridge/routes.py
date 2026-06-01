@@ -2903,6 +2903,7 @@ def handle_draft_followup(payload, send):
             override=(operator_hint if operator_hint else ""))
         out, err, elapsed = "", "", 0
         _gate_score, _gate_flags = None, []
+        _degraded = False
         if _best and _best.get("messages"):
             parsed = {"messages": _best["messages"],
                       "notes_for_zayn": _best.get("notes", "")}
@@ -2915,9 +2916,14 @@ def handle_draft_followup(payload, send):
             rc, out, err, elapsed = run_hermes(build_query(inner))
             parsed, _ = extract_json(out) if rc == 0 else ({}, "")
             if not (isinstance(parsed, dict) and parsed.get("messages")):
-                send(200, {"ok": False, "degraded": True, "error": "no draft",
-                           "draft_text": "", "label": label})
-                return
+                # R4 (2026-06-02): gate AND local Hermes both produced nothing.
+                # Don't dead-end with "no draft" — fall through to the
+                # fact-anchored fallback below so the operator still gets an
+                # editable, anchored placeholder (flagged degraded +
+                # fallback_used), never an empty "Hermes returned no draft".
+                _degraded = True
+                if not isinstance(parsed, dict):
+                    parsed = {}
         draft_text = ""
         notes_for_zayn = ""
         if isinstance(parsed, dict):
@@ -2927,12 +2933,8 @@ def handle_draft_followup(payload, send):
             # strings, not dicts. Be tolerant of both.
             msgs = parsed.get("messages") or []
             if msgs and isinstance(msgs, list):
-                parts = []
-                for m in msgs:
-                    if isinstance(m, str):
-                        parts.append(m.strip())
-                    elif isinstance(m, dict):
-                        parts.append((m.get("text") or "").strip())
+                from labels import _join_draft_parts
+                parts = _join_draft_parts(msgs)
                 # Deterministic guard against hallucinated payment URLs —
                 # the system prompt forbids the LLM from pasting
                 # `pay.nomodapp.com`, but it still occasionally does it,
@@ -2954,10 +2956,32 @@ def handle_draft_followup(payload, send):
                         log(f"draft_followup payment-url scrubbed "
                             f"(text-shape) cid={cid!r}")
                     draft_text = cleaned_one[0] if cleaned_one else ""
+        fallback_used = False
         if not draft_text:
             log(f"draft_followup empty draft — parsed_keys="
                 f"{list(parsed.keys()) if isinstance(parsed, dict) else None}"
                 f"  raw[:200]={(out or '')[:200]!r}")
+            # R4: the drafter returned no usable message (commonly textless
+            # message dicts). Build a fact-anchored placeholder from the facts
+            # we already know so the operator always has an editable draft,
+            # rather than "Hermes returned no draft".
+            from labels import _fact_anchored_fallback
+            _pf = ""
+            try:
+                _pfo, _ = _psql(
+                    "SELECT COALESCE(party_size,'') FROM customer_facts WHERE "
+                    "customer_id = " + _lit(cid) + " AND merged_into IS NULL")
+                _pf = ((_pfo or "").strip().splitlines() or [""])[0].strip()
+            except Exception:
+                _pf = ""
+            draft_text = _fact_anchored_fallback(
+                name, (row or {}).get("yachts", ""),
+                (row or {}).get("dates", ""), _pf)
+            fallback_used = bool(draft_text)
+            _degraded = True
+            log(f"draft_followup R4 fallback cid={cid!r} len={len(draft_text)} "
+                f"facts=yacht:{bool((row or {}).get('yachts'))},"
+                f"date:{bool((row or {}).get('dates'))},party:{bool(_pf)}")
         # Mark the nudge so the report damps + reengage_attempts increments.
         try:
             upsert_conversation_state(cid, "nudge_drafted")
@@ -2978,12 +3002,25 @@ def handle_draft_followup(payload, send):
                     {"score": _gate_score, "flags": _gate_flags})
             except Exception:
                 quality_badge = ""
+        if fallback_used:
+            # R4: warn inline — piggybacks the badge n8n already prepends to
+            # every nudge card (zero n8n change) so the operator knows this is
+            # a placeholder, not a scored draft.
+            quality_badge = (
+                "⚠️ Auto-fallback draft — the drafter returned no message, so "
+                "this is a fact-anchored placeholder. Review/edit before sending.")
+            if not notes_for_zayn:
+                notes_for_zayn = (
+                    "Auto-fallback: the drafter returned no usable message; this "
+                    "placeholder is anchored to the known yacht/date/party.")
         send(200, {
             "ok": True, "customer_id": cid, "label": label,
             "draft_text": draft_text,
             "notes_for_zayn": notes_for_zayn,
             "customer_name": name,
             "quality_badge": quality_badge,
+            "fallback_used": fallback_used,
+            "degraded": _degraded,
             "approval_card_header": (
                 f"🔔 PROACTIVE FOLLOW-UP — {label.lower()}"),
             "session_id": extract_session(out, err),
