@@ -422,6 +422,9 @@ def render_review(scored, totals, mode="ondemand"):
         "CONFIRMED":       {"items": [], "cap": 20,
                             "header": "✅ CONFIRMED — booked / paid",
                             "emoji": "✅"},
+        "NOT_A_CUSTOMER":  {"items": [], "cap": 12,
+                            "header": "💤 NO ACTIVE SALE — supplier / spam / completed / closed (analyzer scored 0)",
+                            "emoji": "💤"},
     }
     pause_tail = []
     seen_ids = []
@@ -465,6 +468,13 @@ def render_review(scored, totals, mode="ondemand"):
         # reply). It stays in the CONFIRMED section instead.
         if _owe and not _imp_zero and label != "CONFIRMED":
             sections["AWAITING_REPLY"]["items"].append((score, row))
+        elif _imp_zero and label != "CONFIRMED":
+            # operator 2026-06-01: a fruit supplier (Alma) + ~28 other analyzer-
+            # scored-0 leads (suppliers, spam, completed/closed trips) cluttered
+            # the active pipeline as if they were live deals. Group them in a
+            # clearly-labelled bucket showing the analyzer's actual reason.
+            # CONFIRMED bookings stay in CONFIRMED (a real booking, not "no sale").
+            sections["NOT_A_CUSTOMER"]["items"].append((score, row))
         else:
             sections[label]["items"].append((score, row))
         seen_ids.append(row["customer_id"])
@@ -521,7 +531,8 @@ def render_review(scored, totals, mode="ondemand"):
     per_lead_messages = []
 
     for label_key in ("AWAITING_REPLY", "WAITING_FOR_PAYMENT", "HOT",
-                      "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED"):
+                      "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED",
+                      "NOT_A_CUSTOMER"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -542,7 +553,11 @@ def render_review(scored, totals, mode="ondemand"):
             # show the reasoning instead, or just the score alone.
             imp = row.get("importance_score")
             imp_bits = ""
-            if isinstance(imp, int):
+            if label_key == "NOT_A_CUSTOMER":
+                _rea = (row.get("importance_reasoning") or "").strip()
+                imp_bits = "\n↳ " + (_rea[:160] if _rea
+                                     else "analyzer scored 0 — no open sale")
+            elif isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                 if label_key == "CONFIRMED":
                     # Booked & paid — any cached suggested_action/reasoning
@@ -748,6 +763,8 @@ def _why_line(row, label_key):
             notes.append("booked / paid — share boarding details or upsell")
         elif label_key == "NEW":
             notes.append("new conversation")
+        elif label_key == "NOT_A_CUSTOMER":
+            notes.append("no active sale")
         else:
             notes.append(label_key.lower().replace("_", " "))
     return " · ".join(notes)
