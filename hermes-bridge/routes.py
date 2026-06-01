@@ -1885,9 +1885,29 @@ def handle_info(payload, send):
             if buf:
                 chunks.append("\n".join(buf))
 
+        # /info pagination (2026-06-02): n8n only sends telegram_text (ONE
+        # message), so a dossier longer than one chunk was silently truncated
+        # to the FIRST chunk — the rest of telegram_chunks was dropped. Fix
+        # bridge-side (no n8n change, order-preserving): self-post the overflow
+        # chunks[:-1] in order via our own Telegram, then return the LAST chunk
+        # as telegram_text for n8n to send — so the operator sees
+        # chunk0..chunkN in order. Best-effort: a Markdown parse error retries
+        # plain so the chunk still arrives; never blocks the /info response.
+        if len(chunks) > 1:
+            from server import _tg_post, DEFAULT_ADMIN_CHAT
+            for c in chunks[:-1]:
+                try:
+                    r, e = _tg_post("sendMessage", {
+                        "chat_id": DEFAULT_ADMIN_CHAT, "text": c,
+                        "parse_mode": "Markdown"})
+                    if e or (isinstance(r, dict) and r.get("ok") is False):
+                        _tg_post("sendMessage", {
+                            "chat_id": DEFAULT_ADMIN_CHAT, "text": c})
+                except Exception as _ce:
+                    log("info chunk post err:", repr(_ce))
         send(200, {
             "ok": True, "customer_id": cid,
-            "telegram_text": chunks[0] if chunks else full_text,
+            "telegram_text": chunks[-1] if chunks else full_text,
             "telegram_chunks": chunks,
         })
     except Exception as e:
