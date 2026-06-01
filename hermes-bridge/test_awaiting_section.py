@@ -160,6 +160,65 @@ def test_no_sale_reason_default_when_no_reasoning():
     assert _no_sale_reason(row) == "analyzer scored 0 — no open sale"
 
 
+def test_no_sale_reason_date_passed_reengaged():
+    # #5 graceful close: we SENT a re-engage (replied more recently than the
+    # customer's last message) → show the re-engaged / gracefully-closed state.
+    row = _r(last_analysis_signal="date_passed",
+             last_customer_message_at_seconds=900000,   # customer ~10d silent
+             last_operator_reply_at_seconds=3600)       # we replied 1h ago
+    r = _no_sale_reason(row).lower()
+    assert "re-engaged" in r and "graceful" in r
+
+
+def test_no_sale_reason_date_passed_not_yet_reengaged():
+    # date passed but we haven't reached out yet → plain "date passed"
+    row = _r(last_analysis_signal="date_passed",
+             last_customer_message_at_seconds=900000,
+             last_operator_reply_at_seconds=None)
+    assert _no_sale_reason(row) == "booking date has already passed"
+
+
+# --- parse-based passed-date routing (signal-independent, 2026-06-01) --------
+# The analyzer signal goes stale (sticky_hot/sticky_cold) so passed-date leads
+# vanish into the COLD overflow. Route off the PARSED booking date instead.
+def test_route_passed_date_not_owe_to_not_a_customer():
+    # COLD passed-date lead we've already replied to (graceful exit sent) →
+    # NO ACTIVE SALE, despite the stale sticky_hot signal + nonzero score.
+    row = _r("COLD", importance_score=52, dates="Jan 1 2020",
+             last_customer_message_at_seconds=900000,
+             last_operator_reply_at_seconds=3600,
+             last_analysis_signal="sticky_hot")
+    assert _awaiting_section_for(row, 800) == "NOT_A_CUSTOMER"
+
+
+def test_route_passed_date_but_owed_stays_awaiting():
+    # passed date BUT the customer just messaged (active) → still AWAITING
+    row = _r("HOT", importance_score=60, dates="Jan 1 2020",
+             last_customer_message_at_seconds=1800,
+             last_operator_reply_at_seconds=7200,
+             last_analysis_signal="sticky_hot")
+    assert _awaiting_section_for(row, 800) == "AWAITING_REPLY"
+
+
+def test_route_future_date_unaffected():
+    # future date, not owed → render in its own tier (unchanged)
+    row = _r("HOT", importance_score=60, dates="Dec 31 2099",
+             last_customer_message_at_seconds=7200,
+             last_operator_reply_at_seconds=1800,
+             last_analysis_signal="sticky_hot")
+    assert _awaiting_section_for(row, 800) == ""
+
+
+def test_no_sale_reason_parsed_passed_date_reengaged():
+    # parsed past date + we replied → graceful-exit reason even with no
+    # date_passed signal (the Marimuthu case)
+    row = _r("COLD", dates="Jan 1 2020",
+             last_customer_message_at_seconds=900000,
+             last_operator_reply_at_seconds=3600,
+             last_analysis_signal="sticky_hot")
+    assert "graceful" in _no_sale_reason(row).lower()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

@@ -100,6 +100,22 @@ def _is_uae_working_hours(now_epoch=None):
 _TERMINAL_SIGNALS = ("confirmed_terminal", "date_passed")
 
 
+def _booking_date_passed(row):
+    """True if the lead's stored booking date PARSES to a past date — a
+    reliable, signal-INDEPENDENT passed-date check. The analyzer's
+    last_analysis_signal goes stale (sticky_hot/sticky_cold) on passed-date
+    leads, so routing/display can't trust it; the parsed date is durable
+    (2026-06-01: Marimuthu et al. vanished into the COLD overflow). Pure-ish
+    (date parse only); None/parse-fail safe."""
+    try:
+        import datetime as _dt
+        from labels import _parse_booking_date
+        d = _parse_booking_date(row.get("dates") or "")
+        return bool(d and (_dt.date.today() - d).days >= 1)
+    except Exception:
+        return False
+
+
 def _awaiting_section_for(row, score):
     """Route a (non-paused, valid-label) lead to a /review section.
 
@@ -132,6 +148,12 @@ def _awaiting_section_for(row, score):
     _sig_fresh = (isinstance(_anz, (int, float))
                   and isinstance(_cs, (int, float)) and _anz <= _cs)
     _terminal = (_sig in _TERMINAL_SIGNALS) and _sig_fresh
+    # Booking date PASSED + we're not actively owed a reply → graceful-exit
+    # bucket (NO ACTIVE SALE), regardless of a stale signal / not-yet-zeroed
+    # score. If they messaged after the date passed (owe) they're active —
+    # fall through to AWAITING so we draft them a graceful reply first.
+    if not _owe and _booking_date_passed(row):
+        return "NOT_A_CUSTOMER"
     if _owe and not _imp_zero and not _terminal:
         return "AWAITING_REPLY"
     if _imp_zero or (_owe and _terminal):
@@ -152,6 +174,23 @@ def _no_sale_reason(row):
     terminal signal (clearest, freshest), then its reasoning, then a
     score-0 fallback. Pure."""
     sig = (row.get("last_analysis_signal") or "").strip()
+    # Detect a passed date from the analyzer signal OR (more reliably) the
+    # actual parsed booking date — the signal goes stale on these leads.
+    if sig == "date_passed" or _booking_date_passed(row):
+        # #5 graceful close (operator 2026-06-01): once we've SENT a re-engage
+        # check-in — i.e. we replied at/after the customer's last message and
+        # they haven't come back — show the graceful-exit state so the operator
+        # sees the conversation was closed gracefully (and can Disregard it),
+        # instead of a bare "date passed".
+        _cs = row.get("last_customer_message_at_seconds")
+        _rs = row.get("last_operator_reply_at_seconds")
+        _reengaged = isinstance(_rs, (int, float)) and (
+            not isinstance(_cs, (int, float)) or _rs <= _cs)
+        if _reengaged:
+            return ("booking date passed → re-engaged, graceful exit sent "
+                    "(reminded them we're here for a future date) · safe to "
+                    "close (🛑 Disregard) or await a reply")
+        return _NO_SALE_REASON_BY_SIGNAL["date_passed"]
     if sig in _NO_SALE_REASON_BY_SIGNAL:
         return _NO_SALE_REASON_BY_SIGNAL[sig]
     rea = (row.get("importance_reasoning") or "").strip()
