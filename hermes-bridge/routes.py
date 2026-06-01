@@ -2546,6 +2546,20 @@ def handle_draft_followup(payload, send):
                 " If their most recent message contains a question or request "
                 "you have not answered yet, ANSWER it directly and "
                 "specifically first — do not deflect to a generic check-in.")
+            # operator 2026-06-01 ("always draft"): the operator TAPPED Draft
+            # reply, so ALWAYS produce a message — never notes-only. Think first,
+            # then write, and put the reasoning in notes so the operator and the
+            # edit-feedback loop can see WHY this reply was chosen.
+            directive += (
+                " ALWAYS produce the draft now: you MUST output at least one "
+                "customer-facing message in `messages`. The operator explicitly "
+                "asked you to draft a reply, so NEVER return notes-only, decline, "
+                "or say 'no nudge needed' — even if you think now isn't ideal, "
+                "give the best possible reply and note your caution. Think "
+                "through the best response first, THEN write it. In "
+                "`notes_for_zayn`, briefly explain WHY this is the best reply at "
+                "this moment (your reasoning, and any concern the operator "
+                "should know).")
         # Operator-directed override — production bug 2026-05-28:
         # "draft a nudge to Madawi and tell him we can't call now,
         # sunday before 4 or after 8pm — what's convenient?" produced
