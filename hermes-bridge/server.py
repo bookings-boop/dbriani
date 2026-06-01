@@ -1037,27 +1037,34 @@ def _lead_state_block(customer_id):
     row, _ = _psql(
         "SELECT COALESCE(label,'') || '~~' || "
         "COALESCE(importance_score::text,'') || '~~' || "
-        "COALESCE(importance_reasoning,'') FROM customer_facts "
+        "COALESCE(importance_reasoning,'') || '~~' || "
+        "COALESCE(dates,'') FROM customer_facts "
         "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
     row = (row or "").strip()
     if not row:
         return ""
-    lbl, isc, irea = (row.splitlines()[0].split("~~") + ["", "", ""])[:3]
+    lbl, isc, irea, dts = (row.splitlines()[0].split("~~") + ["", "", "", ""])[:4]
     if not (irea or isc or lbl):
         return ""
     bar = "=" * 60
-    return "\n".join([
+    lines = [
         bar,
         "## 🎯 THIS LEAD'S CURRENT STATE — your reply MUST fit it",
         bar,
         f"Label: {lbl or '?'} · Importance: {isc or '?'}/100",
         f"Analyzer's read: {irea or '(none yet)'}",
+    ]
+    _pd = _passed_date_note(dts)
+    if _pd:
+        lines.append(_pd)
+    lines += [
         "",
         "Write a reply APPROPRIATE for this state. If the analyzer judged this "
         "lead lost, not-convertible, a vendor / B2B pitch, or spam, do NOT write "
         "a sales push or chase a booking — that is a WRONG draft and will be "
         "rejected. Match the reply to where this lead actually is.",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def feedback_apply_cap(table, cap, scope=None, scope_value=None, customer_id=None):
@@ -2200,13 +2207,15 @@ def build_quality_query(p):
         irow, _ie = _psql(
             "SELECT COALESCE(label,'') || '~~' || "
             "COALESCE(importance_score::text,'') || '~~' || "
-            "COALESCE(importance_reasoning,'') FROM customer_facts "
+            "COALESCE(importance_reasoning,'') || '~~' || "
+            "COALESCE(dates,'') FROM customer_facts "
             "WHERE customer_id = " + _lit(cid_q) + " AND merged_into IS NULL")
         irow = (irow or "").strip()
         if irow:
-            lbl_, isc_, irea_ = (irow.splitlines()[0].split("~~") + ["", "", ""])[:3]
+            lbl_, isc_, irea_, dts_ = (
+                irow.splitlines()[0].split("~~") + ["", "", "", ""])[:4]
             if irea_ or isc_:
-                parts.append(
+                _blk = (
                     "\n--- LEAD ANALYSIS (the draft must FIT this) ---\n"
                     f"Label: {lbl_ or '?'} · Importance: {isc_ or '?'}/100\n"
                     f"Analyzer verdict: {irea_ or '(none)'}\n"
@@ -2214,6 +2223,10 @@ def build_quality_query(p):
                     "judged the lead lost / not-convertible / a vendor pitch, a "
                     "sales push is a rule_violation — score it LOW; never reward a "
                     "polished-but-wrong reply with a high score.")
+                _pdn = _passed_date_note(dts_)
+                if _pdn:
+                    _blk += "\n" + _pdn
+                parts.append(_blk)
     cur = p.get("current_draft")
     if isinstance(cur, list):
         cur = "\n\n".join(str(m) for m in cur)
@@ -2391,6 +2404,27 @@ def _is_past_booking_date(dates_str):
     if d is None:
         return False
     return (_dt.date.today() - d).days >= 1
+
+
+def _passed_date_note(dates):
+    """Guidance for the DRAFTER and SCORER when the customer's booking date has
+    parseably PASSED (2026-06-01 Marimuthu incident: analyzer said 'ask for the
+    date', scorer flagged a correct graceful exit as 'ignores known date').
+    Tells both that a warm forward-looking graceful exit IS the correct reply
+    and must not be penalised. '' when the date is future/unparseable (never
+    guess). Pure (date parse only)."""
+    if not _is_past_booking_date(dates or ""):
+        return ""
+    d = _parse_booking_date(dates or "")
+    when = d.isoformat() if d else (dates or "").strip()[:40]
+    return (
+        f"⚠️ BOOKING DATE HAS PASSED ({when}): the date this customer asked "
+        "about is in the PAST. The CORRECT reply is a warm, forward-looking "
+        "graceful exit — acknowledge it has gone by and invite a FUTURE "
+        "booking. Do NOT ask them to confirm/plan that past date or ask 'what "
+        "date did you have in mind?' as if it's upcoming. A draft that "
+        "gracefully pivots to the future is CORRECT and COMPLETE — do NOT flag "
+        "it as ignoring or missing the (already-passed) date.")
 
 
 def compute_label(latest_message, facts):
