@@ -36,6 +36,57 @@ from db import _psql, _lit, _redis  # noqa: F401
 from util import log  # noqa: F401
 
 
+# --- on-demand re-analysis queue (R2, 2026-06-01) ---------------------------
+# A fresh customer inbound extracts facts but does NOT re-analyze (only the
+# hourly sweep writes verdict/score) → cards show stale facts + "not analyzed"
+# until the next hourly window. _enqueue_reanalyze() queues the lead on each
+# inbound; the queue is DRAINED by /pipeline-analyze {source:"reanalyze"}
+# (reuses the sweep's SHARED lock + per-lead analysis + timeout handling, so
+# it can never run concurrently with the hourly sweep on the 2-vCPU box).
+# INERT until an n8n cron POSTs that endpoint — enqueue is cheap Redis only.
+_REANALYZE_QUEUE = "hermes:reanalyze:queue"
+_REANALYZE_QUEUED = "hermes:reanalyze:queued:"   # + cid (dedup marker)
+
+
+def _enqueue_reanalyze(cid):
+    """Queue a customer for on-demand re-analysis after a fresh inbound.
+    Deduped (SET NX, 10 min) so repeated messages don't pile up; bounded
+    (LTRIM) so the list can't grow unbounded if the cron is disabled.
+    Fail-silent — never block the inbound/draft path on Redis."""
+    cid = (cid or "").strip()
+    if not cid:
+        return
+    try:
+        added, _ = _redis(["SET", _REANALYZE_QUEUED + cid, "1", "NX", "EX", "600"])
+        if (added or "").strip().upper() != "OK":
+            return  # already queued in the last 10 min
+        _redis(["RPUSH", _REANALYZE_QUEUE, cid])
+        _redis(["LTRIM", _REANALYZE_QUEUE, "-500", "-1"])  # safety bound
+    except Exception as e:
+        log("enqueue_reanalyze err:", repr(e))
+
+
+def _drain_reanalyze_queue(limit):
+    """Pop up to `limit` UNIQUE cids off the reanalyze queue and clear their
+    dedup markers. Returns a list (possibly empty). Fail-safe."""
+    try:
+        out, _ = _redis(["LPOP", _REANALYZE_QUEUE, str(int(limit))])
+    except Exception as e:
+        log("drain_reanalyze err:", repr(e))
+        return []
+    cids, seen = [], set()
+    for ln in (out or "").splitlines():
+        c = ln.strip()
+        if c and c not in seen:
+            seen.add(c)
+            cids.append(c)
+            try:
+                _redis(["DEL", _REANALYZE_QUEUED + c])
+            except Exception:
+                pass
+    return cids
+
+
 def resolve_target(payload):
     """Return (customer_id, error_text). On success: ('cid…@lid', None).
     On any miss: ('', '⚠️ ...'). Handles either:
@@ -543,6 +594,11 @@ def handle_customer_facts(payload, send):
             else ((cached or {}).get("message_count", 0) + 1)
         hdr = build_customer_header({**merged, "message_count": mc})
         addendum = _build_behavioral_addendum(cid)
+        if do_extract:
+            # R2: a fresh inbound that carried facts — queue a re-analysis so
+            # the verdict/score + card facts refresh promptly (drained by the
+            # reanalyze cron), instead of waiting for the next hourly sweep.
+            _enqueue_reanalyze(cid)
         log(f"customer-facts cid={cid!r} extract={do_extract} msg#{mc} "
             f"behavioral_rules_attached={'yes' if addendum else 'no'}")
         send(200, {"ok": True, "extracted": bool(do_extract),
@@ -3027,8 +3083,14 @@ def handle_pipeline_analyze(payload, send):
         waha_fetch_history,
     )
     force = bool(payload.get("force"))
-    cap = int(payload.get("cap") or PIPELINE_ANALYZE_CAP)
-    if not force and not _is_uae_working_hours():
+    source = (payload.get("source") or "").strip()
+    reanalyze = source == "reanalyze"   # R2: drain the on-demand inbound queue
+    # reanalyze runs ANYTIME (a fresh inbound at night must still refresh) and
+    # uses a smaller cap to bound per-run load on the 2-vCPU box.
+    cap = int(payload.get("cap")
+              or (int(os.environ.get("REANALYZE_CAP", "12")) if reanalyze
+                  else PIPELINE_ANALYZE_CAP))
+    if not force and not reanalyze and not _is_uae_working_hours():
         send(200, {
             "ok": True, "skipped": True,
             "skipped_reason": "outside_uae_working_hours",
@@ -3048,28 +3110,39 @@ def handle_pipeline_analyze(payload, send):
             "telegram_text": ""})
         return
     try:
-        # Pull leads worth scoring. CONFIRMED is included because
-        # post-confirm chats actively change (yacht upgrades, addons,
-        # boarding details) — operator wants Hermes' next-action
-        # suggestion to reflect chat state ('addons', 'send
-        # boarding pack', 'thank-you nudge') rather than the generic
-        # CONFIRMED guidance. PAUSED_*/DISREGARDED stay excluded —
-        # they're terminal/dormant.
-        sql = (
-            "SELECT customer_id FROM customer_facts WHERE label IN ("
-            "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
-            "'WAITING_FOR_PAYMENT','CONFIRMED') "
-            "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
-            f"updated_at DESC LIMIT {int(cap)}"
-        )
-        out, err = _psql(sql)
-        if err:
-            send(200, {"ok": False, "error": str(err),
-                             "telegram_text":
-                             f"⚠️ Pipeline analyze DB error: {err}"})
-            return
-        cids = [ln.strip() for ln in (out or "").splitlines()
-                if ln.strip()]
+        if reanalyze:
+            # R2: analyze EXACTLY the leads queued by recent inbounds, drained
+            # under the shared lock + capped. Empty queue → nothing to do
+            # (finally still releases the lock).
+            cids = _drain_reanalyze_queue(cap)
+            if not cids:
+                send(200, {"ok": True, "skipped": True,
+                                 "skipped_reason": "reanalyze_queue_empty",
+                                 "telegram_text": ""})
+                return
+        else:
+            # Pull leads worth scoring. CONFIRMED is included because
+            # post-confirm chats actively change (yacht upgrades, addons,
+            # boarding details) — operator wants Hermes' next-action
+            # suggestion to reflect chat state ('addons', 'send
+            # boarding pack', 'thank-you nudge') rather than the generic
+            # CONFIRMED guidance. PAUSED_*/DISREGARDED stay excluded —
+            # they're terminal/dormant.
+            sql = (
+                "SELECT customer_id FROM customer_facts WHERE label IN ("
+                "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
+                "'WAITING_FOR_PAYMENT','CONFIRMED') "
+                "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
+                f"updated_at DESC LIMIT {int(cap)}"
+            )
+            out, err = _psql(sql)
+            if err:
+                send(200, {"ok": False, "error": str(err),
+                                 "telegram_text":
+                                 f"⚠️ Pipeline analyze DB error: {err}"})
+                return
+            cids = [ln.strip() for ln in (out or "").splitlines()
+                    if ln.strip()]
 
         def _analyze_one(cid):
             """Per-customer pipeline: refresh facts, score, persist.
