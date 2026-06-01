@@ -250,7 +250,11 @@ def handle_queue(payload, send):
         # ask-before-guess question? (set by /ask-operator). Returns the
         # stored {customer_id, question, ...} so the operator's reply is
         # routed to /answer-info instead of being treated as a draft edit.
-        from db import _redis
+        # NOTE: _redis is the module-level import (routes.py top). Do NOT
+        # add a local `from db import _redis` here — a function-local import
+        # shadows _redis for ALL of handle_queue and makes the claim-send
+        # path UnboundLocalError on every send (2026-06-01 incident: literal
+        # `false` sent to customers + dup draft cards). See test_claim_send.py.
         chat = str(payload.get("chat_id") or "").strip()
         out, _e = _redis(["GET", "hermes:awaiting_info:" + chat])
         out = (out or "").strip()
