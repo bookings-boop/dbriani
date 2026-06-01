@@ -2490,6 +2490,33 @@ def handle_draft_followup(payload, send):
                                     "lock it in. ≤ 2 sentences."),
             }
             directive = directive_map.get(label, directive_map["WARM"])
+            if label == "CONFIRMED":
+                # Post-booking message (#6, operator 2026-06-01). If the analyzer
+                # scored this 0 the trip is DONE (no open sale) → a warm post-trip
+                # FEEDBACK check-in. Otherwise it's an upcoming/active booking →
+                # confirm logistics / offer an upsell.
+                _isc_out, _ = _psql(
+                    "SELECT COALESCE(importance_score, -1) FROM customer_facts "
+                    "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
+                try:
+                    _isc = int((_isc_out or "-1").strip().splitlines()[0])
+                except (ValueError, IndexError):
+                    _isc = -1
+                if _isc == 0:
+                    directive = (
+                        "This customer's booking/trip is COMPLETED. Draft a "
+                        "short, warm, genuine post-trip CHECK-IN asking how their "
+                        "experience was — e.g. \"hi, just checking in — how was "
+                        "your time on the <yacht>?\". This is a relationship / "
+                        "feedback message, NOT a sale: do NOT pitch anything, and "
+                        "do NOT ask for a review in this message. One short "
+                        "message. (If they reply that they enjoyed it, the "
+                        "operator will follow up to ask for a Google review.)")
+                else:
+                    directive = (
+                        "This is a CONFIRMED, upcoming booking. Confirm boarding "
+                        "or logistics, or offer one relevant add-on (extra hour, "
+                        "catering) — warm and brief. ≤ 2 sentences.")
             # Owe-reply override (operator 2026-06-01): if the customer's last
             # message is UNANSWERED, this is a direct REPLY, not a proactive
             # nudge. Without this, the "proactive follow-up" framing combined
@@ -2611,14 +2638,22 @@ def handle_draft_followup(payload, send):
             cid, _sys, threshold=8, max_attempts=3,
             override=(operator_hint if operator_hint else ""))
         out, err, elapsed = "", "", 0
-        if not _best or not _best.get("messages"):
-            log(f"draft_followup gate empty cid={cid!r}")
-            send(200, {"ok": False, "degraded": True, "error": "no draft",
-                       "draft_text": "", "label": label})
-            return
-        parsed = {"messages": _best["messages"],
-                  "notes_for_zayn": _best.get("notes", "")}
-        _gate_score, _gate_flags = _best.get("score"), (_best.get("flags") or [])
+        _gate_score, _gate_flags = None, []
+        if _best and _best.get("messages"):
+            parsed = {"messages": _best["messages"],
+                      "notes_for_zayn": _best.get("notes", "")}
+            _gate_score, _gate_flags = _best.get("score"), (_best.get("flags") or [])
+        else:
+            # Anthropic gate unavailable (e.g. out of credits / 400) — fall back
+            # to the local Hermes draft so the button still works (slower). The
+            # button is never fully dead just because the cloud path is down.
+            log(f"draft_followup gate empty cid={cid!r} — Hermes fallback")
+            rc, out, err, elapsed = run_hermes(build_query(inner))
+            parsed, _ = extract_json(out) if rc == 0 else ({}, "")
+            if not (isinstance(parsed, dict) and parsed.get("messages")):
+                send(200, {"ok": False, "degraded": True, "error": "no draft",
+                           "draft_text": "", "label": label})
+                return
         draft_text = ""
         notes_for_zayn = ""
         if isinstance(parsed, dict):
