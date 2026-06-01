@@ -2594,16 +2594,31 @@ def handle_draft_followup(payload, send):
             "history": history,
             "session_id": payload.get("session_id"),
         }
-        query = build_query(inner)
-        rc, out, err, elapsed = run_hermes(query)
-        if rc != 0:
-            log(f"draft_followup hermes rc={rc} err={err[:200]!r}")
-            send(200, {"ok": False, "degraded": True,
-                             "error": f"hermes rc={rc}",
-                             "draft_text": "", "label": label})
+        # FAST + GATED (operator 2026-06-01): the slow part was the local-Hermes
+        # draft. Draft via the Anthropic cloud path and loop to >=8 feeding the
+        # scorer's flags back — same engine as the main-draft gate. Replaces the
+        # run_hermes draft AND the separate quality-check below. operator_hint =
+        # operator-directed exact wording → override (one attempt, don't reshape).
+        from server import load_system_prompt, behavioral_context
+        _sys = load_system_prompt()
+        try:
+            _bctx = (behavioral_context(cid) or {}).get("formatted", "")
+        except Exception:
+            _bctx = ""
+        _best = _gate_loop(
+            _sys + (("\n\n" + _bctx) if _bctx else ""), history, name,
+            payload.get("customer_phone") or "", inner["incoming_message"],
+            cid, _sys, threshold=8, max_attempts=3,
+            override=(operator_hint if operator_hint else ""))
+        out, err, elapsed = "", "", 0
+        if not _best or not _best.get("messages"):
+            log(f"draft_followup gate empty cid={cid!r}")
+            send(200, {"ok": False, "degraded": True, "error": "no draft",
+                       "draft_text": "", "label": label})
             return
-        # extract_json returns (parsed_dict, raw_blob_str) — unpack both.
-        parsed, _blob = extract_json(out)
+        parsed = {"messages": _best["messages"],
+                  "notes_for_zayn": _best.get("notes", "")}
+        _gate_score, _gate_flags = _best.get("score"), (_best.get("flags") or [])
         draft_text = ""
         notes_for_zayn = ""
         if isinstance(parsed, dict):
@@ -2655,22 +2670,15 @@ def handle_draft_followup(payload, send):
         # Quality badge so the nudge card shows a scorecard (operator
         # 2026-05-31: the nudge path had no scorecard). Analysis-aware via
         # build_quality_query. Best-effort — never blocks the nudge.
+        # Badge from the gate's score (already computed in the loop above) —
+        # no extra Hermes call, so the button is fast.
         quality_badge = ""
-        if draft_text:
+        if draft_text and isinstance(_gate_score, int):
             try:
-                from server import build_quality_query
-                qq = build_quality_query({
-                    "customer_id": cid, "customer_name": name,
-                    "history": history,
-                    "incoming_message": f"[{tag}] {directive}",
-                    "current_draft": draft_text})
-                qrc, qout, _qe, _ = run_hermes(
-                    qq, timeout=45, priority="interactive")
-                qp, _ = extract_json(qout)
-                if qrc == 0:
-                    quality_badge = _format_quality_badge(qp)
-            except Exception as _qe2:
-                log("draft_followup quality err:", repr(_qe2))
+                quality_badge = _format_quality_badge(
+                    {"score": _gate_score, "flags": _gate_flags})
+            except Exception:
+                quality_badge = ""
         send(200, {
             "ok": True, "customer_id": cid, "label": label,
             "draft_text": draft_text,
@@ -4280,6 +4288,80 @@ def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
         return msgs, (parsed.get("notes_for_zayn") or ""), ""
     except Exception:
         return [], "", "unparseable draft"
+
+
+def _anthropic_score(query_text):
+    """Fast quality score via Anthropic (the local Hermes scorer is slow on the
+    box). query_text = build_quality_query(...). Returns (score, flags, summary)."""
+    import urllib.request
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return 0, [], ""
+    data = json.dumps({"model": "claude-sonnet-4-6", "max_tokens": 300,
+                       "system": [{"type": "text", "text": "You are a strict "
+                        "WhatsApp-draft quality scorer. Output ONLY the JSON "
+                        "object requested — no preamble, no code fences."}],
+                       "messages": [{"role": "user", "content": query_text}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=data)
+    req.add_header("x-api-key", key)
+    req.add_header("anthropic-version", "2023-06-01")
+    req.add_header("content-type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            txt = json.load(r)["content"][0]["text"]
+    except Exception:
+        return 0, [], ""
+    t = re.sub(r"^```json\s*|^```\s*|```\s*$", "", (txt or "").strip()).strip()
+    try:
+        p = json.loads(t)
+        sc = int(p.get("score")) if str(p.get("score", "")).strip() else 0
+        fl = p.get("flags") if isinstance(p.get("flags"), list) else []
+        return (sc if 1 <= sc <= 10 else 0), fl, str(p.get("summary") or "")
+    except Exception:
+        return 0, [], ""
+
+
+def _gate_loop(full_system, history, name, phone, user_message, cid,
+               score_system, threshold=8, max_attempts=3, override=""):
+    """Draft via Anthropic + score via Hermes (against score_system), regen
+    feeding the scorer's flags back until >= threshold or max_attempts. Returns
+    the best {messages, notes, score, flags, summary, attempts, capped} or None.
+    Shared by the main-draft gate and the (fast) Draft-message button."""
+    from server import build_quality_query, sanitize_draft_messages
+    best, hint, attempts = None, "", 0
+    for attempt in range(1, max_attempts + 1):
+        attempts = attempt
+        msgs, notes, _err = _anthropic_draft(full_system, history, name, phone,
+                                             user_message, hint)
+        if not msgs:
+            if best is None:
+                continue
+            break
+        try:
+            score, flags, summary = _anthropic_score(build_quality_query({
+                "system_prompt": score_system, "customer_name": name,
+                "history": history, "incoming_message": user_message,
+                "current_draft": "\n\n".join(msgs), "customer_id": cid}))
+        except Exception:
+            score, flags, summary = 0, [], ""
+        if best is None or score > best["score"]:
+            best = {"messages": msgs, "notes": notes, "score": score,
+                    "flags": flags, "summary": summary}
+        if override or score >= threshold:
+            break
+        hint = (f"Your previous draft scored {score}/10. Produce a clearly "
+                f"BETTER draft that fixes: "
+                f"{', '.join(str(f) for f in flags) or summary}. Professional, "
+                "no emoji unless the customer used emoji, no hype opener, answer "
+                "directly.")
+    if best is not None:
+        best["attempts"] = attempts
+        best["capped"] = best["score"] < threshold
+        try:
+            best["messages"], _ = sanitize_draft_messages(best["messages"])
+        except Exception:
+            pass
+    return best
 
 
 def handle_draft_gated(payload, send):
