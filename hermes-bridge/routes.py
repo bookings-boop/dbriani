@@ -449,6 +449,38 @@ def handle_queue(payload, send):
         if not did:
             send(200, {"ok": False, "error": "draft_id required"})
             return
+        # WAHA-degraded HARD send-block (2026-06-02): approving a draft while
+        # the WAHA session is in a definitive non-sending state would silently
+        # fail (operator thinks it sent, customer gets nothing). Block by
+        # returning ok=False (Prepare Send already skips the WAHA send when the
+        # claim isn't won) WITHOUT consuming the claim key — so a retry after
+        # the session recovers isn't wedged — and tell the operator directly.
+        # Only DEFINITIVE bad states block (labels._waha_send_blocked); WORKING
+        # + ambiguous probes still send, and we fail OPEN on any guard error so
+        # a probe bug can never block every send.
+        try:
+            from waha import waha_session_ok
+            from labels import _waha_send_blocked
+            _wok, _wstatus = waha_session_ok()
+            _block = _waha_send_blocked(_wok, _wstatus)
+        except Exception:
+            _block, _wstatus = False, ""
+        if _block:
+            log(f"send-claim WAHA-BLOCKED did={did} status={_wstatus}")
+            try:
+                from server import _tg_post, DEFAULT_ADMIN_CHAT
+                _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT,
+                    "text": (f"🚫 Send blocked — WhatsApp session is {_wstatus}, "
+                             f"so the message was NOT sent (it would have "
+                             f"silently failed). The watchdog restarts a STOPPED "
+                             f"session within ~3 min; once it's WORKING again, "
+                             f"tap ✅ Send.")})
+            except Exception as _be:
+                log("send-claim waha-block notify err:", repr(_be))
+            send(200, {"ok": False, "blocked": "waha_degraded",
+                       "status": _wstatus, "draft_id": did})
+            return
         key = f"draft:send_claim:{did}"
         out, err = _redis(["SET", key, "1", "NX", "EX", str(ttl)])
         # _redis returns the raw text "OK" on success, "" on

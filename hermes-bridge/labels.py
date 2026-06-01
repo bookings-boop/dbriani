@@ -331,3 +331,23 @@ def _fact_anchored_fallback(name="", yacht="", date="", party=""):
         anchor = " on your enquiry"
     return (f"{greet}, just following up{anchor} — happy to help you lock it "
             f"in or answer any questions whenever suits. let me know!")
+
+
+# ---------------------------------------------------------------------------
+# WAHA-degraded send-block decision (2026-06-02)
+# ---------------------------------------------------------------------------
+
+def _waha_send_blocked(ok, status):
+    """Should an approved draft's send be BLOCKED because the WhatsApp (WAHA)
+    session can't deliver it? True ONLY for a definitive non-sending state —
+    STOPPED / SCAN_QR_CODE / FAILED — where the send would silently fail
+    (operator thinks it sent, customer gets nothing). WORKING (ok=True) never
+    blocks; an ambiguous probe (UNREACHABLE / UNKNOWN / STARTING / anything
+    else) does NOT block, so a transient probe blip can never wedge every
+    customer send — the actual send attempt + the existing scorecard badge
+    warning cover those. Pure/deterministic; the claim-send caller fails OPEN
+    (allows the send) on any guard error."""
+    if ok:
+        return False
+    return str(status or "").strip().upper() in (
+        "STOPPED", "SCAN_QR_CODE", "FAILED")
