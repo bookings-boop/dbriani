@@ -4246,6 +4246,120 @@ def handle_quality_check(payload, send):
                      "elapsed_ms": elapsed})
 
 
+# === ≥8 quality gate (operator 2026-06-01: "every draft should score 8+") =====
+def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
+    """One draft via the Anthropic Messages API — same model/shape as the n8n
+    'Claude AI' node. Returns (messages_list, notes, err)."""
+    import urllib.request
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return [], "", "ANTHROPIC_API_KEY not set"
+    uc = ("CONVERSATION HISTORY (oldest first):\n" + (history or "") +
+          "\n\nCustomer: " + (name or "unknown") + " (" + (phone or "") +
+          ")\n\nTHEIR NEWEST MESSAGE:\n" + (user_message or "") +
+          (("\n\nIMPORTANT: " + hint) if hint else "") +
+          "\n\nReturn ONLY the JSON object specified in the system prompt - "
+          "no preamble, no code fences.")
+    data = json.dumps({"model": "claude-sonnet-4-6", "max_tokens": 1024,
+                       "system": [{"type": "text", "text": system_text}],
+                       "messages": [{"role": "user", "content": uc}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=data)
+    req.add_header("x-api-key", key)
+    req.add_header("anthropic-version", "2023-06-01")
+    req.add_header("content-type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            txt = json.load(r)["content"][0]["text"]
+    except Exception as e:
+        return [], "", f"anthropic error: {e}"
+    t = re.sub(r"^```json\s*|^```\s*|```\s*$", "", (txt or "").strip()).strip()
+    try:
+        parsed = json.loads(t)
+        msgs = parsed.get("messages")
+        msgs = [str(m) for m in msgs][:4] if isinstance(msgs, list) else []
+        return msgs, (parsed.get("notes_for_zayn") or ""), ""
+    except Exception:
+        return [], "", "unparseable draft"
+
+
+def handle_draft_gated(payload, send):
+    """POST /draft-gated — draft via Anthropic, SCORE via Hermes against the SAME
+    persona, and if below threshold REGENERATE feeding the scorer's flags back,
+    up to max_attempts. Returns the BEST draft. override_directions skips the
+    gate. Fail-open: ok:false lets n8n fall back to its normal draft."""
+    from server import (build_quality_query, extract_json, run_hermes,
+                        sanitize_draft_messages)
+    sp = (payload.get("system_prompt") or "").strip()
+    if not sp:
+        send(200, {"ok": False, "error": "system_prompt required"})
+        return
+    cid = (payload.get("customer_id") or "").strip()
+    name = (payload.get("customer_name") or "").strip()
+    phone = (payload.get("customer_phone") or "").strip()
+    hist = payload.get("conversation_history") or ""
+    umsg = payload.get("user_message") or ""
+    bctx = (payload.get("behavioral_context") or "").strip()
+    override = (payload.get("override_directions") or "").strip()
+    try:
+        threshold = int(payload.get("threshold") or 8)
+    except (TypeError, ValueError):
+        threshold = 8
+    try:
+        max_attempts = max(1, min(4, int(payload.get("max_attempts") or 3)))
+    except (TypeError, ValueError):
+        max_attempts = 3
+    full_system = sp + (("\n\n" + bctx) if bctx else "")
+    if override:
+        full_system += ("\n\nOPERATOR OVERRIDE: write the customer message "
+                        "exactly as the operator directs here, even if it would "
+                        "score low — \"" + override + "\"")
+    best, hint, attempts = None, "", 0
+    for attempt in range(1, max_attempts + 1):
+        attempts = attempt
+        msgs, notes, err = _anthropic_draft(full_system, hist, name, phone,
+                                            umsg, hint)
+        if not msgs:
+            if best is None:
+                continue
+            break
+        try:
+            rc, out, _e, _ms = run_hermes(build_quality_query({
+                "system_prompt": sp, "customer_name": name, "history": hist,
+                "incoming_message": umsg, "current_draft": "\n\n".join(msgs),
+                "customer_id": cid}), priority="interactive")
+            parsed, _ = extract_json(out)
+            score = int(parsed.get("score")) if isinstance(parsed, dict) else 0
+            flags = (parsed.get("flags") if isinstance(parsed, dict)
+                     and isinstance(parsed.get("flags"), list) else [])
+            summary = (parsed.get("summary") if isinstance(parsed, dict) else "") or ""
+        except Exception:
+            score, flags, summary = 0, [], ""
+        if best is None or score > best["score"]:
+            best = {"messages": msgs, "notes": notes, "score": score,
+                    "flags": flags, "summary": summary}
+        if override or score >= threshold:
+            break
+        hint = (f"Your previous draft scored {score}/10. Produce a clearly "
+                f"BETTER draft that fixes these problems: "
+                f"{', '.join(str(f) for f in flags) or summary}. Professional, "
+                "no emoji unless the customer used emoji, no hype opener, answer "
+                "directly.")
+    if best is None:
+        send(200, {"ok": False, "error": "no draft produced"})
+        return
+    try:
+        best["messages"] = sanitize_draft_messages(best["messages"])
+    except Exception:
+        pass
+    log(f"draft-gated cid={cid} score={best['score']} attempts={attempts} "
+        f"capped={best['score'] < threshold}")
+    send(200, {"ok": True, "messages": best["messages"],
+               "notes_for_zayn": best["notes"], "score": best["score"],
+               "flags": best["flags"], "summary": best["summary"],
+               "attempts": attempts, "capped": best["score"] < threshold,
+               "override": bool(override)})
+
+
 def handle_learn(payload, send):
     from server import (
         VALID_SCOPES,

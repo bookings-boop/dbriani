@@ -112,6 +112,7 @@ from routes import (  # noqa: F401
     handle_save_rule,
     handle_ask_operator,
     handle_answer_info,
+    handle_draft_gated,
     handle_send_file,
     handle_set_mode,
     handle_snooze,
@@ -2130,9 +2131,13 @@ def build_edit_question_query(reason_tag, original, sent):
 def build_quality_query(p):
     """Compose the -q query for a FAST quality SCORE of an existing draft.
     Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
-    {"score": N, "flags": [...], "summary": "one line"}. See /quality-check."""
+    {"score": N, "flags": [...], "summary": "one line"}. See /quality-check.
+
+    Accepts an optional p["system_prompt"] so the SCORER judges against the
+    SAME persona the drafter used (the gate passes n8n's live system prompt) —
+    otherwise drafter and scorer can diverge (server-prompt drift)."""
     parts = []
-    sp = load_system_prompt()
+    sp = (p.get("system_prompt") or "").strip() or load_system_prompt()
     if sp:
         parts.append(sp)
         parts.append("=" * 60)
@@ -2967,7 +2972,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/quality-check",
-                             "/ask-operator", "/answer-info",
+                             "/ask-operator", "/answer-info", "/draft-gated",
                              "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",
@@ -3053,6 +3058,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_ask_operator(payload, self._send)
         elif self.path == "/answer-info":
             handle_answer_info(payload, self._send)
+        elif self.path == "/draft-gated":
+            handle_draft_gated(payload, self._send)
         elif self.path == "/label-eval":
             handle_label_eval(payload, self._send)
         elif self.path == "/conversation-state":
