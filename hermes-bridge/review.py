@@ -462,10 +462,16 @@ def render_review(scored, totals, mode="ondemand"):
     # AWAITING_REPLY: active leads (an unanswered live lead = revenue at risk)
     # rank ABOVE CONFIRMED post-booking messages (often just a "thanks"); within
     # each group, longest-waiting first (SLA fairness).
+    # operator 2026-06-01 (HOT lead Amaka was #4 while waiting): within the
+    # awaiting-reply queue, rank by HEAT first (HOT on top), then longest-
+    # waiting — an unanswered HOT lead is the most expensive to ignore.
+    _AWAIT_LABEL_PRIO = {"WAITING_FOR_PAYMENT": 0, "HOT": 0, "NEEDS_ATTENTION": 1,
+                         "WARM": 2, "NEW": 3, "COLD": 4}
     sections["AWAITING_REPLY"]["items"].sort(
         key=lambda it: (
-            (it[1].get("label") or "") == "CONFIRMED",
-            -(it[1].get("last_customer_message_at_seconds") or 0),
+            (it[1].get("label") or "") == "CONFIRMED",                 # active first
+            _AWAIT_LABEL_PRIO.get(it[1].get("label") or "", 3),        # HOT → COLD
+            -(it[1].get("last_customer_message_at_seconds") or 0),     # longest-waiting
         ))
 
     # STRICT rate-first ordering within each value-relevant section
