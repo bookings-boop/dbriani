@@ -158,6 +158,18 @@ def _no_sale_reason(row):
     return rea[:160] if rea else "analyzer scored 0 — no open sale"
 
 
+def _card_draft_label(label_key, last_analysis_signal):
+    """Draft-button verb for a /review card. AWAITING_REPLY owes a direct
+    reply; a passed-date lead gets a gentle re-engage CHECK-IN (#5); everyone
+    else gets a nudge. Pure."""
+    if label_key == "AWAITING_REPLY":
+        return "✍️ Draft reply"
+    from labels import _is_reengage_followup
+    if _is_reengage_followup(last_analysis_signal):
+        return "💬 Draft check-in"
+    return "💬 Draft nudge"
+
+
 # --- customer-facts pure helpers ----------------------------------
 
 def _facts_extract_gate(incoming_message):
@@ -716,11 +728,11 @@ def render_review(scored, totals, mode="ondemand"):
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is
                 # the destructive action, parked alone on row 2 next to Info
                 # so the operator doesn't fat-finger it next to Draft nudge.
-                # AWAITING_REPLY leads owe a direct answer, so the primary verb
-                # is "Draft reply", not "nudge" (same callback/draft path).
-                _draft_txt = ("✍️ Draft reply"
-                              if label_key == "AWAITING_REPLY"
-                              else "💬 Draft nudge")
+                # AWAITING_REPLY leads owe a direct answer ("Draft reply");
+                # passed-date leads get a gentle re-engage ("Draft check-in",
+                # #5); everyone else a nudge — all the same callback/draft path.
+                _draft_txt = _card_draft_label(
+                    label_key, row.get("last_analysis_signal"))
                 kb = [
                     [
                         {"text": _draft_txt,

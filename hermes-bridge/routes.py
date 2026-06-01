@@ -2517,6 +2517,28 @@ def handle_draft_followup(payload, send):
                         "This is a CONFIRMED, upcoming booking. Confirm boarding "
                         "or logistics, or offer one relevant add-on (extra hour, "
                         "catering) — warm and brief. ≤ 2 sentences.")
+            # Passed-date re-engage (#5, operator 2026-06-01): a lead whose
+            # booking DATE HAS PASSED (analyzer signal date_passed; renders in
+            # the NO ACTIVE SALE bucket) gets a warm, low-pressure re-engagement
+            # check-in for approval — never a hard-sell, never a silent
+            # disregard. The operator closes it via [🛑 Disregard] only after a
+            # decline/silence (reengage_attempts already tracks the attempt).
+            from labels import _is_reengage_followup
+            _sig_out, _ = _psql(
+                "SELECT COALESCE(last_analysis_signal,'') FROM "
+                "conversation_state WHERE customer_id = " + _lit(cid))
+            _last_sig = ((_sig_out or "").strip().splitlines()[0].strip()
+                         if (_sig_out or "").strip() else "")
+            if _is_reengage_followup(_last_sig):
+                directive = (
+                    "This lead's booking DATE HAS ALREADY PASSED — there is no "
+                    "active sale. Draft a warm, low-pressure RE-ENGAGEMENT "
+                    "check-in: acknowledge the date has gone by, hope their "
+                    "plans/trip worked out, and gently leave the door open for "
+                    "a future booking whenever they're ready. Do NOT hard-sell, "
+                    "do NOT push a specific date or price, and do NOT ask for a "
+                    "deposit. Mirror their tone; one short, genuine message. "
+                    "≤ 2 sentences.")
             # Owe-reply override (operator 2026-06-01): if the customer's last
             # message is UNANSWERED, this is a direct REPLY, not a proactive
             # nudge. Without this, the "proactive follow-up" framing combined

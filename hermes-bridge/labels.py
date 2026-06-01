@@ -56,6 +56,20 @@ _HARD_DEMOTE_SIGNALS = frozenset({
     "date_passed", "cold_decay", "confirmed_terminal", "locked",
 })
 
+# Analyzer signal for a lead whose booking date has already passed. A follow-up
+# draft to such a lead should be a GENTLE re-engage check-in ("hope it worked
+# out — welcome back for a future date"), NOT a sales nudge (#5, 2026-06-01).
+# cold_decay is dormant and confirmed_terminal is a completed booking (→ #6
+# feedback) — only date_passed re-engages.
+REENGAGE_SIGNAL = "date_passed"
+
+
+def _is_reengage_followup(last_analysis_signal):
+    """True when a follow-up draft should be a passed-date re-engage check-in
+    rather than a nudge/reply. Pure; tolerant of None/whitespace."""
+    return (last_analysis_signal or "").strip() == REENGAGE_SIGNAL
+
+
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 
