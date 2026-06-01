@@ -66,8 +66,13 @@ REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
 # rendering. Bounded so /review latency stays under 10s even with a
 # stale cohort. 5 parallel refreshes × ~5s per Hermes extract =
 # ~5-7s wall-clock.
+# 2, not 5: each inline refresh is a Hermes facts-extraction (CPU-heavy on the
+# 2-vCPU box). At 5, repeatedly running /review fired facts-extraction storms
+# that saturated the box → docker-exec psql timeouts → /review & /lead failed
+# (operator 2026-06-01). Lower cap keeps /review light; the background sweep
+# still heals the rest.
 REVIEW_INLINE_REFRESH_CAP = int(os.environ.get(
-    "REVIEW_INLINE_REFRESH_CAP", "5"))
+    "REVIEW_INLINE_REFRESH_CAP", "2"))
 
 # UAE working hours (Asia/Dubai = UTC+4, no DST). Used by
 # /pipeline-analyze cron to skip overnight runs — keeps the Hermes
@@ -455,7 +460,10 @@ def render_review(scored, totals, mode="ondemand"):
             _imp_zero = (_imp is not None and int(_imp) == 0)
         except (TypeError, ValueError):
             _imp_zero = False
-        if _owe and not _imp_zero:
+        # CONFIRMED = a won/finished booking, not a lead "awaiting reply"
+        # (operator 2026-06-01: Luke, trip finished, was showing as awaiting
+        # reply). It stays in the CONFIRMED section instead.
+        if _owe and not _imp_zero and label != "CONFIRMED":
             sections["AWAITING_REPLY"]["items"].append((score, row))
         else:
             sections[label]["items"].append((score, row))
