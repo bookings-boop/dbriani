@@ -245,6 +245,24 @@ def handle_queue(payload, send):
                          "found": d is not None, "error": err})
         return
 
+    if action == "awaiting-info":
+        # Pillar C: is this chat waiting on an answer to a Hermes
+        # ask-before-guess question? (set by /ask-operator). Returns the
+        # stored {customer_id, question, ...} so the operator's reply is
+        # routed to /answer-info instead of being treated as a draft edit.
+        from db import _redis
+        chat = str(payload.get("chat_id") or "").strip()
+        out, _e = _redis(["GET", "hermes:awaiting_info:" + chat])
+        out = (out or "").strip()
+        info = None
+        if out:
+            try:
+                info = json.loads(out)
+            except Exception:
+                info = None
+        send(200, {"ok": True, "found": info is not None, "info": info})
+        return
+
     if action == "save":
         draft = payload.get("draft") or {}
         ok, err = _draft_save(draft)
@@ -4257,6 +4275,95 @@ def handle_save_rule(payload, send):
         return
     log(f"rule saved id={rid} scope={scope} text={text[:70]!r}")
     send(200, {"ok": True, "rule_id": rid, "scope": scope})
+
+
+# === Pillar C: "ask, don't guess" + learn (operator 2026-06-01) ============
+# If Hermes lacks a concrete fact to answer correctly, it must ASK the operator
+# BEFORE drafting (hard rule injected via behavioral_context). The drafter sets
+# needs_operator_input → n8n calls /ask-operator → operator's reply is caught by
+# the /queue 'awaiting-info' lookup → /answer-info saves the answer as a GLOBAL
+# rule (applies to ALL future customers) and hands n8n a hint to draft the reply.
+def handle_ask_operator(payload, send):
+    """POST /ask-operator — store an awaiting-info state for the chat and ask
+    the operator the question instead of guessing. Fail-open (always 200)."""
+    from db import _redis
+    question = (payload.get("question") or "").strip()
+    if not question:
+        send(200, {"ok": False, "error": "question required"})
+        return
+    cid = (payload.get("customer_id") or "").strip()
+    chat = str(payload.get("chat_id")
+               or os.environ.get("ADMIN_CHAT_ID", "")).strip()
+    cust_msg = (payload.get("customer_msg") or "").strip()
+    name = (payload.get("customer_name") or "").strip()
+    phone = (payload.get("customer_phone") or "").strip()
+    who = name or phone or cid or "a customer"
+    state = json.dumps({"customer_id": cid, "customer_phone": phone,
+                        "customer_name": name, "question": question,
+                        "customer_msg": cust_msg})
+    try:
+        _redis(["SET", "hermes:awaiting_info:" + chat, state, "EX", "86400"])
+    except Exception as e:
+        log("ask-operator redis err:", repr(e))
+    msg = ("❓ *Hermes needs your input* — it won't guess.\n\n"
+           f"*{who}* asked:\n_{(cust_msg[:300] or '(see chat)')}_\n\n"
+           f"To answer correctly I need:\n*{question}*\n\n"
+           "Reply to this with the answer — I'll draft it and "
+           "remember it for next time (every future customer).")
+    try:
+        from server import _tg_post
+        _tg_post("sendMessage", {"chat_id": int(chat), "text": msg,
+                                 "parse_mode": "Markdown"})
+    except Exception as e:
+        log("ask-operator tg err:", repr(e))
+    log(f"ask-operator cid={cid} q={question[:70]!r}")
+    send(200, {"ok": True, "asked": True})
+
+
+def handle_answer_info(payload, send):
+    """POST /answer-info — operator answered a /ask-operator question. Clear the
+    state, LEARN the answer as a global rule (all future customers), and return
+    an operator_hint so n8n drafts this customer's reply. Fail-open."""
+    from db import _redis
+    from server import save_behavior_rule
+    chat = str(payload.get("chat_id") or "").strip()
+    answer = (payload.get("answer") or "").strip()
+    cid = (payload.get("customer_id") or "").strip()
+    question = (payload.get("question") or "").strip()
+    if chat:
+        try:
+            _redis(["DEL", "hermes:awaiting_info:" + chat])
+        except Exception:
+            pass
+    if not answer:
+        send(200, {"ok": False, "error": "answer required"})
+        return
+    # Remember it for EVERY future customer (global rule). Keep the question so
+    # the rule stays self-contained; the operator can refine/discard via /rules.
+    rule_text = (f"{question.rstrip('?').strip()} → {answer}"
+                 if question else answer)
+    rid, err = save_behavior_rule(
+        rule_text, "global", None, "operator_answer",
+        "Operator answer to a Hermes ask-before-guess question")
+    if rid is None:
+        log("answer-info rule save FAILED:", err)
+    else:
+        log(f"answer-info learned rule id={rid}: {rule_text[:70]!r}")
+        try:
+            from server import _tg_post
+            _tg_post("sendMessage", {
+                "chat_id": int(chat or os.environ.get("ADMIN_CHAT_ID", "0")),
+                "text": (f"✓ learned (rule #{rid}) — I'll use this for "
+                         f"everyone from now on. /discardrule {rid} to undo."),
+            })
+        except Exception:
+            pass
+    operator_hint = (
+        f"The customer asked: \"{question}\". Answer them clearly and warmly "
+        f"using this exact information: {answer}"
+        if question else f"Tell the customer: {answer}")
+    send(200, {"ok": True, "rule_id": rid, "learned": rid is not None,
+               "customer_id": cid, "operator_hint": operator_hint})
 
 # (moved to routes.py — handle_<name>(payload, self._send))
 

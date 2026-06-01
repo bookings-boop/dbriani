@@ -110,6 +110,8 @@ from routes import (  # noqa: F401
     handle_review,
     handle_rules,
     handle_save_rule,
+    handle_ask_operator,
+    handle_answer_info,
     handle_send_file,
     handle_set_mode,
     handle_snooze,
@@ -1097,7 +1099,11 @@ def save_behavior_rule(rule_text, scope, scope_value, created_via, reasoning,
     Returns (rule_id, None) or (None, error)."""
     # edit_learning rules are confirmed by the operator on the [Save] card,
     # so they activate immediately (same rationale as edit_feedback).
-    auto_active = created_via in ("edit_feedback", "edit_learning")
+    # operator_answer = the operator DIRECTLY answered a Hermes ask-before-guess
+    # question (Pillar C, 2026-06-01) — it's their authoritative word, so it must
+    # apply to the next draft (any customer) without a separate approval step.
+    auto_active = created_via in (
+        "edit_feedback", "edit_learning", "operator_answer")
     sql = (
         "INSERT INTO behavior_rules "
         "(rule_text, scope, scope_value, created_via, reasoning, source, active) "
@@ -3038,6 +3044,10 @@ class Handler(BaseHTTPRequestHandler):
             handle_payment_link(payload, self._send)
         elif self.path == "/feedback":
             handle_feedback(payload, self._send)
+        elif self.path == "/ask-operator":
+            handle_ask_operator(payload, self._send)
+        elif self.path == "/answer-info":
+            handle_answer_info(payload, self._send)
         elif self.path == "/label-eval":
             handle_label_eval(payload, self._send)
         elif self.path == "/conversation-state":
