@@ -30,6 +30,24 @@ except FileNotFoundError:
 TG_TOKEN = ENV.get("ADMIN_TG_TOKEN", "")
 CHAT_ID = ENV.get("ADMIN_CHAT_ID", "")
 PG = ENV.get("BRIDGE_PG_CONTAINER", "n8n-postgres-1")
+BRIDGE_TOKEN = ENV.get("BRIDGE_TOKEN", "")
+BRIDGE_URL = ENV.get("BRIDGE_URL", "http://localhost:8788")
+
+
+def bridge_post(path, body):
+    """Best-effort POST to the local bridge. Returns parsed dict or {}.
+    NEVER raises — the daily digest must send regardless of sweep outcome."""
+    try:
+        req = urllib.request.Request(
+            f"{BRIDGE_URL}{path}", data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Bridge-Token": BRIDGE_TOKEN})
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return json.load(resp) or {}
+    except Exception as e:
+        print(f"bridge_post {path} error:", repr(e))
+        return {}
 
 
 def psql(sql):
@@ -168,6 +186,19 @@ def main():
              f"{cap_n.get('checkpoint','0')} checkpoints, "
              f"{cap_n.get('intervention','0')} operator interventions")
     L.append("")
+
+    # #5-auto / #6-auto-A daily auto-sweeps (2026-06-01). Run the graceful-
+    # close (passed-date → dormant after 2 re-engage attempts + 7d silence,
+    # reversible) and the post-trip feedback-card sweep as part of the morning
+    # cron. Best-effort — bridge_post never raises, so the digest still sends.
+    _dorm = bridge_post("/dormancy-sweep", {})
+    _fb = bridge_post("/daily-feedback-sweep", {})
+    _dn = _dorm.get("count", 0) if isinstance(_dorm, dict) else 0
+    _fn = _fb.get("count", 0) if isinstance(_fb, dict) else 0
+    if _dn or _fn:
+        L.append(f"🤖 Auto: {_dn} passed-date lead(s) closed (reversible via "
+                 f"/label), {_fn} post-trip feedback card(s) posted")
+        L.append("")
 
     L.append("— Hermes")
     msg = "\n".join(L)[:4000]

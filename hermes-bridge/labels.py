@@ -70,6 +70,42 @@ def _is_reengage_followup(last_analysis_signal):
     return (last_analysis_signal or "").strip() == REENGAGE_SIGNAL
 
 
+# Labels a passed-date lead can be auto-closed FROM. DISREGARDED/CONFIRMED/
+# PAUSED_* are already terminal / won / held → never re-close them.
+_DORMANCY_FROM_OK = frozenset({"NEW", "WARM", "HOT", "NEEDS_ATTENTION", "COLD"})
+
+
+def _is_dormancy_eligible(label, last_analysis_signal, reengage_attempts,
+                          silent_days, min_attempts=2, min_silent_days=7):
+    """#5-auto graceful-close gate (2026-06-01). True iff a passed-date lead
+    has had >= min_attempts re-engage drafts AND >= min_silent_days of
+    customer silence, and is still in an active (non-terminal) label. Pure;
+    None-safe. With 0 attempts it is NEVER eligible (the operator's
+    'never silent-disregard' rule)."""
+    if (last_analysis_signal or "").strip() != REENGAGE_SIGNAL:
+        return False
+    if label not in _DORMANCY_FROM_OK:
+        return False
+    if (not isinstance(reengage_attempts, (int, float))
+            or reengage_attempts < min_attempts):
+        return False
+    if (not isinstance(silent_days, (int, float))
+            or silent_days < min_silent_days):
+        return False
+    return True
+
+
+def _is_feedback_due(trip_date, today, window_days=3):
+    """#6-auto-A: True iff a CONFIRMED booking's trip date has JUST passed —
+    ended between 1 and window_days days before `today` (the window forgives
+    missed cron days; a per-lead Redis dedup guarantees one card per booking).
+    Same-day/future trips aren't due. Pure date math; None-safe."""
+    if trip_date is None or today is None:
+        return False
+    delta = (today - trip_date).days
+    return 1 <= delta <= window_days
+
+
 # Tier demotion when confidence < CONFIDENCE_DEMOTE_THRESHOLD.
 _TIER_BELOW = {"HOT": "WARM", "WARM": "NEW", "NEW": "NEW", "COLD": "COLD"}
 

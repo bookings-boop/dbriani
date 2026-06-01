@@ -2395,6 +2395,171 @@ def _format_quality_badge(qp):
     return badge
 
 
+def handle_dormancy_sweep(payload, send):
+    """POST /dormancy-sweep — #5-auto graceful close (2026-06-01). Marks
+    passed-date leads (signal date_passed) DISREGARDED once they've had
+    >= DORMANCY_MIN_ATTEMPTS re-engage drafts AND been silent
+    >= DORMANCY_MIN_SILENT_DAYS days. Reversible via /label. Re-entrant
+    (Redis lock); idempotent (only transitions active labels). Posts a
+    reversible summary to the operator. payload {dry_run?: bool}.
+    Returns {ok, dry_run, count, leads}."""
+    from labels import _is_dormancy_eligible
+    min_attempts = int(os.environ.get("DORMANCY_MIN_ATTEMPTS", "2"))
+    min_silent = int(os.environ.get("DORMANCY_MIN_SILENT_DAYS", "7"))
+    dry = bool(payload.get("dry_run"))
+    lock = "lock:dormancy_sweep"
+    if not dry:
+        _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "600"])
+        if (_lk or "").strip() != "OK":
+            send(200, {"ok": True, "skipped": True,
+                       "skipped_reason": "previous_sweep_running",
+                       "count": 0, "leads": []})
+            return
+    try:
+        sql = (
+            "SELECT cf.customer_id, COALESCE(cf.name,''), cf.label, "
+            "COALESCE(cs.reengage_attempts,0), "
+            "FLOOR(EXTRACT(epoch FROM "
+            "  (now()-cs.last_customer_message_at))/86400)::int "
+            "FROM customer_facts cf "
+            "JOIN conversation_state cs ON cs.customer_id = cf.customer_id "
+            "WHERE cf.merged_into IS NULL "
+            "  AND cs.last_analysis_signal = 'date_passed' "
+            "  AND COALESCE(cs.reengage_attempts,0) >= " + str(min_attempts) + " "
+            "  AND cs.last_customer_message_at IS NOT NULL "
+            "  AND cs.last_customer_message_at < now() - interval '"
+            + str(min_silent) + " days' "
+            "  AND cf.label IN ('NEW','WARM','HOT','NEEDS_ATTENTION','COLD')")
+        out, err = _psql(sql, timeout=20)
+        if err:
+            log("dormancy-sweep query err:", err)
+            send(200, {"ok": False, "error": str(err),
+                       "count": 0, "leads": []})
+            return
+        leads = []
+        for line in (out or "").strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("|")
+            if len(parts) < 5:
+                continue
+            cid, nm, lab = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            try:
+                att = int(parts[3].strip())
+            except ValueError:
+                att = 0
+            try:
+                sd = int(parts[4].strip())
+            except ValueError:
+                sd = 0
+            # defence in depth — re-check the pure gate the SQL approximates
+            if not _is_dormancy_eligible(lab, "date_passed", att, sd,
+                                         min_attempts, min_silent):
+                continue
+            leads.append({"customer_id": cid, "name": nm, "label": lab,
+                          "attempts": att, "silent_days": sd})
+            if not dry:
+                from server import apply_label_transition
+                apply_label_transition(
+                    cid, lab, "DISREGARDED", "dormancy_after_reengage",
+                    f"date passed; {att} re-engage attempts; silent {sd}d",
+                    0, created_by="cron-dormancy")
+        if leads and not dry:
+            try:
+                from server import _tg_post, DEFAULT_ADMIN_CHAT
+                names = ", ".join((x["name"] or x["customer_id"][:8])
+                                  for x in leads[:10])
+                more = f" (+{len(leads) - 10} more)" if len(leads) > 10 else ""
+                _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT,
+                    "text": (f"💤 Auto-closed {len(leads)} passed-date lead(s) "
+                             f"after {min_attempts}+ re-engage attempts + "
+                             f"{min_silent}d silence: {names}{more}. "
+                             "Reversible: /label <name> WARM")})
+            except Exception as e:
+                log("dormancy-sweep notify err:", repr(e))
+        send(200, {"ok": True, "dry_run": dry, "count": len(leads),
+                   "leads": leads})
+    finally:
+        if not dry:
+            _redis(["DEL", lock])
+
+
+def handle_daily_feedback_sweep(payload, send):
+    """POST /daily-feedback-sweep — #6-auto-A (2026-06-01). Finds CONFIRMED
+    bookings whose trip date JUST passed (1..FEEDBACK_WINDOW_DAYS ago) and
+    posts a per-lead operator card with a [Draft feedback check-in] button
+    (nudge:<cid> — the existing routed callback → the #6 feedback draft).
+    Per-lead Redis dedup (fbcard:<cid>, 30d) → one card per booking.
+    APPROVAL-FIRST: only posts a draft-trigger card; sends nothing to the
+    customer. payload {dry_run?, window_days?}. Returns {ok, dry_run, count,
+    leads}."""
+    import datetime as _dt
+    from labels import _is_feedback_due, _parse_booking_date
+    window = int(payload.get("window_days")
+                 or os.environ.get("FEEDBACK_WINDOW_DAYS", "3"))
+    dry = bool(payload.get("dry_run"))
+    lock = "lock:feedback_sweep"
+    if not dry:
+        _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "600"])
+        if (_lk or "").strip() != "OK":
+            send(200, {"ok": True, "skipped": True,
+                       "skipped_reason": "previous_sweep_running",
+                       "count": 0, "leads": []})
+            return
+    try:
+        out, err = _psql(
+            "SELECT customer_id, COALESCE(name,''), COALESCE(dates,'') "
+            "FROM customer_facts "
+            "WHERE merged_into IS NULL AND label = 'CONFIRMED' "
+            "  AND COALESCE(dates,'') <> ''", timeout=20)
+        if err:
+            log("feedback-sweep query err:", err)
+            send(200, {"ok": False, "error": str(err),
+                       "count": 0, "leads": []})
+            return
+        today = _dt.date.today()
+        leads = []
+        for line in (out or "").strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            cid, nm, dates = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            if not _is_feedback_due(_parse_booking_date(dates), today, window):
+                continue
+            if not dry:
+                # one card per booking — 30d dedup
+                seen, _ = _redis(["SET", f"fbcard:{cid}", "1",
+                                  "NX", "EX", "2592000"])
+                if (seen or "").strip() != "OK":
+                    continue
+            leads.append({"customer_id": cid, "name": nm, "dates": dates})
+            if not dry:
+                try:
+                    from server import _tg_post, DEFAULT_ADMIN_CHAT
+                    disp = nm or ("WhatsApp lead ••" + cid[-4:])
+                    _tg_post("sendMessage", {
+                        "chat_id": DEFAULT_ADMIN_CHAT,
+                        "text": (f"\U0001f6e5️ *{disp}* — trip ({dates}) "
+                                 "just wrapped. Draft a feedback check-in?"),
+                        "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[
+                            {"text": "\U0001f4ac Draft feedback check-in",
+                             "callback_data": f"nudge:{cid}"},
+                            {"text": "ℹ️ Info",
+                             "callback_data": f"inf:{cid}"},
+                        ]]}})
+                except Exception as e:
+                    log("feedback-sweep post err:", repr(e))
+        send(200, {"ok": True, "dry_run": dry, "count": len(leads),
+                   "leads": leads})
+    finally:
+        if not dry:
+            _redis(["DEL", lock])
+
+
 def handle_draft_followup(payload, send):
     """POST /draft-followup — generate a follow-up draft via Hermes.
     Body: {customer_id, history?, customer_name?, silence_window?, silence_hours?}.
@@ -2502,7 +2667,13 @@ def handle_draft_followup(payload, send):
                     _isc = int((_isc_out or "-1").strip().splitlines()[0])
                 except (ValueError, IndexError):
                     _isc = -1
-                if _isc == 0:
+                # Trip is COMPLETED when the analyzer zeroed the score OR the
+                # booking date has already passed (#6-auto-A: the daily sweep
+                # cards date-passed CONFIRMED bookings before the score is
+                # re-zeroed, so date-passed must also route to feedback).
+                from server import _is_past_booking_date
+                _trip_done = _is_past_booking_date((row or {}).get("dates") or "")
+                if _isc == 0 or _trip_done:
                     directive = (
                         "This customer's booking/trip is COMPLETED. Draft a "
                         "short, warm, genuine post-trip CHECK-IN asking how their "

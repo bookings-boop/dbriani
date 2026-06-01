@@ -82,7 +82,9 @@ from routes import (  # noqa: F401
     handle_autosend_state,
     handle_conversation_state,
     handle_customer_facts,
+    handle_daily_feedback_sweep,
     handle_debounce,
+    handle_dormancy_sweep,
     handle_draft,
     handle_draft_followup,
     handle_draft_freshness,
@@ -3001,6 +3003,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/poll-payments",
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
+                             "/dormancy-sweep", "/daily-feedback-sweep",
                              "/send-file", "/list-files",
                              "/edit-capture", "/edit-feedback", "/edit-rule",
                              "/nomod-webhook"):
@@ -3078,6 +3081,10 @@ class Handler(BaseHTTPRequestHandler):
             handle_conversation_state(payload, self._send)
         elif self.path == "/hourly-sweep":
             handle_hourly_sweep(payload, self._send)
+        elif self.path == "/dormancy-sweep":
+            handle_dormancy_sweep(payload, self._send)
+        elif self.path == "/daily-feedback-sweep":
+            handle_daily_feedback_sweep(payload, self._send)
         elif self.path == "/review":
             handle_review(payload, self._send)
         elif self.path == "/draft-followup":
