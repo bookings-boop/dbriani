@@ -2967,6 +2967,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/draft", "/improve", "/quality-check",
+                             "/ask-operator", "/answer-info",
                              "/learn", "/rules",
                              "/autosend-check", "/save-rule", "/set-mode",
                              "/caps", "/autosend-state", "/customer-facts",

@@ -4169,8 +4169,13 @@ def handle_quality_check(payload, send):
         send(400, {"ok": False, "error": "current_draft is required"})
         return
     try:
+        # interactive, NOT background: the operator is actively waiting for the
+        # draft/refine/regen card this badge goes on. Background waits for the
+        # single BG slot, which the hourly lead-analysis sweep holds for ~25s+
+        # → the refine/regen quality-check timed out (35s) and the scorecard
+        # silently vanished during sweep windows (operator 2026-06-01).
         rc, out, err, elapsed = run_hermes(
-            build_quality_query(payload), priority="background")
+            build_quality_query(payload), priority="interactive")
     except subprocess.TimeoutExpired:
         log("quality-check TIMEOUT")
         send(200, {"ok": False, "error": "hermes timeout"})
