@@ -59,7 +59,7 @@ from labels import (  # noqa: F401
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
-    _passed_date_close_is_wrong,
+    _passed_date_close_is_wrong, _party_size_fit_line,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -1075,25 +1075,34 @@ def _lead_state_block(customer_id):
         "SELECT COALESCE(label,'') || '~~' || "
         "COALESCE(importance_score::text,'') || '~~' || "
         "COALESCE(importance_reasoning,'') || '~~' || "
-        "COALESCE(dates,'') FROM customer_facts "
+        "COALESCE(dates,'') || '~~' || COALESCE(party_size::text,'') "
+        "FROM customer_facts "
         "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
     row = (row or "").strip()
     if not row:
         return ""
-    lbl, isc, irea, dts = (row.splitlines()[0].split("~~") + ["", "", "", ""])[:4]
-    if not (irea or isc or lbl):
+    lbl, isc, irea, dts, psize = (
+        row.splitlines()[0].split("~~") + ["", "", "", "", ""])[:5]
+    _cap_line = _party_size_fit_line(psize)
+    # Emit the block when there's analysis OR a known party size — the capacity
+    # constraint must reach the drafter even on a first reply (before analysis),
+    # which is exactly when an under-capacity yacht gets recommended.
+    if not (irea or isc or lbl) and not _cap_line:
         return ""
     bar = "=" * 60
     lines = [
         bar,
         "## 🎯 THIS LEAD'S CURRENT STATE — your reply MUST fit it",
         bar,
-        f"Label: {lbl or '?'} · Importance: {isc or '?'}/100",
-        f"Analyzer's read: {irea or '(none yet)'}",
     ]
+    if irea or isc or lbl:
+        lines.append(f"Label: {lbl or '?'} · Importance: {isc or '?'}/100")
+        lines.append(f"Analyzer's read: {irea or '(none yet)'}")
     _pd = _passed_date_note(dts, irea)
     if _pd:
         lines.append(_pd)
+    if _cap_line:
+        lines.append(_cap_line)
     lines += [
         "",
         "Write a reply APPROPRIATE for this state. If the analyzer judged this "

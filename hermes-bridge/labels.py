@@ -532,3 +532,24 @@ def _dedup_leads(items):
             seen_name.add(n)
         out.append((cid, name, reason))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Capacity-fit constraint for the drafter (2026-06-02 capacity bug)
+# ---------------------------------------------------------------------------
+
+def _party_size_fit_line(party_size):
+    """Drafter capacity constraint: only recommend yachts that fit the stated
+    party. Returns a one-line instruction, or '' when the party size is unknown
+    / non-numeric / <= 0 (safe to concatenate). Rides _lead_state_block ->
+    behavioral_context().formatted -> the live drafter, no n8n change. Pure."""
+    try:
+        n = int(str(party_size).strip())
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    return (f"Party size: {n} guests — ONLY recommend yacht(s) that seat at "
+            f"least {n}. NEVER suggest a yacht whose max capacity is below "
+            f"{n}; if the party exceeds every single yacht, recommend the "
+            f"largest fitting option(s) or note combining two boats.")
