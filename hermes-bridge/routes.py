@@ -3732,6 +3732,20 @@ def handle_set_mode(payload, send):
         log("MANUAL KILL SWITCH — all conversations -> approval")
         send(200, {"ok": True, "message": "all conversations set to approval"})
         return
+    if cid == "__ALL_AUTO__":  # /auto all confirm — enable autonomous for all
+        from server import set_all_autonomous
+        n, e2 = set_all_autonomous()
+        if n is None:
+            log("set_all_autonomous failed:", e2)
+            send(502, {"ok": False, "error": str(e2)})
+            return
+        # Mode flip ONLY — the synchronous 8/10 floor + caps are untouched and
+        # still gate every auto-send.
+        log(f"AUTO ALL — {n} conversations -> autonomous (floor + caps unchanged)")
+        send(200, {"ok": True, "count": n,
+                   "message": (f"{n} conversations set to autonomous — the 8/10 "
+                               "quality floor and caps still gate every send.")})
+        return
     m, err = set_mode(cid, mode, by, break_reason)
     if m is None:
         log("set-mode failed:", err)
