@@ -56,6 +56,38 @@ def test_future_with_neutral_reasoning_no_note():
     assert _passed_date_note("Dec 31 2099", "keen, wants pricing") == ""
 
 
+# --- same-day time-aware (2026-06-02, Lili/Marina) ---------------------------
+import datetime as _dt  # noqa: E402
+
+
+def test_sameday_time_passed_fires():
+    # asked for today 5 PM, now 7 PM Dubai -> graceful future pivot
+    n = _passed_date_note("Jun 2, 5 PM",
+                          now=_dt.datetime(2026, 6, 2, 19, 0)).lower()
+    assert "passed" in n and "future" in n and "today" in n
+
+
+def test_sameday_time_from_reasoning_fires():
+    # Lili: dates has no time; the window is in the analyzer reasoning
+    n = _passed_date_note("Jun 2",
+                          "booking is TODAY (Jun 2), 17:30-20:30, engaged",
+                          now=_dt.datetime(2026, 6, 2, 20, 32)).lower()
+    assert "passed" in n and "graceful" in n
+
+
+def test_sameday_time_not_yet_no_note():
+    # evening slot still upcoming -> no note (don't false-pivot)
+    assert _passed_date_note("Jun 2, 9 PM",
+                             now=_dt.datetime(2026, 6, 2, 18, 0)) == ""
+
+
+def test_sameday_no_time_no_note():
+    # Marina: same day, no parseable time -> deterministic note stays silent
+    # (the drafter's injected current-time anchor handles this case instead)
+    assert _passed_date_note("Tue Jun 2",
+                             now=_dt.datetime(2026, 6, 2, 22, 0)) == ""
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

@@ -945,6 +945,94 @@ def event_passed(dates_str, today=None):
     return d < today
 
 
+def _dubai_now():
+    """Current Asia/Dubai wall-clock as a NAIVE datetime. The box runs UTC and
+    Dubai is a fixed UTC+4 year-round (no DST), so a fixed offset is correct and
+    needs no tzdata. Naive so it compares cleanly against parsed naive dates.
+    Not pure (reads the clock) — the helpers below accept an explicit `now`/
+    `today` for deterministic tests."""
+    import datetime as _dt
+    return (_dt.datetime.now(_dt.timezone.utc)
+            + _dt.timedelta(hours=4)).replace(tzinfo=None)
+
+
+def _parse_booking_time(s):
+    """Extract the slot START as minutes-since-midnight from a free-text dates/
+    reasoning string, or None when no clock time is present. Handles 12h
+    ('5 PM', '5:30pm', '9am'), 24h ('17:30', '18:00'), and ranges where the
+    first time inherits the meridian of the second ('6–8 PM' -> 18:00 start;
+    '5:30–8:30pm' -> 17:30 start). Returns the EARLIEST time found = the slot
+    start (the operator's rule: a 5 PM slot is 'passed' once it's after 5 PM).
+    A bare 'HH:MM' is read as 24h ONLY when the string has no am/pm meridian,
+    so it never mis-reads the '5:30' of '5:30pm' as 05:30. Pure; None-safe."""
+    import re as _re
+    if not s:
+        return None
+    text = str(s)
+    mins = []
+
+    def _h12(h, m, ap):
+        h = int(h)
+        m = int(m or 0)
+        if h < 1 or h > 12 or m > 59:
+            return None
+        if h == 12:
+            h = 0
+        if ap.lower() == "p":
+            h += 12
+        return h * 60 + m
+
+    has_meridian = bool(_re.search(r"\d\s*[ap]\.?m\.?", text, _re.I))
+    # Ranges "A[-–—]B <ap>m": the first time inherits the trailing meridian.
+    for mt in _re.finditer(
+            r"(\d{1,2})(?::(\d{2}))?\s*[–\-—]\s*"
+            r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?", text, _re.I):
+        for v in (_h12(mt.group(1), mt.group(2), mt.group(5)),
+                  _h12(mt.group(3), mt.group(4), mt.group(5))):
+            if v is not None:
+                mins.append(v)
+    # Plain 12h "5 PM" / "5:30pm".
+    for mt in _re.finditer(r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?",
+                           text, _re.I):
+        v = _h12(mt.group(1), mt.group(2), mt.group(3))
+        if v is not None:
+            mins.append(v)
+    # 24h "HH:MM" — only when no meridian anywhere (else it'd catch '5:30pm').
+    if not has_meridian:
+        for mt in _re.finditer(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
+            mins.append(int(mt.group(1)) * 60 + int(mt.group(2)))
+    return min(mins) if mins else None
+
+
+def slot_passed(dates_str, reasoning="", now=None):
+    """True when the customer's requested slot is in the PAST relative to a Dubai
+    `now` (defaults to _dubai_now()). Fires for: a prior calendar day, OR the
+    SAME day once a parseable start time is at/before now. Conservative: a
+    same-day slot with no parseable time, or an unparseable date, returns False
+    (we never declare 'passed' on a slot we can't prove has elapsed — a false
+    'passed' would wrongly tell an engaged customer their live slot is gone).
+    The date and time are read from `dates_str` first, then `reasoning` (the
+    analyzer often records the window only in its reasoning). Pure; None-safe."""
+    d = _parse_booking_date(dates_str)
+    if d is None and reasoning:
+        d = _parse_booking_date(reasoning)
+    if d is None:
+        return False
+    if now is None:
+        now = _dubai_now()
+    today = now.date()
+    if d < today:
+        return True
+    if d > today:
+        return False
+    t = _parse_booking_time(dates_str)
+    if t is None and reasoning:
+        t = _parse_booking_time(reasoning)
+    if t is None:
+        return False
+    return (now.hour * 60 + now.minute) > t
+
+
 def _party_size_fit_line(party_size):
     """Drafter capacity constraint: only recommend yachts that fit the stated
     party. Returns a one-line instruction, or '' when the party size is unknown

@@ -61,6 +61,7 @@ from labels import (  # noqa: F401
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
     _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
     _draft_log_columns, is_valid_mode,
+    slot_passed, _parse_booking_time, _dubai_now,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -1204,8 +1205,21 @@ def behavioral_context(customer_id):
     # RULE #1 leads ALWAYS — even when there are no learned rules / no lead
     # block — so the drafter can never compose without the no-invent mandate
     # at the very top of its dynamic context (2026-06-01 fabrication incident).
-    formatted = (NO_INVENT_DIRECTIVE + "\n\n" + ASK_BEFORE_GUESS_DIRECTIVE
-                 + "\n\n" + HANDOFF_DIRECTIVE + "\n\n" + STYLE_DIRECTIVE
+    # Current Dubai date+time anchor — the drafter otherwise has NO sense of
+    # "now", so it can't tell a requested slot is already in the past (operator
+    # 2026-06-02, Lili/Marina: "today 5 PM" drafted as live at 7 PM). Always
+    # injected so even a brand-new lead (no analysis yet) gets it.
+    _now_anchor = _dubai_now()
+    time_anchor = (
+        "🕐 CURRENT DATE & TIME: "
+        + _now_anchor.strftime("%a %b %d %Y, %H:%M")
+        + " (Asia/Dubai, 24-hour clock). If the date/time the customer asked "
+        "for is AT OR BEFORE this, that slot has already PASSED — do NOT "
+        "confirm, plan, or push logistics for it. Warmly acknowledge it has "
+        "gone by and offer to arrange an upcoming day instead.")
+    formatted = (time_anchor + "\n\n" + NO_INVENT_DIRECTIVE + "\n\n"
+                 + ASK_BEFORE_GUESS_DIRECTIVE + "\n\n" + HANDOFF_DIRECTIVE
+                 + "\n\n" + STYLE_DIRECTIVE
                  + ("\n\n" + formatted if formatted else ""))
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
@@ -2057,8 +2071,8 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     # 4b date anchor: the analyzer has no inherent "today", so it can misread a
     # long silence as the event being over. Give it the real date + an explicit
     # future-guard when the booking date deterministically parses to the future.
-    import datetime as _dt_anchor
-    _today_anchor = _dt_anchor.date.today()
+    _today_anchor = _dubai_now().date()  # Dubai date (box runs UTC; was wrong
+    #                                      00:00-04:00 UTC = late evening Dubai)
     _bd_anchor = _parse_booking_date(dates)
     _date_anchor = f"Today's date: {_today_anchor.isoformat()} (Asia/Dubai)\n"
     if _bd_anchor is not None and _bd_anchor > _today_anchor:
@@ -2724,28 +2738,43 @@ _PASSED_REASONING_MARKERS = (
     "is moot", "lead is moot", "passed date", "date has gone")
 
 
-def _passed_date_note(dates, reasoning=""):
-    """Guidance for the DRAFTER and SCORER when the customer's booking date has
-    PASSED. Fires when the date PARSES as past OR the analyzer's reasoning says
-    it passed — the reasoning path catches RELATIVE free-text dates the parser
-    can't resolve ('today'/'tomorrow'/'Friday night': 2026-06-01 Elise/Mustafa/
-    Marimuthu). Tells both that a warm forward-looking graceful exit IS the
-    correct reply and must NOT be penalised. '' otherwise. Pure."""
-    parsed_past = _is_past_booking_date(dates or "")
+def _passed_date_note(dates, reasoning="", now=None):
+    """Guidance for the DRAFTER and SCORER when the customer's requested slot has
+    PASSED. Fires when:
+      - the slot is in the past (prior day, OR SAME DAY with a parseable start
+        time at/before Dubai-now — slot_passed), OR
+      - the analyzer's reasoning says it passed — the reasoning path catches
+        RELATIVE free-text dates the parser can't resolve ('today'/'tomorrow'/
+        'Friday night': 2026-06-01 Elise/Mustafa/Marimuthu).
+    Same-day-time awareness (2026-06-02, Lili/Marina): a customer who asked for
+    'today 5 PM' when it's now 7 PM Dubai must get a forward-looking pivot, not a
+    'confirm logistics' push. Tells DRAFTER + SCORER a warm graceful exit IS the
+    correct reply and must NOT be penalised. '' otherwise. `now` overridable for
+    tests. Pure (given `now`)."""
     _rea = (reasoning or "").lower()
     reasoning_past = any(m in _rea for m in _PASSED_REASONING_MARKERS)
-    if not (parsed_past or reasoning_past):
+    passed = slot_passed(dates or "", reasoning or "", now=now)
+    if not (passed or reasoning_past):
         return ""
-    d = _parse_booking_date(dates or "")
-    when = d.isoformat() if d else "the requested date"
+    if now is None:
+        now = _dubai_now()
+    d = _parse_booking_date(dates or "") or _parse_booking_date(reasoning or "")
+    if d is not None and d == now.date():
+        when = (f"today, {d.isoformat()} — the requested time has already "
+                "gone by")
+    elif d is not None:
+        when = d.isoformat()
+    else:
+        when = "the requested date"
     return (
-        f"⚠️ BOOKING DATE HAS PASSED ({when}): the date this customer asked "
-        "about is in the PAST. The CORRECT reply is a warm, forward-looking "
-        "graceful exit — acknowledge it has gone by and invite a FUTURE "
-        "booking. Do NOT ask them to confirm/plan that past date or ask 'what "
-        "date did you have in mind?' as if it's upcoming. A draft that "
-        "gracefully pivots to the future is CORRECT and COMPLETE — do NOT flag "
-        "it as ignoring or missing the (already-passed) date.")
+        f"⚠️ REQUESTED SLOT HAS PASSED ({when}): the date/time this customer "
+        "asked about is in the PAST. The CORRECT reply is a warm, forward-"
+        "looking graceful exit — acknowledge it has gone by and invite a "
+        "FUTURE booking (offer to help plan an upcoming day). Do NOT ask them "
+        "to confirm/plan that past slot, push logistics, or ask 'what date did "
+        "you have in mind?' as if it's upcoming. A draft that gracefully pivots "
+        "to the future is CORRECT and COMPLETE — do NOT flag it as ignoring or "
+        "missing the (already-passed) date.")
 
 
 def compute_label(latest_message, facts):
