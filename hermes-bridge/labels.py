@@ -281,6 +281,35 @@ def _parse_booking_date(dates_str):
         return None
 
 
+# Phrases the LLM analyzer uses when it (often wrongly) believes the booking
+# date has elapsed / the event is over.
+_PASSED_CLAIM_RE = re.compile(
+    r"(has\s+(already\s+)?passed|already\s+passed|is\s+over|event\s+is\s+over|"
+    r"is\s+moot|date\s+(has\s+)?passed|already\s+happened|in\s+the\s+past|"
+    r"event\s+has\s+(ended|elapsed)|no\s+longer\s+upcoming)",
+    re.IGNORECASE,
+)
+
+
+def _passed_date_close_is_wrong(dates_str, reasoning, today=None):
+    """4b guard: True when the analyzer's reasoning claims the booking date has
+    passed / the event is over BUT the booking date deterministically parses to
+    a strictly-FUTURE date — i.e. the 'close' is a hallucination (typically a
+    long silence misread as the event being over). Used to VETO an auto-close
+    that would wrongly kill a live future booking. Fail-safe: only fires when
+    the date parses cleanly to the future; genuinely-past or unparseable/
+    relative dates are left alone so real passed-date closes still work.
+    Pure/deterministic."""
+    if not reasoning or not _PASSED_CLAIM_RE.search(reasoning):
+        return False
+    d = _parse_booking_date(dates_str)
+    if d is None:
+        return False
+    import datetime as _dt
+    today = today or _dt.date.today()
+    return d > today
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ from labels import (  # noqa: F401
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
+    _passed_date_close_is_wrong,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -1828,6 +1829,18 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     party = (facts or {}).get("party_size") or "(unknown)"
     sh = (f"{silent_hours:.1f}h" if isinstance(silent_hours, (int, float))
           else "(unknown)")
+    # 4b date anchor: the analyzer has no inherent "today", so it can misread a
+    # long silence as the event being over. Give it the real date + an explicit
+    # future-guard when the booking date deterministically parses to the future.
+    import datetime as _dt_anchor
+    _today_anchor = _dt_anchor.date.today()
+    _bd_anchor = _parse_booking_date(dates)
+    _date_anchor = f"Today's date: {_today_anchor.isoformat()} (Asia/Dubai)\n"
+    if _bd_anchor is not None and _bd_anchor > _today_anchor:
+        _date_anchor += (
+            f"⚠️ The booking date ({dates}) is in the FUTURE — it has NOT "
+            f"passed. Do NOT say it 'has passed' / 'the event is over'. A long "
+            f"SILENCE is NOT the same as the event being over.\n")
     q = (
         "TASK: You are analyzing a Dubriani yacht-charter sales "
         "conversation to help the sales operator. Decide TWO things:\n"
@@ -1950,6 +1963,7 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         f"Name: {nm}\n"
         f"Yachts discussed: {yachts}\n"
         f"Date(s): {dates}\n"
+        f"{_date_anchor}"
         f"Party size: {party}\n"
         f"Message count: {message_count}\n"
         f"Silent for: {sh}\n\n"
@@ -1982,12 +1996,25 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     except (TypeError, ValueError):
         score = 0
     score = max(0, min(100, score))
+    reasoning = str(parsed.get("reasoning") or "").strip()[:300]
+    # 4b veto (2026-06-02): the background analyzer has no real "today" and
+    # sometimes reads a long SILENCE as the booking being over — returning
+    # verdict=close for a date that is actually in the FUTURE, which would
+    # auto-kill a live booking and surface "<date> has passed" on the card. If
+    # the date deterministically parses to the future, override the close.
+    if verdict == "close" and _passed_date_close_is_wrong(dates, reasoning):
+        log(f"hermes_analyze_lead: VETO false passed-date close "
+            f"cid={customer_id} dates={dates!r}")
+        verdict = "keep_open"
+        score = max(score, 40)  # keep it visible for the operator
+        reasoning = (reasoning +
+                     " [auto-corrected: booking date is in the future]")[:300]
     if verdict == "close":
         score = 0  # invariant
     return {
         "verdict": verdict,
         "importance_score": score,
-        "reasoning": str(parsed.get("reasoning") or "").strip()[:300],
+        "reasoning": reasoning,
         "suggested_action": str(
             parsed.get("suggested_action") or "").strip()[:300],
         "elapsed_ms": elapsed,
