@@ -4849,15 +4849,14 @@ def handle_draft_gated(payload, send):
                 continue
             break
         try:
-            rc, out, _e, _ms = run_hermes(build_quality_query({
+            # Score via the FAST Anthropic HTTP scorer (mirrors _gate_loop),
+            # NOT the slow local Hermes CLI: 3 sequential ~30-60s CLI scores on
+            # a 2-vCPU box made regen crawl and hit the n8n 150s timeout. Same
+            # (score, flags, summary) contract. (Bug 2 slow-regen, 2026-06-02.)
+            score, flags, summary = _anthropic_score(build_quality_query({
                 "system_prompt": sp, "customer_name": name, "history": hist,
                 "incoming_message": umsg, "current_draft": "\n\n".join(msgs),
-                "customer_id": cid}), priority="interactive")
-            parsed, _ = extract_json(out)
-            score = int(parsed.get("score")) if isinstance(parsed, dict) else 0
-            flags = (parsed.get("flags") if isinstance(parsed, dict)
-                     and isinstance(parsed.get("flags"), list) else [])
-            summary = (parsed.get("summary") if isinstance(parsed, dict) else "") or ""
+                "customer_id": cid}))
         except Exception:
             score, flags, summary = 0, [], ""
         if best is None or score > best["score"]:
