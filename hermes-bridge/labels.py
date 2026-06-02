@@ -351,3 +351,73 @@ def _waha_send_blocked(ok, status):
         return False
     return str(status or "").strip().upper() in (
         "STOPPED", "SCAN_QR_CODE", "FAILED")
+
+
+# ---------------------------------------------------------------------------
+# Payment match-buttons (2026-06-02)
+# ---------------------------------------------------------------------------
+#
+# A truly-unmatched Nomod charge (no link / no phone / no amount+time hit)
+# currently makes the operator read the Nomod dashboard and type
+# `/label <name> CONFIRMED` by hand. These two PURE helpers turn that into a
+# tap: build_paymatch_keyboard renders the current WAITING_FOR_PAYMENT
+# customers as candidate buttons; parse_paymatch_callback decodes the tap.
+# The operator still identifies the payer (name/phone is on the card) — the
+# button only saves the manual /label. callback_data must stay <= 64 BYTES
+# (Telegram limit); a candidate whose cid won't fit is DROPPED rather than
+# truncated, because a corrupted cid would promote the wrong customer.
+
+PAYMATCH_PREFIX = "paymatch"
+# Telegram caps callback_data at 64 bytes.
+_PAYMATCH_CB_MAX = 64
+
+
+def build_paymatch_keyboard(charge_id, candidates, max_buttons=6):
+    """Build the inline_keyboard rows (list of one-button rows) offering each
+    candidate customer as a tap-to-confirm match for an unmatched charge.
+
+    candidates: list of {customer_id, name?, phone?, amount?}. Each becomes a
+    button 'name · phone · AED amount' with callback_data
+    'paymatch:<charge8>:<cid>'. A final '🚫 Not listed' row
+    ('paymatch:<charge8>:none') always lets the operator decline. Candidates
+    whose callback_data would exceed the 64-byte limit are skipped (safe: a
+    truncated cid would mis-promote). Capped at max_buttons candidates."""
+    c8 = (charge_id or "")[:8]
+    rows = []
+    for cand in (candidates or [])[:max_buttons]:
+        cid = str(cand.get("customer_id") or "").strip()
+        if not cid:
+            continue
+        cb = f"{PAYMATCH_PREFIX}:{c8}:{cid}"
+        if len(cb.encode("utf-8")) > _PAYMATCH_CB_MAX:
+            continue  # cannot encode this cid safely — force dashboard path
+        name = str(cand.get("name") or "").strip()
+        phone = str(cand.get("phone") or "").strip()
+        amount = cand.get("amount", cand.get("link_amount"))
+        if name:
+            text = name[:32] + (f" · {phone}" if phone and phone != name else "")
+        else:
+            text = phone or cid
+        if amount not in (None, "", 0):
+            text += f" · AED {amount}"
+        rows.append([{"text": text, "callback_data": cb}])
+    rows.append([{"text": "🚫 Not listed — check dashboard",
+                  "callback_data": f"{PAYMATCH_PREFIX}:{c8}:none"}])
+    return rows
+
+
+def parse_paymatch_callback(data):
+    """Decode a 'paymatch:<charge8>:<cid>' callback. Returns
+    {'charge': <charge8>, 'cid': <cid or None>} or None if not a paymatch
+    callback. cid 'none' (the dismissal button) decodes to cid=None. Strict:
+    anything that isn't a well-formed paymatch callback returns None so it can
+    never be mistaken for a match instruction."""
+    if not data or not isinstance(data, str):
+        return None
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != PAYMATCH_PREFIX:
+        return None
+    charge, cid = parts[1].strip(), parts[2].strip()
+    if not charge or not cid:
+        return None
+    return {"charge": charge, "cid": None if cid == "none" else cid}
