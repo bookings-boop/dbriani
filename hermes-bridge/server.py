@@ -2242,6 +2242,35 @@ def build_edit_question_query(reason_tag, original, sent):
     )
 
 
+def _quality_task_framing(incoming, history):
+    """Return (task_text, show_newest_message). An OUTBOUND first contact (no
+    incoming message AND no history) is Maria reaching out FIRST — it must be
+    scored as an OUTREACH OPENER, not as a reply to a (nonexistent) customer
+    message, else the scorer wrongly penalizes a good opener (scorecard bug
+    2026-06-02). Everything else keeps the reply rubric. Pure."""
+    if not (incoming or "").strip() and not (history or "").strip():
+        return (
+            "TASK: An OUTBOUND FIRST-CONTACT opener for Dubriani Yachts is "
+            "awaiting operator review — Maria is reaching out FIRST; there is "
+            "NO customer message yet, so do NOT score it as a reply. SCORE it "
+            "1-10 as a cold/warm OUTREACH opener against Maria's persona + the "
+            "hard rules: warm and on-brand but NOT pushy, a clear hook + soft "
+            "CTA, no false claim of prior contact, no assumptions about a "
+            "conversation that hasn't happened. Do NOT rewrite — only score and "
+            "flag. 8-10 = send as-is; 5-7 = usable but has issues; 1-4 = should "
+            "be regenerated.",
+            False,
+        )
+    return (
+        "TASK: A first-draft WhatsApp reply for Dubriani Yachts is awaiting "
+        "operator review. SCORE its quality 1-10 against Maria's persona, the "
+        "hard rules above, and the conversation. Do NOT rewrite it — only "
+        "score and flag. 8-10 = send as-is; 5-7 = usable but has issues; "
+        "1-4 = should be regenerated.",
+        True,
+    )
+
+
 def build_quality_query(p):
     """Compose the -q query for a FAST quality SCORE of an existing draft.
     Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
@@ -2255,23 +2284,19 @@ def build_quality_query(p):
     if sp:
         parts.append(sp)
         parts.append("=" * 60)
-    parts.append(
-        "TASK: A first-draft WhatsApp reply for Dubriani Yachts is awaiting "
-        "operator review. SCORE its quality 1-10 against Maria's persona, the "
-        "hard rules above, and the conversation. Do NOT rewrite it — only "
-        "score and flag. 8-10 = send as-is; 5-7 = usable but has issues; "
-        "1-4 = should be regenerated."
-    )
     name = (p.get("customer_name") or "the customer").strip()
     hist = (p.get("history") or "").strip()
+    _task, _show_msg = _quality_task_framing(p.get("incoming_message"), hist)
+    parts.append(_task)
     if hist:
         parts.append("\n--- CONVERSATION SO FAR ---\n" + hist)
-    else:
+    elif _show_msg:
         parts.append("\n--- This is a NEW conversation — no prior history. ---")
-    parts.append(
-        f"\n--- NEWEST MESSAGE FROM {name} ---\n"
-        + (p.get("incoming_message") or "").strip()
-    )
+    if _show_msg:
+        parts.append(
+            f"\n--- NEWEST MESSAGE FROM {name} ---\n"
+            + (p.get("incoming_message") or "").strip()
+        )
     rules = fetch_behavior_rules(p.get("customer_id"))
     if rules:
         parts.append(
