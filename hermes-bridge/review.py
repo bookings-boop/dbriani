@@ -521,6 +521,22 @@ def _translit_name(name):
     return res if (res and res.lower() != s.lower()) else ""
 
 
+def _yacht_display(row, label_key):
+    """Yacht line for a /review card. Prefers the resolved single booked_yacht
+    (✅ for CONFIRMED/won) over the discussed-yachts accumulator. For a CONFIRMED
+    card with multiple discussed yachts and NO booked_yacht resolved yet, flags
+    it so the operator knows which-was-booked is unresolved. Pure."""
+    booked = (row.get("booked_yacht") or "").strip()
+    if booked:
+        return ("✅ " + booked) if label_key == "CONFIRMED" else booked
+    yachts = (row.get("yachts") or "").strip()
+    if not yachts:
+        return "no yacht set"
+    if label_key == "CONFIRMED" and "," in yachts:
+        return yachts + " ⚠️ confirm booked yacht"
+    return yachts
+
+
 def _owes_reply(row):
     """True when WE owe the customer a reply — the customer messaged more
     recently than our last outbound (operator reply OR nudge). Mirrors the
@@ -827,16 +843,9 @@ def render_review(scored, totals, mode="ondemand"):
                 _reply_badge = "📨 awaiting reply"
             else:
                 _reply_badge = ""
-            # CONFIRMED with multiple yachts: we don't store WHICH one was
-            # booked (the `yachts` field accumulates every yacht discussed —
-            # Émilie shows 3), so flag it for the operator to confirm rather
-            # than implying all of them were booked.
-            _yacht_disp = row.get("yachts") or "no yacht set"
-            if label_key == "CONFIRMED" and "," in (row.get("yachts") or ""):
-                _yacht_disp += " ⚠️ confirm booked yacht"
             lead_body = (
                 f"{(_flag + ' ') if _flag else ''}{_idline} — "
-                f"{_yacht_disp} · "
+                f"{_yacht_display(row, label_key)} · "
                 f"{_safe_display_date(row.get('dates'))} · "
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"

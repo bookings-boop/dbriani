@@ -3137,7 +3137,11 @@ def read_lead_summary(filter_label=None):
         "  WHERE cs2.customer_id = v_lead_summary.customer_id),''), "
         "COALESCE(to_char((SELECT last_analyzed_at FROM conversation_state cs2 "
         "  WHERE cs2.customer_id = v_lead_summary.customer_id),"
-        "'YYYY-MM-DD HH24:MI:SSOF'),'') "
+        "'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        # booked_yacht — the single CONFIRMED yacht (vs the yachts accumulator).
+        # Correlated subquery against customer_facts so no view change needed.
+        "COALESCE((SELECT booked_yacht FROM customer_facts cf3 "
+        "  WHERE cf3.customer_id = v_lead_summary.customer_id),'') "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -3187,6 +3191,7 @@ def read_lead_summary(filter_label=None):
             "last_analysis_signal": parts[24].strip() if len(parts) > 24 else "",
             "last_analyzed_at_seconds":
                 _seconds_since(parts[25]) if len(parts) > 25 else None,
+            "booked_yacht": parts[26].strip() if len(parts) > 26 else "",
         }
         rows.append(row)
     return rows
