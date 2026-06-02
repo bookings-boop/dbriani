@@ -881,6 +881,21 @@ def _draft_log_columns(fields):
 
 
 # ---------------------------------------------------------------------------
+# Conversation modes (Part 2 — shadow). 'shadow' SENDS like 'approval' (it is
+# NOT 'autonomous', so the n8n Auto path never fires and nothing auto-sends),
+# but the bridge LOGS what autonomy WOULD have done (would_send/would_hold) to
+# draft_log — a safe observation runway before enabling /auto all.
+# ---------------------------------------------------------------------------
+VALID_MODES = ("approval", "autonomous", "paused", "shadow")
+
+
+def is_valid_mode(mode):
+    """Pure. True iff `mode` is an exact recognised conversation mode
+    (case-sensitive, no surrounding whitespace)."""
+    return mode in VALID_MODES
+
+
+# ---------------------------------------------------------------------------
 # Auto-demote-to-COLD guard + event-passed detector (2026-06-02 — Tal Sudai)
 # ---------------------------------------------------------------------------
 #
