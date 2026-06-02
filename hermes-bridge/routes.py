@@ -3461,13 +3461,37 @@ def handle_pipeline_analyze(payload, send):
                         # an UNVERIFIABLE 'passed date' (dates='today' was
                         # misread as 6+ days past -> NEW->COLD). ever_booked =
                         # history ever reached a paid/booked state.
-                        from labels import _demote_to_cold_blocked
+                        from labels import (_demote_to_cold_blocked,
+                                            _manual_override_protects)
                         eb_, _ebe = _psql(
                             "SELECT 1 FROM customer_label_history WHERE "
                             f"customer_id = {_lit(cid)} AND to_label IN "
                             "('CONFIRMED','WAITING_FOR_PAYMENT') LIMIT 1")
                         ever_booked_ = bool((eb_ or "").strip())
-                        if _demote_to_cold_blocked(
+                        # #13 (stress #11): never auto-undo a RECENT manual
+                        # operator override (the manual HOT reverts) — respect
+                        # the human decision until it ages out.
+                        mo_, _moe = _psql(
+                            "SELECT COALESCE(signal,'') || '\x1f' || "
+                            "EXTRACT(EPOCH FROM (now() - created_at))/86400.0 "
+                            "FROM customer_label_history WHERE customer_id = "
+                            f"{_lit(cid)} AND signal LIKE 'manual:%' "
+                            "ORDER BY created_at DESC LIMIT 1")
+                        mo_sig, mo_age = "", None
+                        _mol = (mo_ or "").strip().splitlines()
+                        if _mol:
+                            _pp = _mol[0].split("\x1f", 1)
+                            mo_sig = _pp[0].strip()
+                            if len(_pp) > 1:
+                                try:
+                                    mo_age = float(_pp[1].strip())
+                                except ValueError:
+                                    mo_age = None
+                        if _manual_override_protects(mo_sig, mo_age):
+                            log("pipeline-analyze demote BLOCKED "
+                                f"cid={cid} (recent manual override "
+                                f"{mo_sig!r})")
+                        elif _demote_to_cold_blocked(
                                 facts_.get("dates"), reasoning_, ever_booked_):
                             log("pipeline-analyze demote BLOCKED "
                                 f"cid={cid} (booked/unverifiable-passed; "
@@ -3844,12 +3868,19 @@ def handle_autosend_check(payload, send):
     both calls would roll QC twice and double-count the checkpoint."""
     from server import (evaluate_caps, get_mode, log_autosend,
                         AUTOSEND_MIN_SCORE, build_quality_query,
-                        _draft_latest_for_customer)
+                        _draft_latest_for_customer, canonicalize_cid)
     from labels import _quality_floor_ok, _is_handoff_message
     cid = (payload.get("customer_id") or "").strip()
     if not cid:
         send(400, {"ok": False, "error": "customer_id is required"})
         return
+    # #10 (stress #1): drafts, modes and cap counters are keyed under the
+    # CANONICAL cid (customer_facts.merged_into) — _draft_save canonicalizes on
+    # write — but n8n passes the raw inbound cid. Canonicalize here so the
+    # floor's draft-fetch + get_mode + evaluate_caps + log_autosend all align for
+    # a freshly-merged customer (otherwise the pending draft isn't found ->
+    # fail-closed block, and the caps split across the @lid/@c.us identities).
+    cid = canonicalize_cid(cid)
     commit = bool(payload.get("commit"))
     mode = get_mode(cid)
     if mode != "autonomous":

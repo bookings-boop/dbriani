@@ -818,6 +818,27 @@ def _do_not_merge_pinned(cid_a, cid_b, rows):
     return False
 
 
+def _manual_override_protects(signal, age_days, window_days=14):
+    """Pure. True when a lead carries a RECENT manual operator override
+    (signal 'manual:*') that the analyzer's auto-demote-to-COLD must NOT
+    silently undo (stress #11 — the manual HOT reverts on never-booked Dean
+    Pearson rows had no label lock, so the cron could re-COLD them). Past
+    window_days the automation may re-evaluate. Fail-SAFE: an unknown/negative
+    age (just-written / clock skew) protects."""
+    s = (signal or "").strip().lower()
+    if not s.startswith("manual:"):
+        return False
+    if age_days is None:
+        return True
+    try:
+        age = float(age_days)
+    except (TypeError, ValueError):
+        return True
+    if age < 0:
+        return True
+    return age <= window_days
+
+
 # ---------------------------------------------------------------------------
 # Auto-demote-to-COLD guard + event-passed detector (2026-06-02 — Tal Sudai)
 # ---------------------------------------------------------------------------

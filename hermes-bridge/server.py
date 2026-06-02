@@ -391,6 +391,11 @@ def _draft_save(draft):
         draft["customer_phone"] = cid
         log(f"_draft_save canonicalized cid {cid_raw!r} -> {cid!r} "
             f"for draft {did}")
+    # #10 (stress #2): scrub message bubbles at the SAVE chokepoint too (not just
+    # _draft_update) so a junk/poison/non-string bubble can never be persisted and
+    # later auto-sent — the literal-"false" vector. Mirrors the _draft_update guard.
+    if isinstance(draft.get("messages"), list):
+        draft["messages"] = _clean_message_bubbles(draft["messages"])
     msgs = draft.get("messages") or []
     msg_count = len(msgs) if isinstance(msgs, list) else 0
     preview = ""
