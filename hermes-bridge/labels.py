@@ -684,6 +684,100 @@ def _dedup_leads(items):
 # Capacity-fit constraint for the drafter (2026-06-02 capacity bug)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Identity merge-safety guard (2026-06-02 — Qurbani/Royalty 136 false merge)
+# ---------------------------------------------------------------------------
+#
+# The reconcile (handle_reconcile_identities) merged an @lid row into its
+# WAHA-resolved @c.us row using ONLY WhatsApp's live LID->phone lookup, with no
+# check that the two rows describe the same human. WhatsApp recycles/re-points
+# LIDs, so an old @lid row (Antonio / Bliss 55, 155 msgs) whose LID now resolves
+# to a DIFFERENT person's number (Qurbani / Royalty 136) was collapsed into one
+# card — burying the high-value lead. This guard requires same-person evidence:
+# a merge is refused when the two rows carry DISTINCT REAL names.
+
+_PLACEHOLDER_NAMES = frozenset({
+    "", "unknown", "unknown customer", "customer", "guest", "there",
+    "client", "lead", "n/a", "na", "none",
+})
+
+
+def _is_real_name(name):
+    """True when `name` is a genuine customer name — not blank, a placeholder
+    ('unknown'/'customer'/'guest'…), or a phone number rendered as a name.
+    Pure; case/whitespace-insensitive."""
+    n = " ".join((name or "").strip().lower().split())
+    if not n or n in _PLACEHOLDER_NAMES:
+        return False
+    if n.startswith("+") or n.replace(" ", "").lstrip("+").isdigit():
+        return False
+    return True
+
+
+def _merge_blocked(name_a, name_b):
+    """Identity merge-safety guard. True when two customer rows must NOT be
+    auto-merged because they carry DISTINCT real names — strong evidence they
+    are different humans (the Qurbani->Antonio false merge). Returns False when
+    either name is missing/placeholder/phone (a bare @lid legitimately merges
+    into its named @c.us row) or when the names match. Pure; the reconcile caller
+    fails OPEN only for non-name reasons — a name conflict ALWAYS blocks."""
+    if not _is_real_name(name_a) or not _is_real_name(name_b):
+        return False
+    na = " ".join(name_a.strip().lower().split())
+    nb = " ".join(name_b.strip().lower().split())
+    return na != nb
+
+
+# ---------------------------------------------------------------------------
+# Auto-demote-to-COLD guard + event-passed detector (2026-06-02 — Tal Sudai)
+# ---------------------------------------------------------------------------
+#
+# Tal Sudai (a CASH booking) sat at NEW because a cash deal never reaches
+# CONFIRMED (which requires a payment_link_sent). His dates field was the literal
+# word 'today' — never anchored to a calendar date — so the analyzer read the
+# silence as "the event passed" and auto-demoted NEW->COLD. The existing demote
+# only protected WAITING_FOR_PAYMENT/CONFIRMED; NEW was demotable, and there was
+# no check that the "passed" claim was actually VERIFIABLE.
+
+def _demote_to_cold_blocked(dates_str, reasoning, ever_booked=False,
+                            today=None):
+    """Guard the analyzer's auto-demote-to-COLD. Returns True (BLOCK the demote)
+    when:
+      (a) the customer has EVER been booked/paid (`ever_booked`) — a won/paid
+          lead must never be auto-killed to COLD; or
+      (b) the close is driven by a 'date passed / event over' claim BUT the
+          booking date does NOT deterministically parse to a date on/before
+          today — i.e. the 'passed' is unverifiable (relative/unparseable like
+          'today'/'tomorrow') or actually FUTURE. We refuse to kill a lead on a
+          date we cannot confirm has passed (the Tal Sudai incident).
+    A close for a REAL reason (price/competitor/ghost/spam/vendor) on ANY date
+    is NOT blocked — only passed-date-driven closes are gated on verifiability.
+    Pure/deterministic; None-safe."""
+    if ever_booked:
+        return True
+    if reasoning and _PASSED_CLAIM_RE.search(reasoning):
+        import datetime as _dt
+        today = today or _dt.date.today()
+        d = _parse_booking_date(dates_str)
+        if d is None or d > today:
+            return True
+    return False
+
+
+def event_passed(dates_str, today=None):
+    """True ONLY when the booking date deterministically parses to a date
+    strictly BEFORE today (the event already happened). False for today /
+    future / unparseable dates — we claim 'passed' only when we can prove it.
+    The single post-event detector for /review render (replaces ad-hoc copies).
+    Pure; None-safe."""
+    d = _parse_booking_date(dates_str)
+    if d is None:
+        return False
+    import datetime as _dt
+    today = today or _dt.date.today()
+    return d < today
+
+
 def _party_size_fit_line(party_size):
     """Drafter capacity constraint: only recommend yachts that fit the stated
     party. Returns a one-line instruction, or '' when the party size is unknown

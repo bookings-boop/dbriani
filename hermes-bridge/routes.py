@@ -3185,6 +3185,7 @@ def handle_reconcile_identities(payload, send):
         return
     checked = merged = 0
     pairs = []
+    skipped = []
     for ln in (out or "").strip().splitlines():
         parts = ln.split("|")
         if len(parts) < 2:
@@ -3217,6 +3218,27 @@ def handle_reconcile_identities(payload, send):
             cmc = 0
         # Canonical = the richer-history row (more messages).
         canon, dup = (lid, cus) if lmc >= cmc else (cus, lid)
+        # Identity merge-safety guard (2026-06-02 Qurbani/Royalty 136 false
+        # merge): WhatsApp recycles/re-points LIDs, so the live lid->phone
+        # lookup can map an old @lid row (Antonio/Bliss 55) to a DIFFERENT
+        # person's @c.us (Qurbani/Royalty 136). Refuse to merge two rows that
+        # carry DISTINCT real names — they are different humans. Fail-OPEN on a
+        # name-fetch error (only a clear name conflict blocks).
+        from labels import _merge_blocked
+        nm_out, _nme = _psql(
+            "SELECT customer_id || '\x1f' || COALESCE(name,'') "
+            f"FROM customer_facts WHERE customer_id IN ({_lit(lid)}, {_lit(cus)})")
+        names = {}
+        for nl in (nm_out or "").strip().splitlines():
+            p = nl.split("\x1f", 1)
+            if len(p) == 2:
+                names[p[0].strip()] = p[1].strip()
+        if _merge_blocked(names.get(lid, ""), names.get(cus, "")):
+            skipped.append(
+                f"{lid} [{names.get(lid, '')!r}] != {cus} "
+                f"[{names.get(cus, '')!r}] — name conflict, possible recycled LID")
+            log(f"reconcile SKIP name-conflict: {skipped[-1]}")
+            continue
         _psql(
             f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
             f"updated_at = now() WHERE customer_id = {_lit(dup)} "
@@ -3230,9 +3252,11 @@ def handle_reconcile_identities(payload, send):
             f"WHERE customer_id = {_lit(dup)}")
         merged += 1
         pairs.append(dup + " -> " + canon)
-    log(f"reconcile-identities: checked={checked} merged={merged}")
+    log(f"reconcile-identities: checked={checked} merged={merged} "
+        f"skipped={len(skipped)}")
     send(200, {"ok": True, "checked": checked, "merged": merged,
-                     "pairs": pairs[:25]})
+                     "pairs": pairs[:25],
+                     "skipped": skipped[:25], "skipped_count": len(skipped)})
 
 
 def handle_pipeline_analyze(payload, send):
@@ -3401,21 +3425,40 @@ def handle_pipeline_analyze(payload, send):
                 if verdict_ == "close" or score_ == 0:
                     prev_lbl_ = (row_.get("label") or "").strip()
                     if prev_lbl_ in ("NEW", "WARM", "HOT", "NEEDS_ATTENTION"):
-                        lk_, _lke = _psql(
-                            "SELECT label_locked_until > now() FROM "
-                            f"customer_facts WHERE customer_id = {_lit(cid)}")
-                        if not (lk_ or "").strip().startswith("t"):
-                            try:
-                                _sig = ("auto:analyzer_close"
-                                        if verdict_ == "close"
-                                        else "auto:analyzer_score0")
-                                apply_label_transition(
-                                    cid, prev_lbl_, "COLD", _sig,
-                                    reasoning_ or "analyzer: not convertible",
-                                    mc_, created_by="system")
-                            except Exception as _le:
-                                log("pipeline-analyze demote err "
-                                    f"cid={cid}: {_le!r}")
+                        # B-fix (2026-06-02 Tal Sudai cash-booking): never auto-
+                        # COLD a lead that was EVER booked/paid, nor kill one on
+                        # an UNVERIFIABLE 'passed date' (dates='today' was
+                        # misread as 6+ days past -> NEW->COLD). ever_booked =
+                        # history ever reached a paid/booked state.
+                        from labels import _demote_to_cold_blocked
+                        eb_, _ebe = _psql(
+                            "SELECT 1 FROM customer_label_history WHERE "
+                            f"customer_id = {_lit(cid)} AND to_label IN "
+                            "('CONFIRMED','WAITING_FOR_PAYMENT') LIMIT 1")
+                        ever_booked_ = bool((eb_ or "").strip())
+                        if _demote_to_cold_blocked(
+                                facts_.get("dates"), reasoning_, ever_booked_):
+                            log("pipeline-analyze demote BLOCKED "
+                                f"cid={cid} (booked/unverifiable-passed; "
+                                f"dates={facts_.get('dates')!r})")
+                        else:
+                            lk_, _lke = _psql(
+                                "SELECT label_locked_until > now() FROM "
+                                "customer_facts WHERE customer_id = "
+                                f"{_lit(cid)}")
+                            if not (lk_ or "").strip().startswith("t"):
+                                try:
+                                    _sig = ("auto:analyzer_close"
+                                            if verdict_ == "close"
+                                            else "auto:analyzer_score0")
+                                    apply_label_transition(
+                                        cid, prev_lbl_, "COLD", _sig,
+                                        reasoning_ or
+                                        "analyzer: not convertible",
+                                        mc_, created_by="system")
+                                except Exception as _le:
+                                    log("pipeline-analyze demote err "
+                                        f"cid={cid}: {_le!r}")
                 return ("analyzed", score_, cid,
                         facts_.get("name") or _name_fallback(cid),
                         reasoning_, verdict_)

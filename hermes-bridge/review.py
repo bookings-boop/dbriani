@@ -704,16 +704,22 @@ def render_review(scored, totals, mode="ondemand"):
                                     else "")))
                 imp_bits = "\n↳ " + _tag + _no_sale_reason(row)
             elif isinstance(imp, int):
-                imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                 if label_key == "CONFIRMED":
-                    # Booked & paid — any cached suggested_action/reasoning
-                    # predates the payment (e.g. 'send payment link to
-                    # lock the deposit'), so it's stale and misleading
-                    # (Antonio, 2026-05-28). Suppress it; point the
-                    # operator at post-sale actions instead.
-                    imp_bits += (" — _booked & paid · confirm logistics "
-                                 "or upsell (extra hour / add-ons)_")
+                    # Booked & paid. A PAST event (Émilie/Saif, 2026-06-02)
+                    # must NOT show the open-sale score or 'confirm logistics/
+                    # upsell' guidance — render a won/post-event nurture line.
+                    # Upcoming bookings keep the logistics/upsell guidance.
+                    from labels import event_passed as _event_passed
+                    if _event_passed(row.get("dates")):
+                        imp_bits = ("\n🏆 *won* — _event complete · thank / ask "
+                                    "for review · nurture for repeat or "
+                                    "referral (no upsell)_")
+                    else:
+                        imp_bits = (f"\n🧠 Hermes: *{imp}/100* — _booked & paid "
+                                    "· confirm logistics or upsell "
+                                    "(extra hour / add-ons)_")
                 else:
+                    imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                     # STALENESS GUARD (2026-05-29): the cached
                     # suggested_action/reasoning comes from the last
                     # hermes_analyze_lead run. If the customer has
@@ -802,9 +808,16 @@ def render_review(scored, totals, mode="ondemand"):
                 _reply_badge = "📨 awaiting reply"
             else:
                 _reply_badge = ""
+            # CONFIRMED with multiple yachts: we don't store WHICH one was
+            # booked (the `yachts` field accumulates every yacht discussed —
+            # Émilie shows 3), so flag it for the operator to confirm rather
+            # than implying all of them were booked.
+            _yacht_disp = row.get("yachts") or "no yacht set"
+            if label_key == "CONFIRMED" and "," in (row.get("yachts") or ""):
+                _yacht_disp += " ⚠️ confirm booked yacht"
             lead_body = (
                 f"{(_flag + ' ') if _flag else ''}{_idline} — "
-                f"{(row.get('yachts') or 'no yacht set')} · "
+                f"{_yacht_disp} · "
                 f"{_safe_display_date(row.get('dates'))} · "
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
@@ -907,12 +920,23 @@ def _name_fallback(customer_id):
         return "(unknown)"
     return "…" + digits[-4:]
 
-def _why_line(row, label_key):
+def _why_line(row, label_key, today=None):
     """Heuristic one-liner. Prefers Hermes' suggested_action when present
     for CONFIRMED + WAITING_FOR_PAYMENT (where the generic line — e.g.
     'share boarding details or upsell' — is often wrong because the
     operator has already shared boarding / payment link), and falls
-    back to deterministic rules everywhere else."""
+    back to deterministic rules everywhere else. `today` is injectable for
+    tests; defaults to the real date."""
+    # A CONFIRMED booking whose event date has ALREADY PASSED is a won,
+    # completed trip — stale 'wait for reply / re-engage / upsell' guidance is
+    # wrong (Saif & Émilie, 2026-06-02). Show a post-event nurture line and
+    # ignore any stale suggested_action. Upcoming bookings fall through to the
+    # normal logistics/upsell guidance below.
+    if label_key == "CONFIRMED":
+        from labels import event_passed
+        if event_passed(row.get("dates"), today=today):
+            return ("event complete — thank the guest, ask for a review, "
+                    "nurture for a repeat booking or referral")
     # For CONFIRMED/WAITING customers, suggested_action from Hermes is
     # more accurate than the generic guidance (it knows what's already
     # been said in the chat). Skip generic notes if we have it.
