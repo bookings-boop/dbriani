@@ -3703,7 +3703,9 @@ def handle_autosend_check(payload, send):
     Caps are deliberately NOT evaluated on the gate probe: evaluate_caps()
     rolls the QC sample and logs the checkpoint event, so evaluating on
     both calls would roll QC twice and double-count the checkpoint."""
-    from server import evaluate_caps, get_mode, log_autosend
+    from server import (evaluate_caps, get_mode, log_autosend,
+                        AUTOSEND_MIN_SCORE, build_quality_query)
+    from labels import _quality_floor_ok
     cid = (payload.get("customer_id") or "").strip()
     if not cid:
         send(400, {"ok": False, "error": "customer_id is required"})
@@ -3722,12 +3724,44 @@ def handle_autosend_check(payload, send):
         send(200, {"ok": True, "mode": mode, "auto_send": True,
                          "reason": "autonomous — caps evaluated at commit"})
         return
+    # SYNCHRONOUS QUALITY FLOOR (2026-06-02) — an autonomous draft auto-sends
+    # ONLY if it scores >= AUTOSEND_MIN_SCORE. Enforced HERE, before caps and
+    # before the send. FAIL-CLOSED: a missing draft or any scoring error routes
+    # to approval (auto_send=False) — it NEVER auto-sends an unscored/low draft.
+    _draft = payload.get("current_draft")
+    if isinstance(_draft, list):
+        _draft = "\n\n".join(str(m) for m in _draft)
+    _draft = str(_draft or "").strip()
+    if not _draft:
+        log(f"autosend-check FLOOR-BLOCK customer={cid} no draft to score")
+        send(200, {"ok": True, "mode": mode, "auto_send": False, "score": None,
+                   "reason": "quality_floor: no draft to score — routed for approval"})
+        return
+    try:
+        _score, _flags, _summary = _anthropic_score(build_quality_query({
+            "system_prompt": payload.get("system_prompt") or "",
+            "customer_name": payload.get("customer_name") or "",
+            "history": payload.get("history") or "",
+            "incoming_message": payload.get("incoming_message") or "",
+            "current_draft": _draft,
+            "customer_id": cid,
+        }))
+    except Exception as _se:
+        log(f"autosend-check FLOOR score error customer={cid}: {_se!r}")
+        _score = 0
+    if not _quality_floor_ok(_score, AUTOSEND_MIN_SCORE):
+        log(f"autosend-check FLOOR-BLOCK customer={cid} score={_score} "
+            f"< {AUTOSEND_MIN_SCORE} -> approval")
+        send(200, {"ok": True, "mode": mode, "auto_send": False, "score": _score,
+                   "reason": (f"quality_floor: scored {_score}/10 < "
+                              f"{AUTOSEND_MIN_SCORE} — routed for approval")})
+        return
     ok, reason = evaluate_caps(cid)
     if ok:
         log_autosend(cid, "auto")
-    log(f"autosend-check COMMIT customer={cid} mode=autonomous "
+    log(f"autosend-check COMMIT customer={cid} mode=autonomous score={_score} "
         f"auto_send={ok} reason={reason!r}")
-    send(200, {"ok": True, "mode": mode, "auto_send": ok,
+    send(200, {"ok": True, "mode": mode, "auto_send": ok, "score": _score,
                      "reason": reason})
 
 def handle_autosend_state(payload, send):

@@ -157,6 +157,11 @@ CAP_CONSEC_ACTIVE = _envflag("CAP_CONSECUTIVE_ACTIVE", "true")
 CAP_CONSEC_LIMIT = int(os.environ.get("CAP_CONSECUTIVE_LIMIT", "5"))
 CAP_SAMPLE_ACTIVE = _envflag("CAP_SAMPLE_ACTIVE", "true")
 CAP_SAMPLE_PCT = float(os.environ.get("CAP_SAMPLE_PCT", "5"))
+# Autonomous-send synchronous QUALITY FLOOR: an autonomous draft auto-sends
+# ONLY if it scores >= this (default 8). Enforced fail-closed in
+# handle_autosend_check(commit) BEFORE caps — a sub-floor score or any scoring
+# error routes to approval (never auto-sends).
+AUTOSEND_MIN_SCORE = int(os.environ.get("AUTOSEND_MIN_SCORE", "8"))
 DUBAI_MIDNIGHT = ("date_trunc('day', now() AT TIME ZONE 'Asia/Dubai') "
                   "AT TIME ZONE 'Asia/Dubai'")
 

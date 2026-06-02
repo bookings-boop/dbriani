@@ -623,6 +623,15 @@ def _clean_message_bubbles(messages):
 _TERMINAL_SEND_STATUSES = frozenset({"sent", "superseded", "disregarded"})
 
 
+def _quality_floor_ok(score, threshold=8):
+    """Autonomous-send QUALITY FLOOR. True ONLY when score is a real integer
+    >= threshold. FAIL-CLOSED: None, non-int, bool, float, or below-threshold
+    all return False — so a scoring error (score 0 / None) or a low score can
+    NEVER auto-send; it routes to approval. Pure/deterministic."""
+    return (isinstance(score, int) and not isinstance(score, bool)
+            and score >= threshold)
+
+
 def _send_blocked_by_status(status):
     """True when an approved send must be REFUSED because the draft is already
     in a terminal state — already sent (double-send), superseded by a newer
