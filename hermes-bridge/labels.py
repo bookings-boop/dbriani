@@ -364,6 +364,57 @@ def _accumulate_feedback(history, fb, cap=10):
 
 
 # ---------------------------------------------------------------------------
+# Lost vs not-a-customer classification (2026-06-02, bug 5e)
+# ---------------------------------------------------------------------------
+# Split a CLOSED lead's analyzer reasoning into LOST (a real lead that didn't
+# convert, with a reason) vs NOT_A_CUSTOMER (vendor/seller/spam/wrong-number),
+# so /review stops dumping both under "not a customer". Heuristic over the
+# analyzer's free-text reasoning (the structured close_reason isn't stored).
+
+_NAC_RE = re.compile(
+    r"\b(vendor|supplier|seller|selling\s+to\s+us|spam|wrong\s+number|"
+    r"b2b\s+pitch|partnership|pitch(ing)?|marketing|promot(e|ion|ing)|"
+    r"advertis|agency|broker|recruit|job\s+(enquiry|inquiry|application))\b",
+    re.IGNORECASE)
+_LOST_PRICE_RE = re.compile(
+    r"\b(price|pricing|expensive|too\s+much|budget|afford|"
+    r"cheaper|out\s+of\s+budget)\b", re.IGNORECASE)
+_LOST_COMPETITOR_RE = re.compile(
+    r"\b(booked\s+(elsewhere|with\s+another)|another\s+(operator|company|"
+    r"provider)|went\s+with|found\s+a\s+boat|competitor|already\s+booked)\b",
+    re.IGNORECASE)
+_LOST_TIMING_RE = re.compile(
+    r"\b(cancel(led|s|ling)?|changed?\s+plans|postpon\w*|"
+    r"no\s+longer\s+(needed|looking|interested)|next\s+time|not\s+this\s+time)\b",
+    re.IGNORECASE)
+_LOST_GHOST_RE = re.compile(
+    r"\b(ghost(ed|ing)?|no\s+(reply|response)|unresponsive|"
+    r"stopped\s+(replying|responding)|went\s+silent)\b", re.IGNORECASE)
+
+
+def _close_bucket(reasoning):
+    """Classify a closed lead's analyzer reasoning. Returns (bucket, label):
+    bucket = 'NOT_A_CUSTOMER' (vendor/seller/spam/wrong-number), 'LOST' (a real
+    lead that didn't convert — price/competitor/timing/ghosted), or '' when
+    unclear. label = a short display string. Pure/heuristic — vendor/spam is
+    checked first so a vendor mentioning price isn't mislabeled 'lost'."""
+    r = (reasoning or "").strip()
+    if not r:
+        return "", ""
+    if _NAC_RE.search(r):
+        return "NOT_A_CUSTOMER", "vendor / not a customer"
+    if _LOST_PRICE_RE.search(r):
+        return "LOST", "lost — price"
+    if _LOST_COMPETITOR_RE.search(r):
+        return "LOST", "lost — booked elsewhere"
+    if _LOST_TIMING_RE.search(r):
+        return "LOST", "lost — cancelled / timing"
+    if _LOST_GHOST_RE.search(r):
+        return "LOST", "lost — ghosted"
+    return "", ""
+
+
+# ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------
 # handle_draft_followup used to surface "Hermes returned no draft" when the
