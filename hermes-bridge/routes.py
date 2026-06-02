@@ -332,8 +332,15 @@ def handle_queue(payload, send):
                              "draft": None, "found": False})
             return
         d, err = _draft_get(did)
+        # send_claimed: a send was CLAIMED for this draft (claim key set at
+        # send-start, before WAHA + before status flips to 'sent'). The
+        # show-then-upgrade branch uses this to avoid re-opening a draft whose
+        # send is in flight — closing the race where status is still 'pending'
+        # at recheck time (2026-06-02).
+        _clm, _ = _redis(["EXISTS", f"draft:send_claim:{did}"])
         send(200, {"ok": True, "draft": d,
-                         "found": d is not None, "error": err})
+                         "found": d is not None, "error": err,
+                         "send_claimed": str(_clm or "0").strip() == "1"})
         return
 
     if action == "update":
