@@ -3382,6 +3382,18 @@ def handle_pipeline_analyze(payload, send):
                     closed.append((c, nm_, rea))
                 else:
                     top.append((sc, c, nm_, rea))
+        # Dedup the not-convertible cards: ONE per customer (bug 4a, 2026-06-02).
+        # Canonicalize so already-merged @lid/@c.us splits collapse and the
+        # Disregard button / closecard key act on the canonical row; then a
+        # name-based pass catches UNMERGED splits (e.g. "Noha" under two ids,
+        # both merged_into NULL) that canonicalize_cid can't yet unify.
+        try:
+            from server import canonicalize_cid
+            from labels import _dedup_leads
+            closed = _dedup_leads([(canonicalize_cid(c), nm_, r)
+                                   for (c, nm_, r) in closed])
+        except Exception as _de:
+            log(f"pipeline-analyze closed-dedup err: {_de!r}")
         top.sort(key=lambda t: t[0], reverse=True)
         top3 = top[:3]
         # Silent-by-default policy. The operator's mental model is ONE

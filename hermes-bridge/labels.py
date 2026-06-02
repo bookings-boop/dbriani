@@ -507,3 +507,28 @@ def _send_blocked_by_status(status):
     a transient lookup error never blocks a legitimate first send — only an
     unambiguous terminal status blocks."""
     return str(status or "").strip().lower() in _TERMINAL_SEND_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Not-convertible digest dedup (2026-06-02, bug 4a)
+# ---------------------------------------------------------------------------
+
+def _dedup_leads(items):
+    """Collapse a not-convertible card list to ONE entry per customer.
+    items = iterable of (cid, name, reason). Dedup by cid first, then by
+    normalized non-empty name — the name pass catches UNMERGED @lid/@c.us
+    identity splits that share a display name (e.g. 'Noha' under two ids),
+    which canonicalize_cid can't yet unify (both rows still merged_into NULL).
+    Preserves order; keeps the first occurrence. Pure/deterministic."""
+    seen_cid, seen_name, out = set(), set(), []
+    for cid, name, reason in items:
+        c = (cid or "").strip()
+        n = " ".join((name or "").strip().lower().split())
+        if (c and c in seen_cid) or (n and n in seen_name):
+            continue
+        if c:
+            seen_cid.add(c)
+        if n:
+            seen_name.add(n)
+        out.append((cid, name, reason))
+    return out
