@@ -60,7 +60,7 @@ from labels import (  # noqa: F401
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
     _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
-    _draft_log_columns,
+    _draft_log_columns, is_valid_mode,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -391,6 +391,63 @@ def _draft_log_write(draft_id, **fields):
             pass
 
 
+def _supersede_pending_for_cid(cid, except_did=None):
+    """Flip every OTHER pending draft for this customer to 'superseded',
+    drop it from the active set, and disable + mark its Telegram card.
+
+    Shared by _draft_save (a NEW pending draft arrived) and
+    handle_send_file (a file/brochure was sent, so the conversation
+    advanced and any open draft cards — often offering the file we just
+    sent — are now stale). `except_did` is left untouched (the new /
+    current draft). Best-effort: swallows all errors so it never blocks
+    the caller. Production bug 2026-06-02: a brochure sent via
+    handle_send_file did not run this sweep, so stale draft cards
+    lingered ('2 drafts stay open after sending brochure')."""
+    try:
+        existing_out, _xe = _redis(
+            ["ZRANGE", _byc_key(cid), "0", "-1"])
+        for other_id in (existing_out or "").splitlines():
+            other_id = other_id.strip()
+            if not other_id or other_id == except_did:
+                continue
+            other, _ge = _draft_get(other_id)
+            if other and other.get("status") == "pending":
+                other["status"] = "superseded"
+                _redis(["SET", _draft_key(other_id),
+                        json.dumps(other),
+                        "EX", str(QUEUE_TTL)])
+                _redis(["SREM", DRAFTS_ACTIVE, other_id])
+                log(f"_draft_save auto-superseded prior pending "
+                    f"{other_id} for cid={cid}")
+                # Best-effort Telegram card cleanup — disable the
+                # superseded card's buttons + mark it visually so
+                # the operator can't approve a stale card. Any TG
+                # API error is logged + ignored (never blocks the
+                # caller). Production bug 2026-05-27 (Luke double-
+                # drafts in Telegram).
+                try:
+                    tg_chat = other.get("telegram_chat_id")
+                    tg_msg = other.get("telegram_message_id")
+                    if tg_chat and tg_msg and TELEGRAM_BOT_TOKEN:
+                        tg_disable_card_buttons(tg_chat, tg_msg)
+                        prior_body = ""
+                        o_msgs = other.get("messages") or []
+                        if o_msgs:
+                            prior_body = str(o_msgs[0])
+                        elif other.get("draft_text"):
+                            prior_body = str(other.get("draft_text"))
+                        tg_prepend_superseded_marker(
+                            tg_chat, tg_msg, prior_body)
+                        log(f"_draft_save TG-edited superseded "
+                            f"card msg={tg_msg} cid={cid}")
+                except Exception as _tge:
+                    log(f"_draft_save TG-edit err for "
+                        f"{other_id}: {_tge!r}")
+    except Exception as e:
+        # Defensive: never block the caller on a cleanup failure.
+        log(f"_draft_save supersede sweep err: {e!r}")
+
+
 def _draft_save(draft):
     """Write draft JSON, set TTL, update active set + per-customer ZSET.
     Returns (ok, err).
@@ -509,49 +566,7 @@ def _draft_save(draft):
         return False, err
     if status == "pending":
         # Auto-supersede prior pendings for the same customer.
-        try:
-            existing_out, _xe = _redis(
-                ["ZRANGE", _byc_key(cid), "0", "-1"])
-            for other_id in (existing_out or "").splitlines():
-                other_id = other_id.strip()
-                if not other_id or other_id == did:
-                    continue
-                other, _ge = _draft_get(other_id)
-                if other and other.get("status") == "pending":
-                    other["status"] = "superseded"
-                    _redis(["SET", _draft_key(other_id),
-                            json.dumps(other),
-                            "EX", str(QUEUE_TTL)])
-                    _redis(["SREM", DRAFTS_ACTIVE, other_id])
-                    log(f"_draft_save auto-superseded prior pending "
-                        f"{other_id} for cid={cid}")
-                    # Best-effort Telegram card cleanup — disable the
-                    # superseded card's buttons + mark it visually so
-                    # the operator can't approve a stale card. Any TG
-                    # API error is logged + ignored (never blocks the
-                    # save). Production bug 2026-05-27 (Luke double-
-                    # drafts in Telegram).
-                    try:
-                        tg_chat = other.get("telegram_chat_id")
-                        tg_msg = other.get("telegram_message_id")
-                        if tg_chat and tg_msg and TELEGRAM_BOT_TOKEN:
-                            tg_disable_card_buttons(tg_chat, tg_msg)
-                            prior_body = ""
-                            o_msgs = other.get("messages") or []
-                            if o_msgs:
-                                prior_body = str(o_msgs[0])
-                            elif other.get("draft_text"):
-                                prior_body = str(other.get("draft_text"))
-                            tg_prepend_superseded_marker(
-                                tg_chat, tg_msg, prior_body)
-                            log(f"_draft_save TG-edited superseded "
-                                f"card msg={tg_msg} cid={cid}")
-                    except Exception as _tge:
-                        log(f"_draft_save TG-edit err for "
-                            f"{other_id}: {_tge!r}")
-        except Exception as e:
-            # Defensive: never block the new save on a cleanup failure.
-            log(f"_draft_save supersede sweep err: {e!r}")
+        _supersede_pending_for_cid(cid, except_did=did)
         _redis(["SADD", DRAFTS_ACTIVE, did])
     else:
         _redis(["SREM", DRAFTS_ACTIVE, did])
@@ -1628,7 +1643,7 @@ def get_mode(customer_id):
             # conversations can default to autonomous when /auto-all is on.
             return _global_default_mode()
         m = lines[0]
-        return m if m in ("approval", "autonomous", "paused") else "approval"
+        return m if is_valid_mode(m) else "approval"
     except Exception:
         return "approval"
 
@@ -1646,7 +1661,7 @@ def _global_default_mode():
             return "approval"
         lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
         m = lines[0] if lines else ""
-        return m if m in ("approval", "autonomous", "paused") else "approval"
+        return m if is_valid_mode(m) else "approval"
     except Exception:
         return "approval"
 
@@ -1655,8 +1670,8 @@ def set_mode(customer_id, mode, activated_by, break_reason=None):
     """Record a conversation-mode change. Returns (mode, None) or (None, err).
     break_reason is recorded when an automatic break-condition triggered the
     change; it is NULL for a normal operator-driven mode change."""
-    if mode not in ("approval", "autonomous", "paused"):
-        return None, "invalid mode (use approval|autonomous|paused)"
+    if not is_valid_mode(mode):
+        return None, "invalid mode (use approval|autonomous|paused|shadow)"
     sql = (
         "INSERT INTO conversation_modes "
         "(customer_id, mode, activated_at, activated_by, break_reason) VALUES ("

@@ -4936,6 +4936,35 @@ def handle_quality_check(payload, send):
     badge = _format_quality_badge({"score": score, "flags": flags})
     log(f"quality-check OK customer={payload.get('customer_name')!r} "
         f"score={score} flags={flags} elapsed={elapsed}ms")
+    # Shadow mode (draft-log Part 2): if this conversation is in 'shadow' mode,
+    # RECORD what autonomy WOULD do with this draft (would_send if it clears the
+    # floor, else would_hold) — WITHOUT sending. /quality-check fires for every
+    # draft's badge regardless of mode, so it's the natural observation point; it
+    # reuses the score just computed (no extra scoring, no n8n). Fail-OPEN: a
+    # logging error never affects the badge response below.
+    try:
+        _sh_cid = (payload.get("customer_id") or "").strip()
+        if _sh_cid:
+            from server import (get_mode, canonicalize_cid,
+                                AUTOSEND_MIN_SCORE, _draft_log_write)
+            from labels import _quality_floor_ok
+            _sh_cid = canonicalize_cid(_sh_cid)
+            if get_mode(_sh_cid) == "shadow":
+                _wd = ("would_send"
+                       if _quality_floor_ok(score, AUTOSEND_MIN_SCORE)
+                       else "would_hold")
+                _sh_did = ((payload.get("draft_id") or "").strip()
+                           or ("shadow:" + _sh_cid + ":"
+                               + str(int(time.time() * 1000))))
+                _draft_log_write(_sh_did, customer_id=_sh_cid, mode="shadow",
+                                 score=score, score_flags=", ".join(flags),
+                                 score_summary=summary, outcome=_wd,
+                                 is_shadow=True,
+                                 draft_text=payload.get("current_draft"))
+                log(f"SHADOW {_sh_cid} score={score} -> {_wd} "
+                    "(logged, NOT sent)")
+    except Exception as _she:
+        log(f"shadow-log non-fatal: {_she!r}")
     send(200, {"ok": True, "score": score, "flags": flags,
                      "summary": summary, "badge": badge,
                      "elapsed_ms": elapsed})
@@ -6288,6 +6317,15 @@ def handle_send_file(payload, send):
     log(f"send-file OK cid={cid} key={file_key!r} "
         f"mime={mime} fallback={fallback_used} "
         f"caption={(caption or '')[:40]!r}")
+    # A file just went out → the conversation advanced. Close any open
+    # draft cards for this customer so stale cards (often offering the
+    # very file we just sent) don't linger. Best-effort; never blocks
+    # the send response. Fix 2026-06-02 (dup-draft-after-brochure).
+    try:
+        from server import _supersede_pending_for_cid
+        _supersede_pending_for_cid(cid)
+    except Exception as _se:
+        log(f"send-file supersede err: {_se!r}")
     send(200, {
         "ok": True,
         "customer_id": cid,
