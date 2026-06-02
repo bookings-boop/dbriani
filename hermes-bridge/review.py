@@ -635,6 +635,7 @@ def render_review(scored, totals, mode="ondemand"):
         key=lambda it: (
             (it[1].get("label") or "") == "CONFIRMED",                 # active first
             _AWAIT_LABEL_PRIO.get(it[1].get("label") or "", 3),        # HOT → COLD
+            -_yacht_max_rate(it[1].get("yachts") or ""),               # rate desc
             -(it[1].get("last_customer_message_at_seconds") or 0),     # longest-waiting
         ))
 
@@ -643,12 +644,12 @@ def render_review(scored, totals, mode="ondemand"):
     # yachts the customer wants, descending; the additive score is the
     # tiebreaker (urgency/importance). This guarantees e.g. an
     # AK Royalty 136 @18,000/hr ranks above a Tatti 110 @9,000/hr even
-    # when the additive rate bonus is capped. NEW keeps recency order
-    # (yacht rate is usually unknown that early).
+    # when the additive rate bonus is capped. NEW: rate when known, else
+    # recency (the _recency_key pass above acts as stable tiebreaker).
     def _rate_key(item):
         return (_yacht_max_rate(item[1].get("yachts") or ""), item[0])
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
-                "WARM", "COLD", "CONFIRMED"):
+                "WARM", "COLD", "CONFIRMED", "NEW"):
         sections[_lk]["items"].sort(key=_rate_key, reverse=True)
     # NO ACTIVE SALE: float the operator's active graceful-exits (passed-date
     # leads we've re-engaged) to the top so they're visible above stale

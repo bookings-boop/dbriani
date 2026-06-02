@@ -515,6 +515,48 @@ def handle_queue(payload, send):
             send(200, {"ok": False, "blocked": f"already_{_sdstatus}",
                        "status": _sdstatus, "draft_id": did})
             return
+        # Customer-level recent-send guard (2026-06-02): blocks a second
+        # claim for the same customer's phone within the claim window.
+        # Prevents the pre-merge sibling double-send (two pending cards for
+        # the same human due to @lid/@c.us identity split). Fail OPEN —
+        # only an affirmative GET blocks; any Redis/lookup error passes.
+        # Override: the ✅ Force Send inline button in the block message
+        # (n8n callback route for forcesend: wires the bypass; see item 6).
+        _force = bool(payload.get("force"))
+        _phone = ((_sd or {}).get("customer_phone") or "").strip()
+        _cname = ((_sd or {}).get("customer_name") or _phone or "this customer").strip()
+        if _phone and not _force:
+            _ckey = f"csent:{_phone}"
+            try:
+                _cr, _crerr = _redis(["GET", _ckey])
+                _cblocked = bool(_cr and not _crerr)
+            except Exception:
+                _cblocked = False
+            if _cblocked:
+                log(f"send-claim CUSTOMER-BLOCKED did={did} phone={_phone}")
+                try:
+                    import json as _cjson
+                    from server import _tg_post, DEFAULT_ADMIN_CHAT
+                    _tg_post("sendMessage", {
+                        "chat_id": DEFAULT_ADMIN_CHAT,
+                        "text": (f"⚠️ <b>{_cname}</b> — skipped: already sent "
+                                 f"to this customer in the last minute (sibling-"
+                                 f"card guard). Tap Force Send to override, or "
+                                 f"run <code>/reconcile-identities</code> to "
+                                 f"merge the duplicate cards."),
+                        "parse_mode": "HTML",
+                        "reply_markup": _cjson.dumps({
+                            "inline_keyboard": [[
+                                {"text": "✅ Force Send",
+                                 "callback_data": f"forcesend:{did}"}
+                            ]]
+                        })
+                    })
+                except Exception as _cbe:
+                    log("send-claim customer-block notify err:", repr(_cbe))
+                send(200, {"ok": False, "blocked": "customer_recent_send",
+                           "draft_id": did})
+                return
         key = f"draft:send_claim:{did}"
         out, err = _redis(["SET", key, "1", "NX", "EX", str(ttl)])
         # _redis returns the raw text "OK" on success, "" on
@@ -522,6 +564,15 @@ def handle_queue(payload, send):
         claimed = bool(out and out.strip().upper() == "OK")
         if claimed:
             log(f"send-claim WON did={did} ttl={ttl}s")
+            # Mark this phone so a sibling card's claim-send is blocked
+            # within the same window. NX: first WON claim wins; the
+            # phone key expires with the draft claim TTL.
+            if _phone:
+                try:
+                    _redis(["SET", f"csent:{_phone}", did, "NX",
+                            "EX", str(ttl)])
+                except Exception:
+                    pass
         else:
             log(f"send-claim BLOCKED did={did} "
                 f"(another exec is already sending)")
