@@ -310,6 +310,36 @@ def _passed_date_close_is_wrong(dates_str, reasoning, today=None):
     return d > today
 
 
+# Bare relative date words a customer typed that get stored verbatim in
+# customer_facts.dates — they go stale ("tomorrow" captured days ago still
+# renders "tomorrow") and _parse_booking_date can't anchor them.
+_RELATIVE_DATE_RE = re.compile(
+    r"\b(today|tonight|tomorrow|"
+    r"this\s+(week|weekend|evening|afternoon|night|morning)|"
+    r"next\s+(week|weekend)|"
+    r"(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\w*\s+"
+    r"(night|evening|afternoon|morning))\b",
+    re.IGNORECASE,
+)
+
+
+def _safe_display_date(dates_str):
+    """Render a stored booking date for an operator card, but FLAG a bare
+    relative word (today/tomorrow/'this weekend'/'Friday night') that was
+    captured days ago and never resolved to a calendar date — it renders
+    verbatim and goes stale (shows 'tomorrow' forever) and defeats the
+    passed-date safeguards. Resolvable absolute dates pass through unchanged;
+    'no date' when empty. Pure."""
+    s = (dates_str or "").strip()
+    if not s:
+        return "no date"
+    if _parse_booking_date(s) is not None:
+        return s
+    if _RELATIVE_DATE_RE.search(s):
+        return f"{s} ⚠️ reconfirm"
+    return s
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------

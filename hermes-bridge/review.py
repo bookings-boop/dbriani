@@ -356,7 +356,7 @@ def _booking_urgency_bonus(dates_str):
 
 # Re-export from labels (already imported via server's re-export chain
 # but be explicit here so score_lead is self-contained).
-from labels import _parse_booking_date  # noqa: E402
+from labels import _parse_booking_date, _safe_display_date  # noqa: E402
 
 
 def score_lead(row, now_dt):
@@ -770,7 +770,7 @@ def render_review(scored, totals, mode="ondemand"):
             lead_body = (
                 f"{(_flag + ' ') if _flag else ''}{_idline} — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
-                f"{(row.get('dates') or 'no date')} · "
+                f"{_safe_display_date(row.get('dates'))} · "
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
                 f"  ·  {why}"
