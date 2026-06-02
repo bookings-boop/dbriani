@@ -356,7 +356,8 @@ def _booking_urgency_bonus(dates_str):
 
 # Re-export from labels (already imported via server's re-export chain
 # but be explicit here so score_lead is self-contained).
-from labels import _parse_booking_date, _safe_display_date  # noqa: E402
+from labels import (  # noqa: E402
+    _parse_booking_date, _safe_display_date, _followup_note)
 
 
 def score_lead(row, now_dt):
@@ -735,8 +736,7 @@ def render_review(scored, totals, mode="ondemand"):
                         # told 'send nudge' 8 min after we messaged him,
                         # 2026-05-29). Show when + that we're waiting.
                         imp_bits += (
-                            f" — _✅ followed up {_fmt_dur(_out_s)} ago — "
-                            f"awaiting reply, don't re-nudge_")
+                            f" — _{_followup_note(_fmt_dur(_out_s), rea, sug)}_")
                     elif _stale:
                         # Customer was active since the analysis ran; the
                         # cached recommendation is out of date.

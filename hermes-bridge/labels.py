@@ -340,6 +340,16 @@ def _safe_display_date(dates_str):
     return s
 
 
+def _followup_note(out_dur_str, rea, sug):
+    """The /review awaiting-reply note for a lead we already followed up. Keeps
+    the timing + anti-pushiness cue, but appends the analyzer's lead-specific
+    read (reasoning, else suggested action) so the line isn't identical across
+    every awaiting-reply lead (bug 5c). Pure."""
+    specific = (rea or "").strip() or (sug or "").strip()
+    tail = f" — {specific}" if specific else ", don't re-nudge"
+    return f"✅ followed up {out_dur_str} ago; awaiting reply{tail}"
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------
