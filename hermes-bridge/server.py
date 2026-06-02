@@ -60,6 +60,7 @@ from labels import (  # noqa: F401
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
     _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
+    _draft_log_columns,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -355,6 +356,41 @@ _AWAITING_STATUSES = ("awaiting_edit", "awaiting_amount")
 DEFAULT_ADMIN_CHAT = int(os.environ.get("ADMIN_CHAT_ID", "5532831477"))
 
 
+def _draft_log_write(draft_id, **fields):
+    """Fail-safe UPSERT into draft_log (migration 007). ADDITIVE observability:
+    NEVER raises and NEVER changes a send — the draft/send flow continues even if
+    this fails (incl. BEFORE the migration is applied, where it silently no-ops).
+    Keyed by draft_id (created -> scored -> outcome lifecycle); a row with no
+    draft_id is skipped. Only the provided, whitelisted columns are written, so a
+    partial lifecycle UPSERT never NULLs a prior value."""
+    try:
+        did = (str(draft_id).strip() if draft_id is not None else "")
+        if not did:
+            return
+        cols = _draft_log_columns(fields)
+        names = ["draft_id"]
+        vals = [_lit(did)]
+        for c, v in cols.items():
+            names.append(c)
+            if isinstance(v, bool):          # check bool BEFORE int
+                vals.append("true" if v else "false")
+            elif isinstance(v, int):
+                vals.append(str(v))
+            else:
+                vals.append(_lit(v))
+        updates = ["updated_at = now()"] + [c + " = EXCLUDED." + c for c in cols]
+        sql = ("INSERT INTO draft_log (" + ", ".join(names) + ") VALUES ("
+               + ", ".join(vals) + ") ON CONFLICT (draft_id) DO UPDATE SET "
+               + ", ".join(updates))
+        _psql(sql, timeout=6)
+    except Exception as e:
+        try:
+            log("_draft_log_write non-fatal did=" + repr(draft_id)
+                + ": " + repr(e))
+        except Exception:
+            pass
+
+
 def _draft_save(draft):
     """Write draft JSON, set TTL, update active set + per-customer ZSET.
     Returns (ok, err).
@@ -521,6 +557,25 @@ def _draft_save(draft):
         _redis(["SREM", DRAFTS_ACTIVE, did])
     _redis(["ZADD", _byc_key(cid), str(ts), did])
     _redis(["EXPIRE", _byc_key(cid), str(QUEUE_TTL)])
+    # Draft-log (migration 007) — fail-safe observability of this save. The
+    # draft is already committed above; this only RECORDS it, never blocks.
+    try:
+        _dl_txt = ""
+        if isinstance(msgs, list) and msgs:
+            _dl_txt = "\n\n".join(str(m) for m in msgs if isinstance(m, str))
+        if not _dl_txt:
+            _dl_txt = str(draft.get("draft_text") or "")
+        _draft_log_write(
+            did,
+            customer_id=cid,
+            customer_name=draft.get("customer_name"),
+            draft_text=(_dl_txt or None),
+            trigger_kind=(draft.get("trigger_kind") or draft.get("origin")),
+            incoming_message=(draft.get("customer_message")
+                              or draft.get("incoming_message")),
+            outcome=("held" if status == "pending" else status))
+    except Exception:
+        pass
     return True, None
 
 
@@ -653,6 +708,16 @@ def _draft_update(did, fields):
         msg_count = len(msgs) if isinstance(msgs, list) else 0
         log(f"DRAFT_UPDATE id={did} cid={cid} CONTENT_CHANGED "
             f"msgs={msg_count} fields={field_keys}")
+    # Draft-log (migration 007) — fail-safe outcome on a terminal status change.
+    _DL_OUTCOME = {"pending": "held", "sent": "sent",
+                   "superseded": "skipped", "disregarded": "skipped"}
+    if "status" in (fields or {}) and new_status != prior_status \
+            and new_status in _DL_OUTCOME:
+        try:
+            _draft_log_write(did, customer_id=cid,
+                             outcome=_DL_OUTCOME[new_status])
+        except Exception:
+            pass
     return d, None
 
 

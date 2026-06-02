@@ -840,6 +840,47 @@ def _manual_override_protects(signal, age_days, window_days=14):
 
 
 # ---------------------------------------------------------------------------
+# Draft-log (migration 007) — pure column whitelist + coercion for the
+# fail-safe UPSERT in server._draft_log_write. ADDITIVE observability only;
+# this never changes what is sent, it only records it.
+# ---------------------------------------------------------------------------
+_DRAFT_LOG_COLS = {
+    "customer_id": str, "customer_name": str, "trigger_kind": str,
+    "incoming_message": str, "draft_text": str, "mode": str,
+    "score": int, "score_flags": str, "score_summary": str,
+    "outcome": str, "final_text": str, "is_shadow": bool,
+}
+
+
+def _draft_log_columns(fields):
+    """Pure. Whitelist + type-coerce fields for a draft_log UPSERT. Drops
+    unknown columns and None values (so a partial lifecycle UPSERT never NULLs a
+    prior value), coerces score->int (a bool is NOT a score), is_shadow->bool,
+    the rest->str. An un-coercible value drops that one column (fail-safe)."""
+    out = {}
+    if not isinstance(fields, dict):
+        return out
+    for col, typ in _DRAFT_LOG_COLS.items():
+        if col not in fields:
+            continue
+        v = fields[col]
+        if v is None:
+            continue
+        try:
+            if typ is int:
+                if isinstance(v, bool):
+                    continue          # True must never become score 1
+                out[col] = int(v)
+            elif typ is bool:
+                out[col] = bool(v)
+            else:
+                out[col] = str(v)
+        except (TypeError, ValueError):
+            continue                  # un-coercible -> skip the column
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Auto-demote-to-COLD guard + event-passed detector (2026-06-02 — Tal Sudai)
 # ---------------------------------------------------------------------------
 #
