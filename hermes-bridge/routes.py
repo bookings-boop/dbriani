@@ -1667,6 +1667,7 @@ def handle_info(payload, send):
         get_current_label_row,
         waha_fetch_history,
     )
+    from util import _md_escape
     cid, err = resolve_target(payload)
     if not cid:
         send(200, {"ok": False, "error": err,
@@ -1827,9 +1828,9 @@ def handle_info(payload, send):
                          + (f" _as of {importance_at}_" if importance_at
                             else ""))
             if importance_reasoning:
-                lines.append(f"      _Reasoning:_ {importance_reasoning}")
+                lines.append(f"      _Reasoning:_ {_md_escape(importance_reasoning)}")
             if suggested_action:
-                lines.append(f"      _Suggested:_ {suggested_action}")
+                lines.append(f"      _Suggested:_ {_md_escape(suggested_action)}")
         else:
             # #7 safe-render: unscored lead — say so rather than showing a
             # blank HOT card (e.g. EnjoyBoat spam). Operator can use the
@@ -1892,7 +1893,7 @@ def handle_info(payload, send):
                 stale = "⚠️" if dj.get("stale_risk") else ""
                 draft_lines.append(
                     f"      • [{status_}] _{when}_ {stale} "
-                    f"\"{body_}\"")
+                    f"\"{_md_escape(body_)}\"")
             if draft_lines:
                 lines.append("")
                 lines.append("   📝 *Recent drafts:*")
@@ -1920,11 +1921,11 @@ def handle_info(payload, send):
                             body = ln.split('"', 1)[1].rstrip('"')
                             lines.append(
                                 f"      {who} _({ts})_ "
-                                f"\"{body[:200]}\"")
+                                f"\"{_md_escape(body[:200])}\"")
                         else:
-                            lines.append(f"      • {ln[:240]}")
+                            lines.append(f"      • {_md_escape(ln[:240])}")
                     except (IndexError, ValueError):
-                        lines.append(f"      • {ln[:240]}")
+                        lines.append(f"      • {_md_escape(ln[:240])}")
         except Exception as _e:
             log("info WAHA history err:", repr(_e))
 
@@ -1933,7 +1934,7 @@ def handle_info(payload, send):
             lines.append("")
             lines.append("   📌 *Per-customer notes:*")
             for note_text, dt in notes:
-                lines.append(f"      • {note_text}  _({dt})_")
+                lines.append(f"      • {_md_escape(note_text)}  _({dt})_")
 
         # ━━━ Behavior rules — global active + this customer's notes
         try:
@@ -1947,7 +1948,7 @@ def handle_info(payload, send):
                              f" (in Hermes prompt)")
                 # Top 5 global rules shown (rest in Hermes prompt only)
                 for r in gl[:5]:
-                    lines.append(f"      • {r[:140]}")
+                    lines.append(f"      • {_md_escape(r[:140])}")
                 if len(gl) > 5:
                     lines.append(f"      • _+ {len(gl)-5} more rules_")
         except Exception as _re:
@@ -1973,7 +1974,7 @@ def handle_info(payload, send):
             lines.append("   📅 *Label history (last 10):*")
             for sig, ev, dt, by in full_timeline:
                 pretty = _humanize_signal(sig, ev, by) or sig
-                lines.append(f"      • {pretty}  _({dt})_")
+                lines.append(f"      • {_md_escape(pretty)}  _({dt})_")
 
         # ━━━ Identity layer — show merged_into if this is a non-canonical
         # cid (e.g., operator landed on @c.us but the canonical is @lid)
@@ -2790,6 +2791,8 @@ def handle_draft_followup(payload, send):
     if not cid:
         send(200, {"ok": False, "error": "customer_id required"})
         return
+    row = None
+    name = ""
     try:
         # Always pull live WAHA history if the caller didn't provide one
         # (or provided a stale/short one). The customer-message path's
@@ -3170,9 +3173,26 @@ def handle_draft_followup(payload, send):
         })
     except Exception as e:
         log("draft_followup ERROR:", repr(e))
-        send(200, {"ok": False, "degraded": True, "error": str(e),
-                         "draft_text": "", "label": "WARM",
-                         "notes_for_zayn": "", "customer_name": ""})
+        # R4 even on exception: never dead-end with an empty draft. A gate /
+        # Hermes / db / transport error must still hand the operator an
+        # editable fact-anchored placeholder, not "Hermes returned no draft".
+        try:
+            from labels import _fact_anchored_fallback
+            _r = row or {}
+            _fb = _fact_anchored_fallback(
+                name or _r.get("name", ""), _r.get("yachts", ""),
+                _r.get("dates", ""), _r.get("party_size", ""))
+        except Exception:
+            _fb = ""
+        send(200, {"ok": bool(_fb), "degraded": True, "error": str(e),
+                         "draft_text": _fb,
+                         "label": ((row or {}).get("label") or "WARM"),
+                         "fallback_used": bool(_fb),
+                         "quality_badge": ("⚠️ Auto-fallback draft — an error "
+                                           "occurred while drafting; "
+                                           "fact-anchored placeholder, edit "
+                                           "before sending." if _fb else ""),
+                         "notes_for_zayn": "", "customer_name": (name or "")})
 
 def handle_reconcile_identities(payload, send):
     """POST /reconcile-identities — merge @lid/@c.us duplicate customer
@@ -3665,6 +3685,14 @@ def handle_lead_analyze_disregard(payload, send):
         nm = facts.get("name") or _name_fallback(cid)
         mc = int(row.get("message_count") or facts.get("message_count")
                  or 0)
+
+        # Operator's explicit Disregard / 🗂 Close-chat tap is authoritative on
+        # an already-terminal lead — a COLD dead lead, or a CONFIRMED won
+        # booking being closed — so it closes in ONE tap instead of asking
+        # Hermes for permission (which left COLD leads un-closed, 2026-06-02).
+        # Active HOT/WARM/NEW leads still get the Hermes safety analysis below.
+        if cur_label in ("COLD", "CONFIRMED"):
+            force_close = True
 
         # ---- force-override path — skip Hermes, just close ----
         if force_close:
