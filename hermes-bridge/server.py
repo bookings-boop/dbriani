@@ -142,7 +142,7 @@ FEEDBACK_TTL = int(os.environ.get("BRIDGE_FEEDBACK_TTL", "600"))
 # feedback) and behavioral_context's LIMIT was silently hiding the 14 oldest
 # from the drafter — i.e. operator feedback captured but never applied
 # (operator 2026-06-01). The daily digest warns past 40 → re-consolidate then.
-FEEDBACK_MAX_GLOBAL = int(os.environ.get("FEEDBACK_MAX_GLOBAL", "40"))
+FEEDBACK_MAX_GLOBAL = int(os.environ.get("FEEDBACK_MAX_GLOBAL", "60"))
 FEEDBACK_MAX_SCENARIO = int(os.environ.get("FEEDBACK_MAX_SCENARIO", "5"))
 FEEDBACK_MAX_PER_CUSTOMER = int(os.environ.get("FEEDBACK_MAX_PER_CUSTOMER", "5"))
 
@@ -1003,6 +1003,31 @@ HANDOFF_DIRECTIVE = (
 )
 
 
+# RULE #4 — WhatsApp STYLE. The operator has corrected these SAME formatting
+# mistakes many times (hype opener, wrong price format, missing yacht URL,
+# wall-of-text, re-asking known facts). The corrections live in behavior_rules
+# but get diluted among 40+ rules in the 70KB base prompt. Pinning them here at
+# high salience (same lever as NO_INVENT) is what makes them stick.
+STYLE_DIRECTIVE = (
+    "============================================================\n"
+    "RULE #4 — WHATSAPP STYLE (operator has corrected these REPEATEDLY):\n"
+    "============================================================\n"
+    "1. NO hype/flattery opener — never start with 'perfect combination', "
+    "'amazing choice', 'great pick', etc. Lead with the substance.\n"
+    "2. PRICE FORMAT — amount BEFORE the currency: '900 AED/hr', '2,835 AED' — "
+    "never 'AED 900'. Do NOT cram rate x hours = subtotal + VAT = total into "
+    "one line; keep pricing clean and minimal.\n"
+    "3. YACHT URL — whenever you name or recommend a specific yacht, ALWAYS "
+    "include its link on its own line: dubriani.com/yacht/<slug>/.\n"
+    "4. SHORT & SCANNABLE — one or two short lines per point; split distinct "
+    "ideas (recommendation / price / question) across separate short messages; "
+    "never a dense run-on wall of text in a single message.\n"
+    "5. NEVER re-ask a fact ALREADY in the conversation (date, yacht, guest "
+    "count, time) — read the history first.\n"
+    "These are hard mandates — a violation is an automatic operator rejection."
+)
+
+
 def behavioral_context(customer_id):
     """Active behavioural rules + notes for a customer. Used by drafts.
     Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
@@ -1091,7 +1116,7 @@ def behavioral_context(customer_id):
     # block — so the drafter can never compose without the no-invent mandate
     # at the very top of its dynamic context (2026-06-01 fabrication incident).
     formatted = (NO_INVENT_DIRECTIVE + "\n\n" + ASK_BEFORE_GUESS_DIRECTIVE
-                 + "\n\n" + HANDOFF_DIRECTIVE
+                 + "\n\n" + HANDOFF_DIRECTIVE + "\n\n" + STYLE_DIRECTIVE
                  + ("\n\n" + formatted if formatted else ""))
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}

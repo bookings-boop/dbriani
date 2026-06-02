@@ -529,7 +529,13 @@ def handle_queue(payload, send):
             _ckey = f"csent:{_phone}"
             try:
                 _cr, _crerr = _redis(["GET", _ckey])
-                _cblocked = bool(_cr and not _crerr)
+                # Only a DIFFERENT draft_id is a genuine sibling card. The same
+                # card re-tapped (its own send still in flight) must NOT show the
+                # "sibling/duplicate cards" message — fall through to the
+                # per-draft claim + status guards (2026-06-02 false-positive:
+                # 194905951437046@lid, a single un-merged card).
+                from labels import _sibling_send_blocked
+                _cblocked = (not _crerr) and _sibling_send_blocked(_cr, did)
             except Exception:
                 _cblocked = False
             if _cblocked:

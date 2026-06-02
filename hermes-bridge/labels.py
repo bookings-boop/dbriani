@@ -645,6 +645,20 @@ def _is_handoff_message(text):
             and "correct details" in t)
 
 
+def _sibling_send_blocked(csent_value, current_did):
+    """Customer-level sibling-card send guard decision (2026-06-02 false-positive
+    fix). True ONLY when a send to this customer's phone was already claimed by a
+    DIFFERENT draft_id (a genuine sibling/duplicate card from an @lid/@c.us
+    identity split) within the window. The SAME card re-tapped
+    (csent_value == current_did) is NOT blocked here — it falls through to the
+    per-draft claim + status guards, which give the accurate 'already sending' /
+    'already sent' message instead of a misleading 'duplicate cards' one. Pure;
+    None/blank/redis-newline safe (no value or same id -> not blocked)."""
+    cv = (csent_value or "").strip()
+    cd = (current_did or "").strip()
+    return bool(cv and cd and cv != cd)
+
+
 def _send_blocked_by_status(status):
     """True when an approved send must be REFUSED because the draft is already
     in a terminal state — already sent (double-send), superseded by a newer
