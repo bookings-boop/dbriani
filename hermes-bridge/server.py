@@ -940,6 +940,30 @@ NO_INVENT_DIRECTIVE = (
 )
 
 
+# RULE #2 for the DRAFTER (Pillar C, 2026-06-02) — appended right after RULE #1
+# so the "ask, don't guess" mandate has high salience. The drafter emits a
+# `needs_operator_input` field ONLY when a concrete fact it cannot infer is
+# essential; n8n 'Parse Response' detects it, POSTs /ask-operator, and skips
+# the draft card. Deliberately conservative: most replies need NO input, so the
+# default is to DRAFT (with a holding line if unsure), not to ask.
+ASK_BEFORE_GUESS_DIRECTIVE = (
+    "============================================================\n"
+    "RULE #2 — ASK, DON'T GUESS (use only when truly necessary):\n"
+    "============================================================\n"
+    "If answering correctly REQUIRES a concrete fact you cannot reasonably "
+    "infer from the conversation, the rules, or your catalog — and you would "
+    "otherwise have to GUESS a price, availability, policy, or spec — then "
+    "instead of guessing, add a \"needs_operator_input\" field to your JSON "
+    "holding the SINGLE specific question you need answered, and leave "
+    "\"messages\" EMPTY (\"messages\": []). The operator answers it, I draft "
+    "the reply and remember the answer for every future customer. Use this "
+    "SPARINGLY — it interrupts the operator. Most replies need NO input: when "
+    "you can give a useful reply, or a short holding line (\"let me confirm "
+    "that and come right back\"), DO THAT and omit needs_operator_input. NEVER "
+    "ask for something already in the conversation history. One question max."
+)
+
+
 def behavioral_context(customer_id):
     """Active behavioural rules + notes for a customer. Used by drafts.
     Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
@@ -1027,7 +1051,8 @@ def behavioral_context(customer_id):
     # RULE #1 leads ALWAYS — even when there are no learned rules / no lead
     # block — so the drafter can never compose without the no-invent mandate
     # at the very top of its dynamic context (2026-06-01 fabrication incident).
-    formatted = NO_INVENT_DIRECTIVE + ("\n\n" + formatted if formatted else "")
+    formatted = (NO_INVENT_DIRECTIVE + "\n\n" + ASK_BEFORE_GUESS_DIRECTIVE
+                 + ("\n\n" + formatted if formatted else ""))
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
 
