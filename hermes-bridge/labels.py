@@ -728,18 +728,94 @@ def _is_real_name(name):
     return True
 
 
+def _name_edit_distance(a, b):
+    """Levenshtein edit distance between two short strings (names). Pure.
+    Iterative two-row DP — names are short so cost is negligible."""
+    a = a or ""
+    b = b or ""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(
+                prev[j] + 1,                # deletion
+                cur[j - 1] + 1,             # insertion
+                prev[j - 1] + (ca != cb),   # substitution
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def _names_likely_same_person(name_a, name_b):
+    """Pure. True when two REAL names plausibly describe the SAME human, so the
+    reconcile may merge their @lid/@c.us rows. Deliberately CONSERVATIVE — only
+    the dominant legit splits qualify; shared-first-name-only and nicknames do
+    NOT (we err toward NOT merging: a false merge buries a high-value lead, while
+    a refused merge only leaves a reversible duplicate card):
+      - exact match (case/space-insensitive); or
+      - one name's token-set is a subset of the other's (pushName 'Antonio' vs
+        extracted 'Antonio Rossi' — the #1 case); or
+      - a small whole-string edit distance (transliteration/typo: Mohammad/
+        Mohammed, Sara/Sarah, Jon/John).
+    Antonio vs Qurbani (recycled-LID false merge) stays NOT-same -> blocked."""
+    na = " ".join((name_a or "").strip().lower().split())
+    nb = " ".join((name_b or "").strip().lower().split())
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = set(na.split()), set(nb.split())
+    if ta <= tb or tb <= ta:
+        return True
+    thresh = 1 if min(len(na), len(nb)) <= 6 else 2
+    return _name_edit_distance(na, nb) <= thresh
+
+
 def _merge_blocked(name_a, name_b):
     """Identity merge-safety guard. True when two customer rows must NOT be
-    auto-merged because they carry DISTINCT real names — strong evidence they
-    are different humans (the Qurbani->Antonio false merge). Returns False when
-    either name is missing/placeholder/phone (a bare @lid legitimately merges
-    into its named @c.us row) or when the names match. Pure; the reconcile caller
-    fails OPEN only for non-name reasons — a name conflict ALWAYS blocks."""
+    auto-merged because they carry DISTINCT real names that do NOT look like the
+    same person — strong evidence they are different humans (the Qurbani->Antonio
+    recycled-LID false merge). Returns False (ALLOW) when either name is missing/
+    placeholder/phone (a bare @lid legitimately merges into its named @c.us row)
+    OR the two names plausibly describe the same person (exact / first-name-vs-
+    full-name / transliteration-typo — see _names_likely_same_person). Pure; the
+    reconcile caller fails OPEN only for non-name reasons.
+
+    (2026-06-02 PM loosen, stress-finding #3: the prior `na != nb` blocked the
+    MOST COMMON legit split — first-name / typo — causing duplicate draft cards;
+    the safety net now blocks only genuinely-different names.)"""
     if not _is_real_name(name_a) or not _is_real_name(name_b):
         return False
-    na = " ".join(name_a.strip().lower().split())
-    nb = " ".join(name_b.strip().lower().split())
-    return na != nb
+    return not _names_likely_same_person(name_a, name_b)
+
+
+def _do_not_merge_pinned(cid_a, cid_b, rows):
+    """Pure, name-INDEPENDENT durable un-merge pin (stress-finding #4). Returns
+    True when customer_label_history holds a 'do_not_merge' row that links this
+    exact pair — written the first time the reconcile refuses a name-conflicting
+    merge, so a later name-refresh that blanks/aligns a name can never silently
+    re-merge them. `rows` = iterable of (customer_id, signal, evidence)."""
+    a = (cid_a or "").strip()
+    b = (cid_b or "").strip()
+    if not a or not b:
+        return False
+    for row in rows:
+        cid = (row[0] or "").strip()
+        signal = (row[1] or "").strip() if len(row) > 1 else ""
+        evidence = (row[2] or "") if len(row) > 2 else ""
+        if signal != "do_not_merge":
+            continue
+        if cid == a and b in evidence:
+            return True
+        if cid == b and a in evidence:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

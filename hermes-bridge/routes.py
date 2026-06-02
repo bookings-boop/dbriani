@@ -3230,7 +3230,23 @@ def handle_reconcile_identities(payload, send):
         # person's @c.us (Qurbani/Royalty 136). Refuse to merge two rows that
         # carry DISTINCT real names — they are different humans. Fail-OPEN on a
         # name-fetch error (only a clear name conflict blocks).
-        from labels import _merge_blocked
+        from labels import _merge_blocked, _do_not_merge_pinned
+        # Durable name-INDEPENDENT un-merge pin (stress #4): once a pair has been
+        # refused for a name conflict, a 'do_not_merge' row keeps it un-merged
+        # even if a later WAHA name-refresh blanks/aligns a name (which would
+        # otherwise let _merge_blocked fail open and silently re-merge them).
+        pin_out, _pe = _psql(
+            "SELECT customer_id || '\x1f' || COALESCE(signal,'') || '\x1f' || "
+            "COALESCE(evidence,'') FROM customer_label_history "
+            f"WHERE customer_id IN ({_lit(lid)}, {_lit(cus)}) "
+            "AND signal = 'do_not_merge'")
+        pin_rows = []
+        for pl in (pin_out or "").strip().splitlines():
+            pin_rows.append((pl.split("\x1f", 2) + ["", "", ""])[:3])
+        if _do_not_merge_pinned(lid, cus, pin_rows):
+            skipped.append(f"{lid} <-> {cus} — do_not_merge pin (held un-merged)")
+            log(f"reconcile SKIP pinned: {skipped[-1]}")
+            continue
         nm_out, _nme = _psql(
             "SELECT customer_id || '\x1f' || COALESCE(name,'') "
             f"FROM customer_facts WHERE customer_id IN ({_lit(lid)}, {_lit(cus)})")
@@ -3240,10 +3256,19 @@ def handle_reconcile_identities(payload, send):
             if len(p) == 2:
                 names[p[0].strip()] = p[1].strip()
         if _merge_blocked(names.get(lid, ""), names.get(cus, "")):
+            # Persist a durable pin so this refusal survives future name changes
+            # (stress #4). The pin-check above means this INSERT fires at most once.
+            _psql(
+                "INSERT INTO customer_label_history (customer_id, from_label, "
+                "to_label, signal, evidence, message_count, created_at, "
+                f"created_by) SELECT {_lit(lid)}, label, label, 'do_not_merge', "
+                f"{_lit('recycled-LID name conflict vs ' + cus)}, "
+                "COALESCE(message_count,0), now(), 'system' FROM customer_facts "
+                f"WHERE customer_id = {_lit(lid)}")
             skipped.append(
                 f"{lid} [{names.get(lid, '')!r}] != {cus} "
                 f"[{names.get(cus, '')!r}] — name conflict, possible recycled LID")
-            log(f"reconcile SKIP name-conflict: {skipped[-1]}")
+            log(f"reconcile SKIP name-conflict (pinned): {skipped[-1]}")
             continue
         _psql(
             f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
