@@ -421,3 +421,37 @@ def parse_paymatch_callback(data):
     if not charge or not cid:
         return None
     return {"charge": charge, "cid": None if cid == "none" else cid}
+
+
+# ---------------------------------------------------------------------------
+# Outgoing message-bubble guard (2026-06-02 "false" incident)
+# ---------------------------------------------------------------------------
+#
+# A draft's `messages` is a list of WhatsApp bubbles that the send path
+# iterates and String()-coerces. On 2026-06-02 a (list, bool) tuple from an
+# un-unpacked sanitize_draft_messages() leaked a Python False into that list,
+# which became a literal "false" bubble sent to a customer. This canonical
+# guard guarantees every bubble is a real, non-empty string — dropping
+# booleans, None, numbers, nested lists, blanks, and the literal poison words
+# — so a serialization bug / LLM glitch / future regression can never again
+# mint a junk bubble. Pure; used at the persistence boundary (_draft_update).
+
+_POISON_BUBBLES = frozenset({"false", "true", "none", "null"})
+
+
+def _clean_message_bubbles(messages):
+    """Return `messages` as a list of clean, non-empty strings. Drops anything
+    that isn't a real string bubble (False/None/numbers/nested lists/blank/
+    whitespace and the literal 'false'/'true'/'none'/'null'). Non-list/tuple
+    input yields [] (not valid bubbles). Pure/deterministic."""
+    if not isinstance(messages, (list, tuple)):
+        return []
+    out = []
+    for m in messages:
+        if not isinstance(m, str):
+            continue
+        s = m.strip()
+        if not s or s.lower() in _POISON_BUBBLES:
+            continue
+        out.append(s)
+    return out

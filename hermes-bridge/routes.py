@@ -4835,7 +4835,10 @@ def handle_draft_gated(payload, send):
         send(200, {"ok": False, "error": "no draft produced"})
         return
     try:
-        best["messages"] = sanitize_draft_messages(best["messages"])
+        # MUST unpack the (list, bool) tuple — assigning the whole tuple put a
+        # Python False into messages -> a literal "false" bubble sent to a
+        # customer (2026-06-02 incident). Mirror the correct _gate_loop caller.
+        best["messages"], _ = sanitize_draft_messages(best["messages"])
     except Exception:
         pass
     log(f"draft-gated cid={cid} score={best['score']} attempts={attempts} "

@@ -58,7 +58,7 @@ from labels import (  # noqa: F401
     SAME_DAY_RE, PRICING_INQUIRED_RE, YACHT_KEYWORD_RE,
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
-    _MONTH_NUM, _parse_booking_date,
+    _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -575,6 +575,12 @@ def _draft_update(did, fields):
             f"draft is {prior_status} and no newer pending draft "
             f"exists for this customer. Refine cannot be applied — "
             f"send a fresh message or use /draft to regenerate.")
+    # Persistence-boundary guard: a draft's messages must always be a list of
+    # clean strings. Any path that commits messages (regen/refine/save) is
+    # scrubbed here so a serialization bug can never persist a junk bubble that
+    # the send path would deliver (the 2026-06-02 "false" incident).
+    if fields and "messages" in fields:
+        fields["messages"] = _clean_message_bubbles(fields["messages"])
     d.update(fields or {})
     # status side-effect on the active set
     if "status" in (fields or {}):
@@ -2932,7 +2938,9 @@ def sanitize_draft_messages(messages):
     stripped = False
     for m in messages:
         if not isinstance(m, str):
-            cleaned.append(m)
+            # Drop non-strings (False/None/numbers/nested) — a stray boolean
+            # here was the 2026-06-02 "false" bubble. Never pass them through.
+            stripped = True
             continue
         out = m
         for pat in bad_patterns:
