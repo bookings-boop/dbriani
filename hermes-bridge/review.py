@@ -797,11 +797,15 @@ def render_review(scored, totals, mode="ondemand"):
                         imp_bits += (
                             f" — _{_followup_note(_fmt_dur(_out_s), rea, sug)}_")
                     elif _stale:
-                        # Customer was active since the analysis ran; the
-                        # cached recommendation is out of date.
-                        imp_bits += (" — _🔄 customer active since last "
-                                     "analysis — open chat / draft to "
-                                     "re-check_")
+                        # Customer was active since the analysis ran; the cached
+                        # recommendation may be out of date — but STILL show the
+                        # last read (e.g. 'yacht vs fishing preference') so the
+                        # operator sees the context, not just a generic 'stale'
+                        # note (2026-06-02: fishing lead's context was hidden).
+                        _ctx = sug or rea
+                        imp_bits += (" — _🔄 active since last analysis (re-check)"
+                                     + (f" · last read: {_ctx}" if _ctx else "")
+                                     + "_")
                     elif sug and not why_used_sug:
                         imp_bits += f" — _{sug}_"
                     elif rea and why_used_sug:
