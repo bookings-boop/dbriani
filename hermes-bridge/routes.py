@@ -481,6 +481,33 @@ def handle_queue(payload, send):
             send(200, {"ok": False, "blocked": "waha_degraded",
                        "status": _wstatus, "draft_id": did})
             return
+        # Status guard (2026-06-02 double-send): never send a draft that is
+        # already terminal. A second/stale card for the same customer (e.g. an
+        # unmerged @lid vs @c.us identity split, or an already-sent draft) must
+        # not re-send. Fail OPEN on a lookup error — only an UNAMBIGUOUS
+        # terminal status blocks, so a transient Redis/DB hiccup can never wedge
+        # a legitimate first send.
+        try:
+            _sd, _sderr = _draft_get(did)
+            _sdstatus = (_sd or {}).get("status") if not _sderr else None
+        except Exception:
+            _sdstatus = None
+        from labels import _send_blocked_by_status
+        if _sdstatus is not None and _send_blocked_by_status(_sdstatus):
+            log(f"send-claim STATUS-BLOCKED did={did} status={_sdstatus}")
+            try:
+                from server import _tg_post, DEFAULT_ADMIN_CHAT
+                _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT,
+                    "text": (f"🚫 Not sent — this draft is already "
+                             f"<b>{_sdstatus}</b>. Guarding against a "
+                             f"double-send / stale duplicate card."),
+                    "parse_mode": "HTML"})
+            except Exception as _be:
+                log("send-claim status-block notify err:", repr(_be))
+            send(200, {"ok": False, "blocked": f"already_{_sdstatus}",
+                       "status": _sdstatus, "draft_id": did})
+            return
         key = f"draft:send_claim:{did}"
         out, err = _redis(["SET", key, "1", "NX", "EX", str(ttl)])
         # _redis returns the raw text "OK" on success, "" on

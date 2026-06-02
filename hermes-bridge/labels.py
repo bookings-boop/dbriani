@@ -455,3 +455,26 @@ def _clean_message_bubbles(messages):
             continue
         out.append(s)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Send status guard (2026-06-02 double-send)
+# ---------------------------------------------------------------------------
+#
+# claim-send historically never read draft.status, so its only idempotency was
+# a per-draft_id 60s NX lock. Tapping ✅ Send on an already-sent card, or on a
+# stale/superseded SIBLING card for the same customer (an unmerged @lid vs
+# @c.us split — a DIFFERENT draft_id), re-sent the customer. This predicate
+# decides when a send must be refused because the draft is already terminal.
+
+_TERMINAL_SEND_STATUSES = frozenset({"sent", "superseded", "disregarded"})
+
+
+def _send_blocked_by_status(status):
+    """True when an approved send must be REFUSED because the draft is already
+    in a terminal state — already sent (double-send), superseded by a newer
+    draft, or disregarded. pending / awaiting_* drafts are sendable. Pure; the
+    claim-send caller fails OPEN (allows the send) when status can't be read, so
+    a transient lookup error never blocks a legitimate first send — only an
+    unambiguous terminal status blocks."""
+    return str(status or "").strip().lower() in _TERMINAL_SEND_STATUSES
