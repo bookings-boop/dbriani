@@ -521,6 +521,19 @@ def _translit_name(name):
     return res if (res and res.lower() != s.lower()) else ""
 
 
+def _owes_reply(row):
+    """True when WE owe the customer a reply — the customer messaged more
+    recently than our last outbound (operator reply OR nudge). Mirrors the
+    '🔴 needs your reply' badge. Seconds-ago fields: smaller = more recent.
+    Pure; None-safe."""
+    cs = row.get("last_customer_message_at_seconds")
+    outs = [s for s in (row.get("last_operator_reply_at_seconds"),
+                        row.get("last_nudge_drafted_at_seconds"))
+            if isinstance(s, (int, float))]
+    out = min(outs) if outs else None
+    return isinstance(cs, (int, float)) and (out is None or cs < out)
+
+
 def render_review(scored, totals, mode="ondemand"):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -646,8 +659,14 @@ def render_review(scored, totals, mode="ondemand"):
     # AK Royalty 136 @18,000/hr ranks above a Tatti 110 @9,000/hr even
     # when the additive rate bonus is capped. NEW: rate when known, else
     # recency (the _recency_key pass above acts as stable tiebreaker).
+    # Owed-reply leads (customer waiting on US) float to the TOP of their tier
+    # so an unanswered customer is NEVER buried in a capped tier's overflow
+    # (2026-06-02: a HOT 'needs your reply' fishing lead with no yacht ranked
+    # 19/24 and vanished). Then rate-first, then score (operator's value order).
     def _rate_key(item):
-        return (_yacht_max_rate(item[1].get("yachts") or ""), item[0])
+        r = item[1]
+        return (1 if _owes_reply(r) else 0,
+                _yacht_max_rate(r.get("yachts") or ""), item[0])
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
                 "WARM", "COLD", "CONFIRMED", "NEW"):
         sections[_lk]["items"].sort(key=_rate_key, reverse=True)
@@ -853,11 +872,20 @@ def render_review(scored, totals, mode="ondemand"):
                     _cf_asked = bool((_a or "").strip())
                 except Exception:
                     _cf_asked = False
-                kb = [[
-                    {"text": _completed_card_label(_cf_passed, _cf_asked),
-                     "callback_data": f"nudge:{sid}"},
-                    {"text": "ℹ️ Info", "callback_data": f"inf:{sid}"},
-                ]]
+                kb = [
+                    [
+                        {"text": _completed_card_label(_cf_passed, _cf_asked),
+                         "callback_data": f"nudge:{sid}"},
+                        {"text": "ℹ️ Info", "callback_data": f"inf:{sid}"},
+                    ],
+                    # Operator request 2026-06-02: a "close chat" button on won
+                    # bookings (after Ask-for-review). Reuses the existing
+                    # disregard callback → removes the chat from /review.
+                    [
+                        {"text": "🗂 Close chat",
+                         "callback_data": f"disregard:{sid}"},
+                    ],
+                ]
             else:
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is
                 # the destructive action, parked alone on row 2 next to Info
