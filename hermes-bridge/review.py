@@ -357,7 +357,7 @@ def _booking_urgency_bonus(dates_str):
 # Re-export from labels (already imported via server's re-export chain
 # but be explicit here so score_lead is self-contained).
 from labels import (  # noqa: E402
-    _parse_booking_date, _safe_display_date, _followup_note)
+    _parse_booking_date, _safe_display_date, _followup_note, _close_bucket)
 
 
 def score_lead(row, now_dt):
@@ -556,7 +556,7 @@ def render_review(scored, totals, mode="ondemand"):
                             "header": "✅ CONFIRMED — booked / paid",
                             "emoji": "✅"},
         "NOT_A_CUSTOMER":  {"items": [], "cap": 12,
-                            "header": "💤 NO ACTIVE SALE — supplier / spam / completed / closed (analyzer scored 0)",
+                            "header": "💤 NO ACTIVE SALE — 💔 lost (price/competitor/timing/ghosted) vs 🚫 not-a-customer (vendor/spam) · completed",
                             "emoji": "💤"},
     }
     pause_tail = []
@@ -684,7 +684,14 @@ def render_review(scored, totals, mode="ondemand"):
             imp = row.get("importance_score")
             imp_bits = ""
             if label_key == "NOT_A_CUSTOMER":
-                imp_bits = "\n↳ " + _no_sale_reason(row)
+                # 5e: distinguish a real LOST lead (price/competitor/timing/
+                # ghosted) from a genuine non-customer (vendor/seller/spam), so
+                # the bucket stops mislabeling lost sales as "not a customer".
+                _bkt, _bkt_label = _close_bucket(row.get("importance_reasoning"))
+                _tag = (f"💔 {_bkt_label} · " if _bkt == "LOST"
+                        else (f"🚫 {_bkt_label} · " if _bkt == "NOT_A_CUSTOMER"
+                              else ""))
+                imp_bits = "\n↳ " + _tag + _no_sale_reason(row)
             elif isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                 if label_key == "CONFIRMED":
