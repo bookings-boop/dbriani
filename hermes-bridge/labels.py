@@ -1085,6 +1085,32 @@ def _should_cold_decay(silent_seconds, prev_label, cmsg_is_null,
     return silent_seconds > threshold_days * 86400
 
 
+def _deterministic_break(msg):
+    """Detect a hard break-condition in a CUSTOMER message that must force an
+    autonomous draft back to operator approval — a deterministic backstop to the
+    LLM self-flag, which can miss (2026-06-02 QC AUTO-2). Returns one of
+    'handoff_request' / 'discount_request' / 'negative_sentiment', or '' (no
+    break). Additive only: a false positive merely routes to approval (the safe
+    direction). Patterns are tight/word-bounded. Pure; None-safe."""
+    import re as _re
+    if not msg:
+        return ""
+    m = str(msg).lower()
+    if (_re.search(r"\b(speak|talk|connect|chat)\b.{0,25}\b(human|person|"
+                   r"someone|agent|representative|manager|staff)\b", m)
+            or _re.search(r"\breal (person|human)\b", m)
+            or _re.search(r"\bcall me\b", m)):
+        return "handoff_request"
+    if _re.search(r"\b(discount|too expensive|cheaper|lower(ing)? (the )?price|"
+                  r"better price|best price|negotiat|price match|any deal)\b", m):
+        return "discount_request"
+    if _re.search(r"\b(not interested|stop (messaging|texting|contacting|"
+                  r"sending)|leave me alone|unsubscribe|do not (contact|"
+                  r"message)|never mind)\b", m):
+        return "negative_sentiment"
+    return ""
+
+
 def _party_size_fit_line(party_size):
     """Drafter capacity constraint: only recommend yachts that fit the stated
     party. Returns a one-line instruction, or '' when the party size is unknown

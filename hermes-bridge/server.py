@@ -1754,7 +1754,16 @@ def set_all_autonomous():
         "AND cm.customer_id <> '__global_default__' "
         "AND (SELECT mode FROM conversation_modes c2 "
         "     WHERE c2.customer_id = cm.customer_id "
-        "     ORDER BY id DESC LIMIT 1) <> 'paused'")
+        "     ORDER BY id DESC LIMIT 1) <> 'paused' "
+        # AUTO-STATE-1: do NOT re-arm a customer the break-detector just pulled
+        # out of autonomous (discount/human-handoff/negative) — honor for 24h
+        # so /auto all can't silently undo a safety break. Same latest row both.
+        "AND NOT ((SELECT activated_by FROM conversation_modes c3 "
+        "          WHERE c3.customer_id = cm.customer_id "
+        "          ORDER BY id DESC LIMIT 1) = 'break_detection' "
+        "         AND (SELECT activated_at FROM conversation_modes c4 "
+        "              WHERE c4.customer_id = cm.customer_id "
+        "              ORDER BY id DESC LIMIT 1) > now() - interval '24 hours')")
     try:
         _, e1 = _psql(g_sql)
         _, e2 = _psql(a_sql)

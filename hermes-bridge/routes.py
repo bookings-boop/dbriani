@@ -3902,8 +3902,10 @@ def handle_autosend_check(payload, send):
     both calls would roll QC twice and double-count the checkpoint."""
     from server import (evaluate_caps, get_mode, log_autosend,
                         AUTOSEND_MIN_SCORE, build_quality_query,
-                        _draft_latest_for_customer, canonicalize_cid)
-    from labels import _quality_floor_ok, _is_handoff_message
+                        _draft_latest_for_customer, canonicalize_cid,
+                        set_mode)
+    from labels import (_quality_floor_ok, _is_handoff_message,
+                        _deterministic_break)
     cid = (payload.get("customer_id") or "").strip()
     if not cid:
         send(400, {"ok": False, "error": "customer_id is required"})
@@ -3955,6 +3957,19 @@ def handle_autosend_check(payload, send):
             _inc = _inc or (_d.get("customer_message") or "")
             _hist = _hist or (_d.get("conversation_history") or "")
             _nm = _nm or (_d.get("customer_name") or "")
+    # AUTO-2: deterministic break-condition backstop. The n8n LLM self-flag can
+    # miss a discount/human-handoff/negative message; never auto-send those.
+    # Additive — a false positive only routes to approval (the safe direction).
+    _brk = _deterministic_break(_inc)
+    if _brk:
+        try:
+            set_mode(cid, "approval", "break_detection", _brk)
+        except Exception as _be:
+            log("AUTO-2 break set_mode failed:", repr(_be))
+        log(f"autosend-check BREAK customer={cid} reason={_brk} -> approval")
+        send(200, {"ok": True, "mode": "approval", "auto_send": False,
+                         "reason": f"break_condition: {_brk} — routed for approval"})
+        return
     if not _draft:
         log(f"autosend-check FLOOR-BLOCK customer={cid} no draft to score")
         send(200, {"ok": True, "mode": mode, "auto_send": False, "score": None,
@@ -4005,7 +4020,7 @@ def handle_autosend_state(payload, send):
     disarm | get, keyed autosend:<draft_id>. The FR-4 autonomous branch
     uses this instead of n8n staticData, which is unreliable across the
     Auto Wait countdown."""
-    from server import AUTOSEND_TTL
+    from server import AUTOSEND_TTL, canonicalize_cid
     action = (payload.get("action") or "").strip().lower()
     did = (payload.get("draft_id") or "").strip()
 
@@ -4023,6 +4038,9 @@ def handle_autosend_state(payload, send):
             send(400, {"ok": False,
                              "error": "customer_id is required"})
             return
+        # AUTO-4: compare on canonical ids so a merged/recycled-LID armed draft
+        # is still found + disarmed (live: DISARM_BY_CUSTOMER scanned=0 disarmed=0).
+        cid_canon = canonicalize_cid(cid)
         # SCAN autosend:* keys, GET each, match by customer_phone,
         # DEL matches. The pendingQueue→Redis migration only landed
         # Phases 1-3 (drafts:bycustomer is partial), so the autosend
@@ -4060,7 +4078,8 @@ def handle_autosend_state(payload, send):
                     continue
                 if not isinstance(data, dict):
                     continue
-                if str(data.get("customer_phone", "")) != cid:
+                if canonicalize_cid(
+                        str(data.get("customer_phone", ""))) != cid_canon:
                     continue
                 _redis(["DEL", k])
                 d_id = k.split(":", 1)[1] if ":" in k else k
@@ -4084,9 +4103,12 @@ def handle_autosend_state(payload, send):
     if action == "arm":
         # store the whole payload (minus action) — the autonomous branch
         # gets every field back from `get`, with no dependency on n8n
-        # staticData or post-Wait node references.
-        value = json.dumps({k: v for k, v in payload.items()
-                            if k != "action"})
+        # staticData or post-Wait node references. AUTO-4: store the CANONICAL
+        # customer id so disarm_by_customer can still match it after a merge.
+        _pl = {k: v for k, v in payload.items() if k != "action"}
+        if _pl.get("customer_phone"):
+            _pl["customer_phone"] = canonicalize_cid(str(_pl["customer_phone"]))
+        value = json.dumps(_pl)
         _, err = _redis(["SET", key, value, "EX", str(AUTOSEND_TTL)])
         if err:
             log("autosend-state arm failed:", err)
