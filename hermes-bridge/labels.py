@@ -310,6 +310,19 @@ def _passed_date_close_is_wrong(dates_str, reasoning, today=None):
     return d > today
 
 
+def _booking_date_is_future(dates_str, today=None):
+    """True when the booking date deterministically parses to a strictly-FUTURE
+    date. Used to override a stale cached close in /review: an upcoming booking
+    is an ACTIVE lead, never 'not a customer'. False for past/today/unparseable.
+    Pure."""
+    d = _parse_booking_date(dates_str)
+    if d is None:
+        return False
+    import datetime as _dt
+    today = today or _dt.date.today()
+    return d > today
+
+
 # Bare relative date words a customer typed that get stored verbatim in
 # customer_facts.dates — they go stale ("tomorrow" captured days ago still
 # renders "tomorrow") and _parse_booking_date can't anchor them.

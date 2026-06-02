@@ -157,6 +157,11 @@ def _awaiting_section_for(row, score):
     if _owe and not _imp_zero and not _terminal:
         return "AWAITING_REPLY"
     if _imp_zero or (_owe and _terminal):
+        # A FUTURE booking date overrides a stale/cached score-0 close: an
+        # upcoming booking is an ACTIVE lead, never "not a customer" (a wrong
+        # cached 'passed' verdict from before the 4b fix deployed). Keep visible.
+        if _booking_date_is_future(row.get("dates")):
+            return "AWAITING_REPLY" if _owe else ""
         return "NOT_A_CUSTOMER"
     return ""
 
@@ -357,7 +362,8 @@ def _booking_urgency_bonus(dates_str):
 # Re-export from labels (already imported via server's re-export chain
 # but be explicit here so score_lead is self-contained).
 from labels import (  # noqa: E402
-    _parse_booking_date, _safe_display_date, _followup_note, _close_bucket)
+    _parse_booking_date, _safe_display_date, _followup_note, _close_bucket,
+    _booking_date_is_future)
 
 
 def score_lead(row, now_dt):
