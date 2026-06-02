@@ -3137,12 +3137,20 @@ def read_lead_summary(filter_label=None):
     where = (where + " AND " + _merged_excl) if where \
         else ("WHERE " + _merged_excl)
     sql = (
-        "SELECT customer_id, COALESCE(name,''), label, "
+        # #B1 (pipe-split corruption, 2026-06-02): emit ONE column joined by the
+        # unit separator (0x1F — never present in customer text) instead of
+        # psql's default '|', so a '|' in name/yachts/reasoning/notes can no
+        # longer shift the positional parse (live: Luke's booking reasoning
+        # corrupted booked_yacht/score). concat_ws auto-casts each arg to text
+        # and SKIPS NULLs, so every arg MUST be non-NULL — hence COALESCE(label)
+        # and COALESCE((..bool..)::text) below.
+        "SELECT concat_ws(E'\\x1f', customer_id, COALESCE(name,''), "
+        "COALESCE(label,''), "
         "COALESCE(to_char(label_updated_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE(to_char(label_locked_until,'YYYY-MM-DD HH24:MI:SSOF'),''), "
-        "(label_locked_until > now()) AS lock_active, "
+        "COALESCE((label_locked_until > now())::text,'false'), "
         "COALESCE(message_count,0), COALESCE(yachts,''), COALESCE(dates,''), "
-        "COALESCE(party_size,''), "
+        "COALESCE(party_size::text,''), "
         "COALESCE(to_char(last_customer_message_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE(to_char(last_operator_reply_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE(to_char(last_review_seen_at,'YYYY-MM-DD HH24:MI:SSOF'),''), "
@@ -3170,7 +3178,7 @@ def read_lead_summary(filter_label=None):
         # booked_yacht — the single CONFIRMED yacht (vs the yachts accumulator).
         # Correlated subquery against customer_facts so no view change needed.
         "COALESCE((SELECT booked_yacht FROM customer_facts cf3 "
-        "  WHERE cf3.customer_id = v_lead_summary.customer_id),'') "
+        "  WHERE cf3.customer_id = v_lead_summary.customer_id),'')) "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -3179,7 +3187,7 @@ def read_lead_summary(filter_label=None):
         return []
     rows = []
     for line in (out or "").strip().splitlines():
-        parts = line.split("|")
+        parts = line.split("\x1f")  # #B1: 0x1F delimiter (was '|')
         if len(parts) < 20:
             continue
         try:

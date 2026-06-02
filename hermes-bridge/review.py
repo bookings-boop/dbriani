@@ -568,6 +568,7 @@ def render_review(scored, totals, mode="ondemand"):
         mark_seen_ids: [...],
       }
     """
+    from util import _md_escape  # C1: escape dynamic values into Markdown
     sections = {
         "AWAITING_REPLY":  {"items": [], "cap": 30,
                             "header": "📨 AWAITING YOUR REPLY — customer messaged, no reply yet",
@@ -733,11 +734,12 @@ def render_review(scored, totals, mode="ondemand"):
                 # ghosted) from a genuine non-customer (vendor/seller/spam), so
                 # the bucket stops mislabeling lost sales as "not a customer".
                 _bkt, _bkt_label = _close_bucket(row.get("importance_reasoning"))
+                _bkt_label = _md_escape(_bkt_label)
                 _tag = (f"✅ {_bkt_label} · " if _bkt == "COMPLETED"
                         else (f"💔 {_bkt_label} · " if _bkt == "LOST"
                               else (f"🚫 {_bkt_label} · " if _bkt == "NOT_A_CUSTOMER"
                                     else "")))
-                imp_bits = "\n↳ " + _tag + _no_sale_reason(row)
+                imp_bits = "\n↳ " + _tag + _md_escape(_no_sale_reason(row))
             elif isinstance(imp, int):
                 if label_key == "CONFIRMED":
                     # Booked & paid. A PAST event (Émilie/Saif, 2026-06-02)
@@ -795,7 +797,7 @@ def render_review(scored, totals, mode="ondemand"):
                         # told 'send nudge' 8 min after we messaged him,
                         # 2026-05-29). Show when + that we're waiting.
                         imp_bits += (
-                            f" — _{_followup_note(_fmt_dur(_out_s), rea, sug)}_")
+                            f" — _{_md_escape(_followup_note(_fmt_dur(_out_s), rea, sug))}_")
                     elif _stale:
                         # Customer was active since the analysis ran; the cached
                         # recommendation may be out of date — but STILL show the
@@ -804,16 +806,17 @@ def render_review(scored, totals, mode="ondemand"):
                         # note (2026-06-02: fishing lead's context was hidden).
                         _ctx = sug or rea
                         imp_bits += (" — _🔄 active since last analysis (re-check)"
-                                     + (f" · last read: {_ctx}" if _ctx else "")
+                                     + (f" · last read: {_md_escape(_ctx)}"
+                                        if _ctx else "")
                                      + "_")
                     elif sug and not why_used_sug:
-                        imp_bits += f" — _{sug}_"
+                        imp_bits += f" — _{_md_escape(sug)}_"
                     elif rea and why_used_sug:
                         # Why-line already carries the suggestion; show the
                         # 'why this score' reasoning on the 🧠 line instead.
-                        imp_bits += f" — _{rea}_"
+                        imp_bits += f" — _{_md_escape(rea)}_"
                     elif rea:
-                        imp_bits += f" — _{rea}_"
+                        imp_bits += f" — _{_md_escape(rea)}_"
             try:
                 from waha import country_flag_for_cid
                 _flag = country_flag_for_cid(row.get("customer_id"))
@@ -823,13 +826,13 @@ def render_review(scored, totals, mode="ondemand"):
             # Non-English name → append a Latin transliteration; show the phone
             # so the operator can find a lead by NUMBER too (operator 2026-05-31).
             _tr = _translit_name(_nm)
-            _nm_disp = _nm + (f" ({_tr})" if _tr else "")
+            _nm_disp = _md_escape(_nm + (f" ({_tr})" if _tr else ""))
             try:
                 from waha import display_phone_for_cid
                 _ph = display_phone_for_cid(row.get("customer_id"))
             except Exception:
                 _ph = ""
-            _idline = f"*{_nm_disp}*" + (f"  {_ph}" if _ph else "")
+            _idline = f"*{_nm_disp}*" + (f"  {_md_escape(_ph)}" if _ph else "")
             # Reply-status badge (operator 2026-06-02): on every active chat,
             # ADDITIONAL to the temperature label. "needs your reply" = the
             # CUSTOMER messaged last (we owe them); "awaiting reply" = WE replied
@@ -849,12 +852,12 @@ def render_review(scored, totals, mode="ondemand"):
                 _reply_badge = ""
             lead_body = (
                 f"{(_flag + ' ') if _flag else ''}{_idline} — "
-                f"{_yacht_display(row, label_key)} · "
-                f"{_safe_display_date(row.get('dates'))} · "
+                f"{_md_escape(_yacht_display(row, label_key))} · "
+                f"{_md_escape(_safe_display_date(row.get('dates')))} · "
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
                 f"{('  ·  ' + _reply_badge) if _reply_badge else ''}"
-                f"  ·  {why}"
+                f"  ·  {_md_escape(why)}"
                 f"{imp_bits}"
             )
             lines.append(f"{i}. " + lead_body.replace("\n", "\n   "))

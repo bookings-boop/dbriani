@@ -1014,35 +1014,21 @@ def handle_poll_payments(payload, send):
                 except (ValueError, IndexError):
                     log_row = None
 
-        # ── LAYER 2: phone → customer_id via DB then WAHA fallback ──
+        # ── LAYER 2: phone → customer_id (prefix-anchored, ambiguity-safe) ──
+        # A2 (2026-06-02): the old inline match used customer_id LIKE '%<tail>@%'
+        # which a hashed @lid can satisfy anywhere in the hash -> a wrong-customer
+        # payment CONFIRM. Use the shared resolver, which prefix-anchors on the
+        # full phone (`<digits>@%`) and returns None on an ambiguous multi-row
+        # hit — so it fails toward 'unmatched', never a wrong confirm.
         if not customer_id:
-            phone = _normalize_phone_digits(payer.get("phone_number"))
-            if phone and len(phone) >= 7:
-                tail = phone[-9:] if len(phone) >= 9 else phone
-                out, _err = _psql(
-                    "SELECT customer_id, COALESCE(name,'') FROM customer_facts "
-                    f"WHERE customer_id LIKE '%{tail}@%' "
-                    "ORDER BY updated_at DESC LIMIT 1"
-                )
-                line = (out or "").strip().splitlines()
-                if line and "|" in line[0]:
-                    parts = line[0].split("|", 1)
-                    customer_id = parts[0].strip()
-                    customer_name = parts[1].strip()
-                    matched_via = "phone_db"
-                elif waha_chats_cache:
-                    # WAHA fallback — match the pushName-digits to phone tail
-                    for ch in waha_chats_cache:
-                        cid_str = ch.get("_serialized") or (
-                            ch.get("id") or {}).get(
-                            "_serialized") or ""
-                        pn_digits = _normalize_phone_digits(
-                            ch.get("name") or "")
-                        if (pn_digits.endswith(tail)
-                                or cid_str.startswith(phone + "@")):
-                            customer_id = cid_str
-                            matched_via = "phone_waha"
-                            break
+            from server import resolve_customer_by_phone
+            resolved, _matches = resolve_customer_by_phone(
+                payer.get("phone_number"))
+            if resolved:
+                customer_id = resolved
+                customer_name = (_matches[0].get("name", "")
+                                 if _matches else "")
+                matched_via = "phone_resolved"
 
         # ── LAYER 3: amount + time fuzzy match ──
         if not customer_id:
@@ -3242,15 +3228,16 @@ def handle_reconcile_identities(payload, send):
             cmc = int(cline.splitlines()[0])
         except (ValueError, IndexError):
             cmc = 0
-        # Canonical = the richer-history row (more messages).
-        canon, dup = (lid, cus) if lmc >= cmc else (cus, lid)
+        # canon is chosen AFTER the safety checks below (A1: a booked/CONFIRMED
+        # side must survive, not the chattier row) — see _merge_canonical_pick.
         # Identity merge-safety guard (2026-06-02 Qurbani/Royalty 136 false
         # merge): WhatsApp recycles/re-points LIDs, so the live lid->phone
         # lookup can map an old @lid row (Antonio/Bliss 55) to a DIFFERENT
         # person's @c.us (Qurbani/Royalty 136). Refuse to merge two rows that
         # carry DISTINCT real names — they are different humans. Fail-OPEN on a
         # name-fetch error (only a clear name conflict blocks).
-        from labels import _merge_blocked, _do_not_merge_pinned
+        from labels import (_merge_blocked, _do_not_merge_pinned,
+                            _merge_canonical_pick)
         # Durable name-INDEPENDENT un-merge pin (stress #4): once a pair has been
         # refused for a name conflict, a 'do_not_merge' row keeps it un-merged
         # even if a later WAHA name-refresh blanks/aligns a name (which would
@@ -3268,13 +3255,17 @@ def handle_reconcile_identities(payload, send):
             log(f"reconcile SKIP pinned: {skipped[-1]}")
             continue
         nm_out, _nme = _psql(
-            "SELECT customer_id || '\x1f' || COALESCE(name,'') "
+            "SELECT customer_id || '\x1f' || COALESCE(name,'') || '\x1f' || "
+            "COALESCE(label,'') || '\x1f' || COALESCE(booked_yacht,'') "
             f"FROM customer_facts WHERE customer_id IN ({_lit(lid)}, {_lit(cus)})")
         names = {}
+        facts = {}
         for nl in (nm_out or "").strip().splitlines():
-            p = nl.split("\x1f", 1)
-            if len(p) == 2:
-                names[p[0].strip()] = p[1].strip()
+            p = (nl.split("\x1f") + ["", "", "", ""])[:4]
+            cidk = p[0].strip()
+            if cidk:
+                names[cidk] = p[1].strip()
+                facts[cidk] = (p[2].strip(), p[3].strip())  # (label, booked)
         if _merge_blocked(names.get(lid, ""), names.get(cus, "")):
             # Persist a durable pin so this refusal survives future name changes
             # (stress #4). The pin-check above means this INSERT fires at most once.
@@ -3290,6 +3281,13 @@ def handle_reconcile_identities(payload, send):
                 f"[{names.get(cus, '')!r}] — name conflict, possible recycled LID")
             log(f"reconcile SKIP name-conflict (pinned): {skipped[-1]}")
             continue
+        # A1: pick the survivor by booked/CONFIRMED precedence (not raw
+        # message_count) so a won lead is never buried under a chattier dup.
+        def _is_booked(cidk):
+            lbl, bk = facts.get(cidk, ("", ""))
+            return lbl == "CONFIRMED" or bool(bk)
+        canon, dup = _merge_canonical_pick(
+            lid, cus, lmc, cmc, _is_booked(lid), _is_booked(cus))
         _psql(
             f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
             f"updated_at = now() WHERE customer_id = {_lit(dup)} "
@@ -4177,6 +4175,7 @@ def handle_hourly_sweep(payload, send):
         get_current_label_row,
         scan_followup_eligibility,
     )
+    from labels import _should_cold_decay
     import time as _time
     t0 = _time.time()
     # Disk-space guard (incident 2026-05-29): alert admin if the root fs is
@@ -4192,7 +4191,8 @@ def handle_hourly_sweep(payload, send):
             "COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz), "
             "COALESCE(cs.last_operator_reply_at, 'epoch'::timestamptz), "
             "COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz), "
-            "EXTRACT(EPOCH FROM (now() - COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz))) "
+            "EXTRACT(EPOCH FROM (now() - COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz))), "
+            "(cs.last_customer_message_at IS NULL) "  # B2: never-messaged flag
             "FROM conversation_state cs "
             "WHERE COALESCE(cs.last_customer_message_at, 'epoch'::timestamptz) "
             "    > COALESCE(cs.last_analyzed_at, 'epoch'::timestamptz) "
@@ -4213,7 +4213,7 @@ def handle_hourly_sweep(payload, send):
         rows = []
         for line in (out or "").strip().splitlines():
             parts = line.split("|")
-            if len(parts) < 5:
+            if len(parts) < 6:
                 continue
             cid = parts[0].strip()
             if not cid:
@@ -4222,10 +4222,11 @@ def handle_hourly_sweep(payload, send):
                 silent_seconds = float(parts[4].strip())
             except ValueError:
                 silent_seconds = 0.0
-            rows.append((cid, silent_seconds))
+            cmsg_null = parts[5].strip().startswith("t")  # B2
+            rows.append((cid, silent_seconds, cmsg_null))
         scanned = len(rows)
         transitions = 0
-        for cid, silent_seconds in rows:
+        for cid, silent_seconds, cmsg_null in rows:
             try:
                 row = get_current_label_row(cid)
                 if row is None:
@@ -4254,10 +4255,10 @@ def handle_hourly_sweep(payload, send):
                 sig = "hourly_noop"
                 ev = "no change"
                 confidence = 1.0
-                # Cold decay — highest priority for the sweep.
-                if (silent_seconds > 7 * 86400
-                        and not (prev or "").startswith("PAUSED_")
-                        and prev != "COLD"):
+                # Cold decay — highest priority for the sweep. Guarded by
+                # _should_cold_decay (B2: skip never-messaged NULL-cmsg leads;
+                # B3: skip WAITING_FOR_PAYMENT/PAUSED_*/already-COLD).
+                if _should_cold_decay(silent_seconds, prev, cmsg_null):
                     applied = "COLD"
                     sig = "cold_decay"
                     ev = (f"silent {int(silent_seconds // 86400)}d "

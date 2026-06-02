@@ -1033,6 +1033,36 @@ def slot_passed(dates_str, reasoning="", now=None):
     return (now.hour * 60 + now.minute) > t
 
 
+def _merge_canonical_pick(a, b, a_mc, b_mc, a_booked, b_booked):
+    """Choose (canon, dup) for an identity merge. A booked/CONFIRMED side ALWAYS
+    survives — never bury a won lead under a chattier non-booked duplicate
+    (2026-06-02 QC A1, Qurbani class). When both or neither are booked, the
+    richer-history (higher message_count) row is canon; ties keep `a`. Pure."""
+    if a_booked and not b_booked:
+        return a, b
+    if b_booked and not a_booked:
+        return b, a
+    return (a, b) if a_mc >= b_mc else (b, a)
+
+
+def _should_cold_decay(silent_seconds, prev_label, cmsg_is_null,
+                       threshold_days=7):
+    """True when the hourly sweep should demote a lead to COLD for customer
+    silence. Guards (2026-06-02 QC B2/B3):
+      - NEVER when the customer-message timestamp is NULL (cmsg_is_null): the
+        sweep coalesces NULL -> 1970, manufacturing a ~56-year 'silence' that
+        wrongly buried never-messaged leads (operator-entered future bookings).
+      - NEVER for a terminal/in-flight stage: COLD (already), WAITING_FOR_PAYMENT
+        (paid, awaiting confirmation), or any PAUSED_* mode.
+    Decay only on a REAL silence strictly beyond the threshold. Pure; None-safe."""
+    if cmsg_is_null:
+        return False
+    p = (prev_label or "")
+    if p in ("COLD", "WAITING_FOR_PAYMENT") or p.startswith("PAUSED_"):
+        return False
+    return silent_seconds > threshold_days * 86400
+
+
 def _party_size_fit_line(party_size):
     """Drafter capacity constraint: only recommend yachts that fit the stated
     party. Returns a one-line instruction, or '' when the party size is unknown
