@@ -59,7 +59,7 @@ from labels import (  # noqa: F401
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
-    _passed_date_close_is_wrong, _party_size_fit_line,
+    _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -582,6 +582,14 @@ def _draft_update(did, fields):
     # the send path would deliver (the 2026-06-02 "false" incident).
     if fields and "messages" in fields:
         fields["messages"] = _clean_message_bubbles(fields["messages"])
+    # Bug 3 edit-feedback accumulation: a refine/edit commit may carry
+    # 'feedback_append' — fold it into the draft's feedback_history so the next
+    # refine can replay ALL prior corrections instead of forgetting edit #1.
+    # (The n8n Prep Refine REPLAY of feedback_history is the matching half.)
+    _fb_app = fields.pop("feedback_append", None) if fields else None
+    if _fb_app:
+        d["feedback_history"] = _accumulate_feedback(
+            d.get("feedback_history"), _fb_app)
     d.update(fields or {})
     # status side-effect on the active set
     if "status" in (fields or {}):

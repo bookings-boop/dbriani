@@ -350,6 +350,19 @@ def _followup_note(out_dur_str, rea, sug):
     return f"✅ followed up {out_dur_str} ago; awaiting reply{tail}"
 
 
+def _accumulate_feedback(history, fb, cap=10):
+    """Append an operator edit-feedback string to the draft's accumulating list
+    so every refine can replay ALL prior corrections (bug 3 — edits used to be
+    stateless and forgot earlier feedback). Ignores empty/whitespace; skips a
+    consecutive duplicate; caps to the most-recent `cap`. Returns the new list.
+    Pure."""
+    out = list(history or [])
+    fb = (fb or "").strip()
+    if fb and (not out or out[-1] != fb):
+        out.append(fb)
+    return out[-cap:]
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------
