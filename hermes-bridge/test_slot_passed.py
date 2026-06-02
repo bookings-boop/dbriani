@@ -68,6 +68,26 @@ def test_time_none_when_empty():
     assert _parse_booking_time(None) is None
 
 
+# --- F2: range where 1st time inherits a meridian but is really the other ----
+def test_range_am_pm_spanning_dash():
+    # "11-2 PM" = 11 AM to 2 PM -> start 11:00, NOT 23:00/14:00
+    assert _parse_booking_time("11-2 PM") == 11 * 60
+
+
+def test_range_am_pm_spanning_word():
+    # "10 to 1 PM" = 10 AM to 1 PM -> start 10:00
+    assert _parse_booking_time("10 to 1 PM") == 10 * 60
+
+
+# --- F3: word-separated ranges ("to"/"till"/"until") ------------------------
+def test_range_word_separator_pm():
+    assert _parse_booking_time("8 to 11 PM") == 20 * 60
+
+
+def test_range_until_separator():
+    assert _parse_booking_time("Jun 7, 5 until 8 PM") == 17 * 60
+
+
 def test_time_ignores_bare_relative_numbers():
     # "1 min ago" / "70h ago" must not be read as a clock time
     assert _parse_booking_time("replied 1 min ago, 70h since") is None
@@ -103,6 +123,22 @@ def test_sameday_time_not_yet_passed():
 def test_sameday_no_time_is_conservative_false():
     # Marina: same day, no parseable time -> we don't guess deterministically
     assert slot_passed("Tue Jun 2", now=N(22)) is False
+
+
+# --- F1: a stray single time in reasoning must NOT be read as the booking ----
+def test_reasoning_single_time_not_used():
+    # "replied at 9:00am" is a message timestamp, not a booking window -> ignore
+    assert slot_passed(
+        "Jun 2",
+        reasoning="customer replied at 9:00am asking about boats",
+        now=N(20)) is False
+
+
+def test_reasoning_range_still_used():
+    # a genuine RANGE in reasoning is a booking window -> still fires
+    assert slot_passed(
+        "Jun 2", reasoning="trip window 17:30-20:30 confirmed",
+        now=N(21)) is True
 
 
 def test_unparseable_date_not_passed():

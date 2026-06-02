@@ -3676,6 +3676,8 @@ def handle_lead_analyze_disregard(payload, send):
                          "⚠️ customer_id required"})
         return
     force_close = bool(payload.get("force"))
+    explicit_force = force_close  # F6: distinguish a true Force tap (Hermes WAS
+    #   asked + said keep-open) from the terminal-label 1-tap close below.
     try:
         row = get_current_label_row(cid) or {}
         cur_label = row.get("label") or "NEW"
@@ -3699,8 +3701,10 @@ def handle_lead_analyze_disregard(payload, send):
                 cid, cur_label, "DISREGARDED",
                 signal="operator_override",
                 evidence=(
-                    "operator override — Hermes had said keep_open. "
-                    f"Prior reasoning: {prev_reasoning[:180]}"),
+                    ("operator override — Hermes had said keep_open. "
+                     if explicit_force else
+                     f"operator closed terminal {cur_label} lead in one tap. ")
+                    + f"Prior reasoning: {prev_reasoning[:180]}"),
                 message_count=mc,
                 created_by="operator:disregard_force")
             _psql(
@@ -3711,10 +3715,14 @@ def handle_lead_analyze_disregard(payload, send):
             # Escape dynamic name — customer pushNames can contain '_'
             # or '*' which would break Markdown parse on Telegram.
             nm_e = _md_escape(nm)
+            _ov = ("_Operator override_ — closed despite Hermes saying "
+                   "'keep open'."
+                   if explicit_force else
+                   f"_Closed by operator_ — {cur_label} lead, already "
+                   "terminal (Hermes not consulted).")
             tx = (
                 f"🛑 *DISREGARDED* — {nm_e}\n"
-                f"_Operator override_ — closed despite Hermes saying "
-                "'keep open'.\n\n"
+                f"{_ov}\n\n"
                 f"→ label {cur_label} → DISREGARDED. Hidden from "
                 f"/review.\n_Undo with_ `/label {nm_e} WARM`")
             send(200, {

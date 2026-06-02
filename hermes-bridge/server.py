@@ -2550,10 +2550,13 @@ def build_quality_query(p):
                     "judged the lead lost / not-convertible / a vendor pitch, a "
                     "sales push is a rule_violation — score it LOW; never reward a "
                     "polished-but-wrong reply with a high score.")
-                _pdn = _passed_date_note(dts_, irea_)
-                if _pdn:
-                    _blk += "\n" + _pdn
                 parts.append(_blk)
+            # F4: the passed-slot note must reach the SCORER even when the lead
+            # has NO analysis yet — otherwise a correct forward-pivot draft to an
+            # unanalyzed passed-slot lead gets penalized as 'ignored the date'.
+            _pdn = _passed_date_note(dts_, irea_)
+            if _pdn:
+                parts.append(_pdn)
     cur = p.get("current_draft")
     if isinstance(cur, list):
         cur = "\n\n".join(str(m) for m in cur)
@@ -2730,7 +2733,7 @@ def _is_past_booking_date(dates_str):
     d = _parse_booking_date(dates_str)
     if d is None:
         return False
-    return (_dt.date.today() - d).days >= 1
+    return (_dubai_now().date() - d).days >= 1  # F5/DUP-02: Dubai, not UTC
 
 
 _PASSED_REASONING_MARKERS = (

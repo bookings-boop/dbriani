@@ -255,7 +255,7 @@ def _parse_booking_date(dates_str):
     except (TypeError, ValueError):
         return None
     year_grp = m.group(3)
-    today = _dt.date.today()
+    today = _dubai_now().date()  # F5/DUP-02: Dubai, not UTC (year inference)
     if year_grp:
         try:
             year = int(year_grp)
@@ -924,7 +924,7 @@ def _demote_to_cold_blocked(dates_str, reasoning, ever_booked=False,
         return True
     if reasoning and _PASSED_CLAIM_RE.search(reasoning):
         import datetime as _dt
-        today = today or _dt.date.today()
+        today = today or _dubai_now().date()  # F5/DUP-02: Dubai, not UTC
         d = _parse_booking_date(dates_str)
         if d is None or d > today:
             return True
@@ -956,15 +956,21 @@ def _dubai_now():
             + _dt.timedelta(hours=4)).replace(tzinfo=None)
 
 
-def _parse_booking_time(s):
+_TIME_RSEP = r"\s*(?:[–\-—]|\bto\b|\btill\b|\buntil\b|\bthru\b)\s*"
+
+
+def _parse_booking_time(s, ranges_only=False):
     """Extract the slot START as minutes-since-midnight from a free-text dates/
     reasoning string, or None when no clock time is present. Handles 12h
-    ('5 PM', '5:30pm', '9am'), 24h ('17:30', '18:00'), and ranges where the
-    first time inherits the meridian of the second ('6–8 PM' -> 18:00 start;
-    '5:30–8:30pm' -> 17:30 start). Returns the EARLIEST time found = the slot
-    start (the operator's rule: a 5 PM slot is 'passed' once it's after 5 PM).
-    A bare 'HH:MM' is read as 24h ONLY when the string has no am/pm meridian,
-    so it never mis-reads the '5:30' of '5:30pm' as 05:30. Pure; None-safe."""
+    ('5 PM', '5:30pm', '9am'), 24h ('17:30', '18:00'), and ranges joined by a
+    dash OR a word ('6–8 PM', '8 to 11 PM', '17:30-20:30'). In a 12h range the
+    first time inherits the second's meridian; if that makes it LATER than the
+    second ('11-2 PM' -> 23:00 vs 14:00) it's really the other meridian (11 AM,
+    F2). Returns the EARLIEST time = the slot start (operator rule: a 5 PM slot
+    is 'passed' once it's after 5 PM). A bare 'HH:MM' is 24h only when there's
+    no am/pm (so '5:30' of '5:30pm' isn't read as 05:30). `ranges_only=True`
+    collects ONLY range times (used for analyzer reasoning, where a lone time is
+    a message timestamp, not a booking window — F1). Pure; None-safe."""
     import re as _re
     if not s:
         return None
@@ -982,25 +988,39 @@ def _parse_booking_time(s):
             h += 12
         return h * 60 + m
 
-    has_meridian = bool(_re.search(r"\d\s*[ap]\.?m\.?", text, _re.I))
-    # Ranges "A[-–—]B <ap>m": the first time inherits the trailing meridian.
+    # 12h ranges (meridian inheritance + F2 flip + F3 word separators).
     for mt in _re.finditer(
-            r"(\d{1,2})(?::(\d{2}))?\s*[–\-—]\s*"
+            r"(\d{1,2})(?::(\d{2}))?" + _TIME_RSEP +
             r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?", text, _re.I):
-        for v in (_h12(mt.group(1), mt.group(2), mt.group(5)),
-                  _h12(mt.group(3), mt.group(4), mt.group(5))):
+        ap = mt.group(5)
+        a = _h12(mt.group(1), mt.group(2), ap)
+        b = _h12(mt.group(3), mt.group(4), ap)
+        if a is not None and b is not None and a > b:
+            a2 = _h12(mt.group(1), mt.group(2),
+                      "a" if ap.lower() == "p" else "p")
+            if a2 is not None and a2 <= b:
+                a = a2
+        for v in (a, b):
             if v is not None:
                 mins.append(v)
-    # Plain 12h "5 PM" / "5:30pm".
-    for mt in _re.finditer(r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?",
-                           text, _re.I):
-        v = _h12(mt.group(1), mt.group(2), mt.group(3))
-        if v is not None:
-            mins.append(v)
-    # 24h "HH:MM" — only when no meridian anywhere (else it'd catch '5:30pm').
-    if not has_meridian:
-        for mt in _re.finditer(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
-            mins.append(int(mt.group(1)) * 60 + int(mt.group(2)))
+    # 24h ranges "HH:MM<sep>HH:MM".
+    for mt in _re.finditer(
+            r"\b([01]?\d|2[0-3]):([0-5]\d)" + _TIME_RSEP +
+            r"([01]?\d|2[0-3]):([0-5]\d)\b", text):
+        mins.append(int(mt.group(1)) * 60 + int(mt.group(2)))
+        mins.append(int(mt.group(3)) * 60 + int(mt.group(4)))
+    if not ranges_only:
+        has_meridian = bool(_re.search(r"\d\s*[ap]\.?m\.?", text, _re.I))
+        # Plain 12h "5 PM" / "5:30pm".
+        for mt in _re.finditer(r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?",
+                               text, _re.I):
+            v = _h12(mt.group(1), mt.group(2), mt.group(3))
+            if v is not None:
+                mins.append(v)
+        # 24h "HH:MM" — only when no meridian (else it'd catch '5:30' of 5:30pm).
+        if not has_meridian:
+            for mt in _re.finditer(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
+                mins.append(int(mt.group(1)) * 60 + int(mt.group(2)))
     return min(mins) if mins else None
 
 
@@ -1027,7 +1047,9 @@ def slot_passed(dates_str, reasoning="", now=None):
         return False
     t = _parse_booking_time(dates_str)
     if t is None and reasoning:
-        t = _parse_booking_time(reasoning)
+        # F1: a lone time in analyzer reasoning is usually a message timestamp,
+        # not the booking window — only trust a RANGE there.
+        t = _parse_booking_time(reasoning, ranges_only=True)
     if t is None:
         return False
     return (now.hour * 60 + now.minute) > t
