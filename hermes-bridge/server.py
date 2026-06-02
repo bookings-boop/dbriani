@@ -984,6 +984,25 @@ ASK_BEFORE_GUESS_DIRECTIVE = (
 )
 
 
+HANDOFF_DIRECTIVE = (
+    "============================================================\n"
+    "RULE #3 — WHEN NOT HIGHLY CONFIDENT, HAND OFF (bias HARD to handoff):\n"
+    "============================================================\n"
+    "If you are NOT highly confident your reply is correct AND complete — "
+    "including ANY question about price, availability, a specific yacht's "
+    "specs/capacity, policy, dates, or anything you cannot verify from the "
+    "conversation, the rules, or the catalog — do NOT answer. Instead reply "
+    "with EXACTLY this and nothing else:\n"
+    "\"I'm probably not the best person to answer that question. I recommend "
+    "that one of my colleagues contact you with the correct details. Would "
+    "that be okay?\"\n"
+    "When in ANY doubt, hand off — it is far better to hand off unnecessarily "
+    "than to send a wrong detail. Answer directly ONLY for simple, unambiguous "
+    "things (greetings, acknowledgements, confirming a colleague will follow "
+    "up)."
+)
+
+
 def behavioral_context(customer_id):
     """Active behavioural rules + notes for a customer. Used by drafts.
     Returns {global:[...], scenario:[{scenario, rule}], customer_notes:[...]}."""
@@ -1072,6 +1091,7 @@ def behavioral_context(customer_id):
     # block — so the drafter can never compose without the no-invent mandate
     # at the very top of its dynamic context (2026-06-01 fabrication incident).
     formatted = (NO_INVENT_DIRECTIVE + "\n\n" + ASK_BEFORE_GUESS_DIRECTIVE
+                 + "\n\n" + HANDOFF_DIRECTIVE
                  + ("\n\n" + formatted if formatted else ""))
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
@@ -1504,6 +1524,28 @@ def get_mode(customer_id):
         if err:
             return "approval"
         lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
+        if not lines:
+            # No explicit per-customer mode -> the GLOBAL default, so new inbound
+            # conversations can default to autonomous when /auto-all is on.
+            return _global_default_mode()
+        m = lines[0]
+        return m if m in ("approval", "autonomous", "paused") else "approval"
+    except Exception:
+        return "approval"
+
+
+def _global_default_mode():
+    """Default mode for conversations with NO explicit per-customer row (new
+    inbounds). Stored as a '__global_default__' sentinel row; 'approval' when
+    unset. FAIL-CLOSED: any error/unknown -> 'approval' (never silently
+    autonomous)."""
+    try:
+        out, err = _psql(
+            "SELECT mode FROM conversation_modes "
+            "WHERE customer_id = '__global_default__' ORDER BY id DESC LIMIT 1")
+        if err:
+            return "approval"
+        lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
         m = lines[0] if lines else ""
         return m if m in ("approval", "autonomous", "paused") else "approval"
     except Exception:
@@ -1546,6 +1588,53 @@ def manual_killswitch():
         return (err is None), err
     except Exception as e:
         return False, repr(e)
+
+
+def count_autonomous():
+    """Distinct customers whose CURRENT mode is autonomous (excludes the
+    __global_default__ sentinel). Returns int or None on error."""
+    try:
+        out, err = _psql(
+            "SELECT count(*) FROM ("
+            "  SELECT DISTINCT ON (customer_id) customer_id, mode "
+            "  FROM conversation_modes "
+            "  WHERE customer_id <> '__global_default__' "
+            "  ORDER BY customer_id, id DESC) s WHERE mode = 'autonomous'")
+        if err:
+            return None
+        return int(((out or "0").strip().splitlines() or ["0"])[0])
+    except Exception:
+        return None
+
+
+def set_all_autonomous():
+    """/auto-all — enable autonomous for every conversation that is not
+    deliberately PAUSED, AND set the global default (new inbounds) to
+    autonomous. Inverse of manual_killswitch(); /manual reverts both (its
+    DISTINCT reset includes the sentinel). Returns (autonomous_count, err)."""
+    g_sql = (
+        "INSERT INTO conversation_modes "
+        "(customer_id, mode, activated_at, activated_by, break_reason) "
+        "VALUES ('__global_default__', 'autonomous', now(), 'auto_all', "
+        "'/auto all — new-inbound default')")
+    a_sql = (
+        "INSERT INTO conversation_modes "
+        "(customer_id, mode, activated_at, activated_by, break_reason) "
+        "SELECT DISTINCT cm.customer_id, 'autonomous', now(), 'auto_all', "
+        "'/auto all' FROM conversation_modes cm "
+        "WHERE cm.customer_id IS NOT NULL "
+        "AND cm.customer_id <> '__global_default__' "
+        "AND (SELECT mode FROM conversation_modes c2 "
+        "     WHERE c2.customer_id = cm.customer_id "
+        "     ORDER BY id DESC LIMIT 1) <> 'paused'")
+    try:
+        _, e1 = _psql(g_sql)
+        _, e2 = _psql(a_sql)
+        if e1 or e2:
+            return None, (e1 or e2)
+        return count_autonomous(), None
+    except Exception as e:
+        return None, repr(e)
 
 
 # --- behavior-rule review (FR-5 learning loop) -----------------------------

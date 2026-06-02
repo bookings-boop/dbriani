@@ -632,6 +632,19 @@ def _quality_floor_ok(score, threshold=8):
             and score >= threshold)
 
 
+def _is_handoff_message(text):
+    """True ONLY for the conservative handoff/holding line, which the operator
+    allows to auto-send even below the score floor. Requires ALL THREE
+    distinctive phrases (normalized) so a fragment or a real answer can never
+    match — it can never broaden into a floor bypass. Pure."""
+    if not text:
+        return False
+    t = re.sub(r"\s+", " ", re.sub(r"[^a-z ]", " ", str(text).lower())).strip()
+    return ("not the best person to answer" in t
+            and "colleagues contact you" in t
+            and "correct details" in t)
+
+
 def _send_blocked_by_status(status):
     """True when an approved send must be REFUSED because the draft is already
     in a terminal state — already sent (double-send), superseded by a newer

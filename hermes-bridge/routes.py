@@ -3755,8 +3755,9 @@ def handle_autosend_check(payload, send):
     rolls the QC sample and logs the checkpoint event, so evaluating on
     both calls would roll QC twice and double-count the checkpoint."""
     from server import (evaluate_caps, get_mode, log_autosend,
-                        AUTOSEND_MIN_SCORE, build_quality_query)
-    from labels import _quality_floor_ok
+                        AUTOSEND_MIN_SCORE, build_quality_query,
+                        _draft_latest_for_customer)
+    from labels import _quality_floor_ok, _is_handoff_message
     cid = (payload.get("customer_id") or "").strip()
     if not cid:
         send(400, {"ok": False, "error": "customer_id is required"})
@@ -3783,17 +3784,48 @@ def handle_autosend_check(payload, send):
     if isinstance(_draft, list):
         _draft = "\n\n".join(str(m) for m in _draft)
     _draft = str(_draft or "").strip()
+    _inc = payload.get("incoming_message") or ""
+    _hist = payload.get("history") or ""
+    _nm = payload.get("customer_name") or ""
+    # The live n8n Auto Commit doesn't pass the draft — fetch the customer's
+    # latest PENDING draft (the one being auto-sent) and score THAT. Bridge-only,
+    # so the floor functions without any n8n change.
+    if not _draft:
+        try:
+            _d, _ = _draft_latest_for_customer(cid, "pending")
+        except Exception:
+            _d = None
+        if _d:
+            _draft = (str(_d.get("draft_text") or "").strip()
+                      or "\n\n".join(str(m) for m in (_d.get("messages") or [])
+                                     if isinstance(m, str)).strip())
+            _inc = _inc or (_d.get("customer_message") or "")
+            _hist = _hist or (_d.get("conversation_history") or "")
+            _nm = _nm or (_d.get("customer_name") or "")
     if not _draft:
         log(f"autosend-check FLOOR-BLOCK customer={cid} no draft to score")
         send(200, {"ok": True, "mode": mode, "auto_send": False, "score": None,
                    "reason": "quality_floor: no draft to score — routed for approval"})
         return
+    # HANDOFF EXEMPTION (2026-06-02): the conservative handoff/holding line is a
+    # SAFE non-answer the operator explicitly allows to auto-send even below the
+    # floor. Exact-match only (labels._is_handoff_message) so it can never widen
+    # into a bypass for a real answer. Caps still apply.
+    if _is_handoff_message(_draft):
+        ok, reason = evaluate_caps(cid)
+        if ok:
+            log_autosend(cid, "auto")
+        log(f"autosend-check HANDOFF-ALLOW customer={cid} auto_send={ok} "
+            f"reason={reason!r}")
+        send(200, {"ok": True, "mode": mode, "auto_send": ok,
+                   "score": "handoff", "reason": reason})
+        return
     try:
         _score, _flags, _summary = _anthropic_score(build_quality_query({
             "system_prompt": payload.get("system_prompt") or "",
-            "customer_name": payload.get("customer_name") or "",
-            "history": payload.get("history") or "",
-            "incoming_message": payload.get("incoming_message") or "",
+            "customer_name": _nm,
+            "history": _hist,
+            "incoming_message": _inc,
             "current_draft": _draft,
             "customer_id": cid,
         }))
