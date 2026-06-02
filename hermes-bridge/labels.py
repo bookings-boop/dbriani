@@ -384,6 +384,11 @@ def _accumulate_feedback(history, fb, cap=10):
 # so /review stops dumping both under "not a customer". Heuristic over the
 # analyzer's free-text reasoning (the structured close_reason isn't stored).
 
+_COMPLETED_RE = re.compile(
+    r"\b((booking|charter|trip)\s+(fully\s+)?(executed|completed|complete|"
+    r"fulfilled|delivered|done)|(fully\s+)?executed|successfully\s+"
+    r"(completed|delivered|chartered)|already\s+(sailed|chartered))\b",
+    re.IGNORECASE)
 _NAC_RE = re.compile(
     r"\b(vendor|supplier|seller|selling\s+to\s+us|spam|wrong\s+number|"
     r"b2b\s+pitch|partnership|pitch(ing)?|marketing|promot(e|ion|ing)|"
@@ -414,6 +419,8 @@ def _close_bucket(reasoning):
     r = (reasoning or "").strip()
     if not r:
         return "", ""
+    if _COMPLETED_RE.search(r):
+        return "COMPLETED", "completed booking"
     if _NAC_RE.search(r):
         return "NOT_A_CUSTOMER", "vendor / not a customer"
     if _LOST_PRICE_RE.search(r):

@@ -17,6 +17,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from labels import _close_bucket  # noqa: E402
 
 
+def test_completed_booking_is_not_lost_or_noncustomer():
+    # Tal Sudai: "booking fully executed 8 days ago" — a WON booking, must
+    # NOT read as "not a customer".
+    for r in ("booking fully executed 8 days ago",
+              "trip completed last week, great feedback",
+              "charter done — successfully delivered"):
+        b, label = _close_bucket(r)
+        assert b == "COMPLETED" and "completed" in label.lower(), r
+
+
 def test_vendor_is_not_a_customer():
     b, label = _close_bucket("vendor pitching yacht maintenance services to us")
     assert b == "NOT_A_CUSTOMER"

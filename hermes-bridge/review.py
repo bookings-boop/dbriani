@@ -155,13 +155,16 @@ def _awaiting_section_for(row, score):
     if not _owe and _booking_date_passed(row):
         return "NOT_A_CUSTOMER"
     if _owe and not _imp_zero and not _terminal:
-        return "AWAITING_REPLY"
+        # Operator 2026-06-02: do NOT pull owed leads into a separate top
+        # section that hides their HOT/WARM/COLD label. Render them in their
+        # OWN temperature tier with a "🔴 needs your reply" badge instead.
+        return ""
     if _imp_zero or (_owe and _terminal):
         # A FUTURE booking date overrides a stale/cached score-0 close: an
         # upcoming booking is an ACTIVE lead, never "not a customer" (a wrong
         # cached 'passed' verdict from before the 4b fix deployed). Keep visible.
         if _booking_date_is_future(row.get("dates")):
-            return "AWAITING_REPLY" if _owe else ""
+            return ""
         return "NOT_A_CUSTOMER"
     return ""
 
@@ -694,9 +697,10 @@ def render_review(scored, totals, mode="ondemand"):
                 # ghosted) from a genuine non-customer (vendor/seller/spam), so
                 # the bucket stops mislabeling lost sales as "not a customer".
                 _bkt, _bkt_label = _close_bucket(row.get("importance_reasoning"))
-                _tag = (f"💔 {_bkt_label} · " if _bkt == "LOST"
-                        else (f"🚫 {_bkt_label} · " if _bkt == "NOT_A_CUSTOMER"
-                              else ""))
+                _tag = (f"✅ {_bkt_label} · " if _bkt == "COMPLETED"
+                        else (f"💔 {_bkt_label} · " if _bkt == "LOST"
+                              else (f"🚫 {_bkt_label} · " if _bkt == "NOT_A_CUSTOMER"
+                                    else "")))
                 imp_bits = "\n↳ " + _tag + _no_sale_reason(row)
             elif isinstance(imp, int):
                 imp_bits = f"\n🧠 Hermes: *{imp}/100*"
@@ -780,12 +784,30 @@ def render_review(scored, totals, mode="ondemand"):
             except Exception:
                 _ph = ""
             _idline = f"*{_nm_disp}*" + (f"  {_ph}" if _ph else "")
+            # Reply-status badge (operator 2026-06-02): on every active chat,
+            # ADDITIONAL to the temperature label. "needs your reply" = the
+            # CUSTOMER messaged last (we owe them); "awaiting reply" = WE replied
+            # last and are waiting on the customer's response.
+            _cs2 = row.get("last_customer_message_at_seconds")
+            _out2c = [s for s in (row.get("last_operator_reply_at_seconds"),
+                                  row.get("last_nudge_drafted_at_seconds"))
+                      if isinstance(s, (int, float))]
+            _out2 = min(_out2c) if _out2c else None
+            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER"):
+                _reply_badge = ""
+            elif isinstance(_cs2, (int, float)) and (_out2 is None or _cs2 < _out2):
+                _reply_badge = "🔴 needs your reply"
+            elif _out2 is not None:
+                _reply_badge = "📨 awaiting reply"
+            else:
+                _reply_badge = ""
             lead_body = (
                 f"{(_flag + ' ') if _flag else ''}{_idline} — "
                 f"{(row.get('yachts') or 'no yacht set')} · "
                 f"{_safe_display_date(row.get('dates'))} · "
                 f"msg #{row.get('message_count')}\n"
                 f"⏱ silent {_fmt_dur(row.get('last_customer_message_at_seconds'))}"
+                f"{('  ·  ' + _reply_badge) if _reply_badge else ''}"
                 f"  ·  {why}"
                 f"{imp_bits}"
             )

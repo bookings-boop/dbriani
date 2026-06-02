@@ -66,7 +66,7 @@ def test_stale_terminal_verdict_stays_in_awaiting():
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="confirmed_terminal",
              last_analyzed_at_seconds=7200)
-    assert _awaiting_section_for(row, 800) == "AWAITING_REPLY"
+    assert _awaiting_section_for(row, 800) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
 def test_terminal_signal_without_analysis_time_stays_in_awaiting():
@@ -76,7 +76,7 @@ def test_terminal_signal_without_analysis_time_stays_in_awaiting():
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="date_passed",
              last_analyzed_at_seconds=None)
-    assert _awaiting_section_for(row, 800) == "AWAITING_REPLY"
+    assert _awaiting_section_for(row, 800) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
 # --- unchanged behaviour (regression guards) --------------------------------
@@ -86,7 +86,7 @@ def test_active_owed_lead_goes_to_awaiting():
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="sticky_hot",
              last_analyzed_at_seconds=1800)
-    assert _awaiting_section_for(row, 800) == "AWAITING_REPLY"
+    assert _awaiting_section_for(row, 800) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
 def test_cold_decay_is_not_terminal_owe_stays_awaiting():
@@ -95,7 +95,7 @@ def test_cold_decay_is_not_terminal_owe_stays_awaiting():
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="cold_decay",
              last_analyzed_at_seconds=1800)
-    assert _awaiting_section_for(row, 200) == "AWAITING_REPLY"
+    assert _awaiting_section_for(row, 200) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
 def test_score_zero_owe_goes_to_not_a_customer():
@@ -197,7 +197,7 @@ def test_route_passed_date_but_owed_stays_awaiting():
              last_customer_message_at_seconds=1800,
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="sticky_hot")
-    assert _awaiting_section_for(row, 800) == "AWAITING_REPLY"
+    assert _awaiting_section_for(row, 800) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
 def test_route_future_date_unaffected():
