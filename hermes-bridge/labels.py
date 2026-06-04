@@ -1091,6 +1091,21 @@ def _should_cold_decay(silent_seconds, prev_label, cmsg_is_null,
     return silent_seconds > threshold_days * 86400
 
 
+def _booked_yacht_from_accumulator(yachts_str, current_booked=""):
+    """Variant B (2026-06-04): on a CONFIRMED transition, derive the single
+    booked yacht from the discussed-yachts accumulator — DETERMINISTICALLY, no
+    LLM — but ONLY when it is unambiguous (exactly one yacht, no comma) and
+    booked_yacht isn't already set. Returns the yacht to persist, or '' to leave
+    it for the operator: a multi-yacht CONFIRMED keeps the ⚠️ 'which one?' flag,
+    and an existing booked_yacht is never overwritten. Never invents. Pure."""
+    if (current_booked or "").strip():
+        return ""  # already set — never overwrite (could be operator-corrected)
+    y = (yachts_str or "").strip()
+    if not y or "," in y:
+        return ""  # unknown, or ambiguous (multiple) -> operator decides
+    return y
+
+
 def _deterministic_break(msg):
     """Detect a hard break-condition in a CUSTOMER message that must force an
     autonomous draft back to operator approval — a deterministic backstop to the

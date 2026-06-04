@@ -62,6 +62,7 @@ from labels import (  # noqa: F401
     _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
     _draft_log_columns, is_valid_mode,
     slot_passed, _parse_booking_time, _dubai_now,
+    _booked_yacht_from_accumulator,
 )
 from payments import (  # noqa: F401
     NOMOD_API_KEY, NOMOD_API_BASE, NOMOD_WEBHOOK_SECRET, PAYMENTS_ENABLED,
@@ -2974,7 +2975,27 @@ def apply_label_transition(customer_id, from_label, to_label, signal,
         f"{_lit(evidence or '')}, {int(message_count or 0)}, "
         f"{_lit(created_by)})"
     )
-    return _psql(upd + ins)
+    res = _psql(upd + ins)
+    # D3 (Variant B): on a CONFIRMED transition, deterministically persist the
+    # single booked yacht (no LLM) so /review's ✅ shows the actual yacht instead
+    # of staying blank. Only when the accumulator is unambiguous + booked_yacht
+    # isn't already set; multi-yacht stays for the operator. Degrade-safe.
+    if (to_label or "").upper() == "CONFIRMED":
+        try:
+            row, _e = _psql(
+                "SELECT COALESCE(yachts,'') || E'\\x1f' || "
+                "COALESCE(booked_yacht,'') FROM customer_facts "
+                f"WHERE customer_id = '{cid}'")
+            ln = (row or "").strip().splitlines()
+            if ln:
+                ys, cb = (ln[0].split("\x1f") + ["", ""])[:2]
+                bk = _booked_yacht_from_accumulator(ys, cb)
+                if bk:
+                    _psql("UPDATE customer_facts SET booked_yacht = "
+                          f"{_lit(bk)} WHERE customer_id = '{cid}'")
+        except Exception as _be:
+            log("booked_yacht persist err:", repr(_be))
+    return res
 
 
 def upsert_conversation_state(customer_id, event):
