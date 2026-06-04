@@ -1122,7 +1122,23 @@ def _party_size_fit_line(party_size):
         return ""
     if n <= 0:
         return ""
-    return (f"Party size: {n} guests — ONLY recommend yacht(s) that seat at "
-            f"least {n}. NEVER suggest a yacht whose max capacity is below "
-            f"{n}; if the party exceeds every single yacht, recommend the "
-            f"largest fitting option(s) or note combining two boats.")
+    fit = (f"Party size: {n} guests — ONLY recommend yacht(s) that seat at "
+           f"least {n}. NEVER suggest a yacht whose max capacity is below "
+           f"{n}; if the party exceeds every single yacht, recommend the "
+           f"largest fitting option(s) or note combining two boats.")
+    if n < 10:
+        # Rule 3 (2026-06-04): for a SMALL/intimate party, the capacity number
+        # is a SILENT internal filter — still pick a yacht that comfortably
+        # seats them (the fit constraint above is unchanged), but do NOT state
+        # any capacity figure ('holds up to 25 guests') in the reply; naming a
+        # big headcount makes an intimate booking feel like a venue hire.
+        # Describe the yacht by its experience (space, deck, ambience) instead.
+        fit += (
+            f" CAPACITY NUMBER IS SILENT HERE: the party is small ({n}), so do "
+            "NOT mention any guest-capacity figure or 'holds up to X' — describe "
+            "the yacht by its experience (space, deck, ambience). Only the "
+            "NUMBER stays unsaid; you must STILL choose a yacht that fits.")
+    else:
+        # 10+ — capacity is genuinely relevant; stating it is fine when helpful.
+        fit += " The party is 10+, so stating the yacht's capacity is fine."
+    return fit

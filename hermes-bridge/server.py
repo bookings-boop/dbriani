@@ -1114,7 +1114,38 @@ STYLE_DIRECTIVE = (
     "dense run-on block of text.\n"
     "5. NEVER re-ask a fact ALREADY in the conversation (date, yacht, guest "
     "count, time) — read the history first.\n"
+    "6. MULTI-OPTION LAYOUT — when the reply lists MORE THAN ONE option (2+ "
+    "yachts, watersport add-ons, packages, or several links), do NOT cram them "
+    "into one paragraph. Put EACH option in its OWN message bubble (a separate "
+    "entry in your messages array) so they arrive as clean, separate, scannable "
+    "WhatsApp messages. Inside an option bubble: NAME + the key detail (e.g. the "
+    "rate) on one line, the link on the next line — concise, no over-explaining. "
+    "Keep any intro to ONE short bubble and a short question as the LAST bubble.\n"
+    "   Example — return these as SEPARATE bubbles in messages[]:\n"
+    '     bubble 1: "Here are a few that fit:"\n'
+    '     bubble 2: "🛥️ <Yacht name> — <amount> AED/hr\\ndubriani.com/yacht/<slug>/"\n'
+    '     bubble 3: "🛥️ <Yacht name> — <amount> AED/hr\\ndubriani.com/yacht/<slug>/"\n'
+    '     bubble 4: "Want me to check availability on any of these?"\n'
+    "   NEVER inline or comma-separate options into one paragraph. If options "
+    "must share a single bubble, put EACH option on its OWN line.\n"
+    "   For a SHORT reply (one option, a greeting, a quick answer) stay "
+    "conversational and natural — do NOT force list formatting on short "
+    "messages. Structure ONLY when there are genuinely multiple items.\n"
     "These are hard mandates — a violation is an automatic operator rejection."
+)
+
+
+TONE_DIRECTIVE = (
+    "============================================================\n"
+    "TONE — FIVE-STAR CONCIERGE (operator directive 2026-06-04):\n"
+    "============================================================\n"
+    "Write the way an elite five-star concierge writes (think Ritz-Carlton): "
+    "refined, warm, effortlessly polished. Gracious and confident — never "
+    "pushy, salesy, or over-eager. Choose elegant restraint over enthusiasm; "
+    "short, considered sentences. Anticipate the guest's needs and make them "
+    "feel personally attended-to and important — never processed. This "
+    "ELEVATES Maria's existing voice: keep her warmth and personality, do NOT "
+    "become stiff, corporate, or robotic."
 )
 
 
@@ -1219,7 +1250,7 @@ def behavioral_context(customer_id):
         "gone by and offer to arrange an upcoming day instead.")
     formatted = (time_anchor + "\n\n" + NO_INVENT_DIRECTIVE + "\n\n"
                  + ASK_BEFORE_GUESS_DIRECTIVE + "\n\n" + HANDOFF_DIRECTIVE
-                 + "\n\n" + STYLE_DIRECTIVE
+                 + "\n\n" + STYLE_DIRECTIVE + "\n\n" + TONE_DIRECTIVE
                  + ("\n\n" + formatted if formatted else ""))
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
@@ -2570,14 +2601,27 @@ def build_quality_query(p):
     if isinstance(cur, list):
         cur = "\n\n".join(str(m) for m in cur)
     parts.append("\n--- DRAFT TO SCORE ---\n" + str(cur or "").strip())
+    # FORMATTING IS SCORED (2026-06-04): without this the scorer had no spacing
+    # flag and its `too_verbose` flag actively penalised vertical lists — so a
+    # cramped multi-option reply scored fine and a well-spaced one got compressed
+    # back. This is the enforcement leg that makes the layout rule STICK.
+    parts.append(
+        "\n--- FORMATTING (SCORED) ---\n"
+        "If the draft offers MORE THAN 2 options/links/yachts/add-ons crammed "
+        "inline, comma-separated, or glued into one paragraph instead of each "
+        "on its OWN line or its OWN message bubble, that is a hard "
+        "rule_violation: score it 5 or LOWER and add the flag wall_of_text. "
+        "Putting each option on its own line/bubble is CORRECT and must NEVER "
+        "be penalised as too_verbose. Do NOT reward a crammed reply for being "
+        "short.")
     parts.append(
         "\n--- RESPOND NOW ---\n"
         "Output ONLY one JSON object — no markdown fences, no commentary:\n"
         '{"score": <integer 1-10>, "flags": ["<short_snake_case_issue>", ...], '
         '"summary": "<one short line, max 12 words>"}\n'
         "flags: 0-3 short tags such as too_verbose, weak_opening, missing_cta, "
-        "ignores_question, rule_violation, off_tone, too_pushy. Use an empty "
-        "list if the draft is strong."
+        "ignores_question, rule_violation, off_tone, too_pushy, wall_of_text, "
+        "cramped_options. Use an empty list if the draft is strong."
     )
     return "\n".join(parts)
 

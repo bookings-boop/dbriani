@@ -47,6 +47,30 @@ def test_handles_messy_numeric():
     assert out == "" or "50" in out
 
 
+# --- Rule 3 (2026-06-04): capacity-NUMBER suppression for small parties, while
+#     the capacity-FIT constraint MUST still hold (don't re-break the fit fix) --
+def test_small_party_suppresses_capacity_number_but_keeps_fit():
+    line = _party_size_fit_line(4).lower()
+    # fit constraint preserved (still only recommend a yacht that seats 4)
+    assert "at least 4" in line
+    assert "only" in line and "never" in line
+    # but the capacity NUMBER must not be stated to a small party
+    assert "not mention" in line or "do not state" in line
+    assert "capacity" in line
+    assert "experience" in line  # describe by experience instead
+
+
+def test_large_party_does_not_suppress_capacity():
+    line = _party_size_fit_line(25).lower()
+    assert "at least 25" in line          # fit still enforced
+    assert "not mention" not in line      # capacity may be stated for 10+
+
+
+def test_capacity_suppression_boundary_is_under_10():
+    assert "not mention" in _party_size_fit_line(9).lower()       # small
+    assert "not mention" not in _party_size_fit_line(10).lower()  # 10+
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
