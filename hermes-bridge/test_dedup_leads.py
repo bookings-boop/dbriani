@@ -61,6 +61,19 @@ def test_empty_input():
     assert _dedup_leads([]) == []
 
 
+def test_placeholder_names_do_not_collapse_distinct_people():
+    # A5: a placeholder name ('.', '?') is NOT identity evidence — two DISTINCT
+    # customers sharing one must BOTH survive (was: they merged into one, and a
+    # real close-candidate silently vanished from the operator's digest).
+    out = _dedup_leads([
+        ("111@c.us", ".", "ghosted"),
+        ("222@c.us", ".", "price too high"),
+    ])
+    assert len(out) == 2
+    out2 = _dedup_leads([("a@c.us", "?", "x"), ("b@c.us", "?", "y")])
+    assert len(out2) == 2
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

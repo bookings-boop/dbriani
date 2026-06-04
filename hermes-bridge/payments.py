@@ -88,9 +88,14 @@ def _payer_mismatch(charge_payer, customer_facts_row, waha_chats=None):
     tail = payer_phone[-9:] if len(payer_phone) >= 9 else payer_phone
     if not tail:
         return False
-    # Layer A: @c.us-shape customer_id contains the phone literally.
-    cust_id_digits = _normalize_phone_digits(
-        (customer_facts_row.get("customer_id") or "").split("@")[0])
+    # Layer A: @c.us-shape customer_id contains the phone literally. SKIP for an
+    # @lid id (B5): the id is a privacy HASH, not the phone, so a 9-digit suffix
+    # coincidence between the hash and the payer would spuriously CLEAR a real
+    # mismatch. @lid is resolved by Layer C (WAHA pushName); leaving cust_id_digits
+    # empty also keeps a hash out of the "had data to compare" test below.
+    _cid_raw = (customer_facts_row.get("customer_id") or "")
+    cust_id_digits = ("" if _cid_raw.endswith("@lid")
+                      else _normalize_phone_digits(_cid_raw.split("@")[0]))
     if cust_id_digits and len(cust_id_digits) >= 7 \
             and cust_id_digits.endswith(tail):
         return False

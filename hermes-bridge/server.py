@@ -533,7 +533,10 @@ def _draft_save(draft):
                 if o_status not in ("pending", "sent"):
                     continue
                 o_msgs = other.get("messages") or []
-                o_body = (o_msgs[0] if o_msgs else "") \
+                # Coerce: messages[0] can be a dict (not a str) — guard so the
+                # stale-context enrichment never AttributeErrors on .strip().
+                o_first = o_msgs[0] if o_msgs else ""
+                o_body = (o_first if isinstance(o_first, str) else "") \
                     or other.get("draft_text", "")
                 o_body = (o_body or "").strip()
                 if not o_body:
@@ -1922,9 +1925,9 @@ def evaluate_caps(customer_id):
 def caps_status_text():
     """Human-readable cap status for the /caps command + daily digest."""
     used = cap_daily_count()
-    auton = _count("SELECT count(*) FROM (SELECT DISTINCT ON (customer_id) mode "
-                   "FROM conversation_modes ORDER BY customer_id, id DESC) s "
-                   "WHERE mode='autonomous'")
+    # AUTO-STATE-2: use count_autonomous() (excludes the __global_default__
+    # sentinel) so /caps doesn't over-count by 1 after /auto all.
+    auton = count_autonomous() or 0
     today = _count("SELECT count(*) FROM autonomous_sends WHERE kind='auto' "
                    f"AND sent_at >= {DUBAI_MIDNIGHT}") or 0
     chk = _count("SELECT count(*) FROM autonomous_sends WHERE kind='checkpoint' "
@@ -1964,7 +1967,9 @@ def canonicalize_cid(cid):
     if not cid:
         return cid
     current = cid
-    for _ in range(3):
+    visited = {cid}  # A6: cycle detection — a merged_into loop must not silently
+    #                  resolve to a half-way intermediate (or, pre-cap, hang).
+    for _ in range(8):  # raised from 3; the visited-set makes a higher cap safe
         cid_e = current.replace("'", "''")
         try:
             out, err = _psql(
@@ -1981,8 +1986,16 @@ def canonicalize_cid(cid):
         target = (line.splitlines()[0] or "").strip()
         if not target:
             return current  # merged_into NULL → already canonical
+        if target in visited:  # A6: cycle — observable, return the INPUT cid
+            log(f"canonicalize_cid CYCLE for {cid!r}: chain {sorted(visited)} "
+                f"-> {target!r}; returning input")
+            return cid
+        visited.add(target)
         current = target
-    return current
+    # Did not reach a canonical row within the cap — log + return input.
+    log(f"canonicalize_cid did not converge for {cid!r} after {len(visited)} "
+        f"hops {sorted(visited)}; returning input")
+    return cid
 
 
 def get_customer_facts(customer_id):
@@ -2359,6 +2372,18 @@ def build_query(p):
     sp = load_system_prompt()
     if sp:
         parts.append(sp)
+        parts.append("=" * 60)
+    # D2 (2026-06-04): the LOCAL hermes draft path (/draft + the follow-up local
+    # fallback) otherwise misses the pinned RULE directives the n8n drafter gets
+    # via behavioral_context().formatted (no-invent / style / handoff / lead
+    # state). Append them so both paths honour the same mandates. Degrade-safe
+    # (''); these callers don't separately inject behavioral_context.
+    try:
+        _bctx = behavioral_context(p.get("customer_id") or "").get("formatted", "")
+    except Exception:
+        _bctx = ""
+    if _bctx:
+        parts.append(_bctx)
         parts.append("=" * 60)
     parts.append(
         "TASK: You are drafting a WhatsApp reply for Dubriani Yachts, in the "

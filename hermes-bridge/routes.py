@@ -5059,7 +5059,12 @@ def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
     try:
         parsed = json.loads(t)
         msgs = parsed.get("messages")
-        msgs = [str(m) for m in msgs][:4] if isinstance(msgs, list) else []
+        # B4: extract text via the _join_draft_parts contract (text from dicts,
+        # str as-is) instead of str(m) — which turned a dict-shaped bubble into a
+        # literal "{'role':...}" string in the draft.
+        from labels import _join_draft_parts
+        msgs = [m for m in _join_draft_parts(msgs) if m][:4] \
+            if isinstance(msgs, list) else []
         return msgs, (parsed.get("notes_for_zayn") or ""), ""
     except Exception:
         return [], "", "unparseable draft"

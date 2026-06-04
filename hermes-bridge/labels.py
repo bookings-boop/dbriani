@@ -684,12 +684,18 @@ def _dedup_leads(items):
     for cid, name, reason in items:
         c = (cid or "").strip()
         n = " ".join((name or "").strip().lower().split())
-        if (c and c in seen_cid) or (n and n in seen_name):
+        # Collapse by NAME only when it's real identity evidence: a real name
+        # (not a phone-string) with >= 2 letters. A placeholder ('.', '?') is
+        # NOT evidence, so two DISTINCT people sharing one must not collapse and
+        # silently drop a real close-candidate from the digest (A5).
+        name_key = n if (_is_real_name(name)
+                         and sum(ch.isalpha() for ch in (name or "")) >= 2) else ""
+        if (c and c in seen_cid) or (name_key and name_key in seen_name):
             continue
         if c:
             seen_cid.add(c)
-        if n:
-            seen_name.add(n)
+        if name_key:
+            seen_name.add(name_key)
         out.append((cid, name, reason))
     return out
 

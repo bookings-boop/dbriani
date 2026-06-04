@@ -123,6 +123,17 @@ def test_waha_id_via_nested_id_field():
         is False
 
 
+def test_lid_hash_suffix_does_not_shortcircuit_real_mismatch():
+    # B5: an @lid customer_id is a HASH, not a phone. A 9-digit suffix
+    # coincidence between the hash digits and the payer must NOT clear a REAL
+    # mismatch via Layer A — @lid is resolved by Layer C (WAHA pushName), which
+    # here shows a different real phone, so this is a genuine mismatch.
+    row = {"customer_id": "999509876543@lid", "name": "Khalid"}  # hash ~ tail
+    waha = [{"id": {"_serialized": "999509876543@lid"},
+             "name": "+971501112222"}]                            # real, different
+    assert _payer_mismatch(_payer("971509876543"), row, waha) is True
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

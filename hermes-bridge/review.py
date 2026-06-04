@@ -108,10 +108,10 @@ def _booking_date_passed(row):
     (2026-06-01: Marimuthu et al. vanished into the COLD overflow). Pure-ish
     (date parse only); None/parse-fail safe."""
     try:
-        import datetime as _dt
-        from labels import _parse_booking_date
-        d = _parse_booking_date(row.get("dates") or "")
-        return bool(d and (_dt.date.today() - d).days >= 1)
+        # DUP-04/F5: single passed-date source of truth — event_passed (Dubai-
+        # aware) instead of a UTC date.today() inline copy.
+        from labels import event_passed
+        return event_passed(row.get("dates") or "")
     except Exception:
         return False
 
@@ -873,14 +873,7 @@ def render_review(scored, totals, mode="ondemand"):
                 # "💬 Draft message". Same nudge: callback — handle_draft_followup
                 # decides feedback-vs-review off the same marker.
                 from labels import _completed_card_label
-                _cf_passed = False
-                try:
-                    import datetime as _dt
-                    from labels import _parse_booking_date
-                    _td = _parse_booking_date(row.get("dates") or "")
-                    _cf_passed = bool(_td and (_dt.date.today() - _td).days >= 1)
-                except Exception:
-                    _cf_passed = False
+                _cf_passed = _booking_date_passed(row)  # DUP-04: one source
                 _cf_asked = False
                 try:
                     from db import _redis
