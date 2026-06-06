@@ -4994,6 +4994,24 @@ def handle_quality_check(payload, send):
     flags = parsed.get("flags")
     flags = [str(f) for f in flags][:3] if isinstance(flags, list) else []
     summary = str(parsed.get("summary") or "")
+    # Deterministic price guard (operator 2026-06-06: HARD block + regenerate on
+    # a catalog price mismatch). validate_draft_prices flags any quoted price not
+    # in the canonical catalog; cap the score below the regen threshold (8) so the
+    # n8n improve loop regenerates, and surface a flag so the operator sees it
+    # (approval-first catches it regardless). Conservative — only known
+    # yachts/items are checked, so a legit quote is never blocked.
+    try:
+        from server import validate_draft_prices
+        _pm = validate_draft_prices(payload.get("current_draft") or "")
+        if _pm:
+            score = min(score, 3)
+            flags = (["price mismatch: " + _pm[0]] + flags)[:3]
+            summary = ("price mismatch vs catalog — " + "; ".join(_pm)
+                       + (("  |  " + summary) if summary else ""))
+            log(f"quality-check PRICE-MISMATCH "
+                f"customer={payload.get('customer_name')!r} {_pm}")
+    except Exception as _pe:
+        log(f"price-validate non-fatal: {_pe!r}")
     badge = _format_quality_badge({"score": score, "flags": flags})
     log(f"quality-check OK customer={payload.get('customer_name')!r} "
         f"score={score} flags={flags} elapsed={elapsed}ms")

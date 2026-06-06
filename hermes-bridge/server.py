@@ -2566,6 +2566,97 @@ def _quality_task_framing(incoming, history):
     )
 
 
+# --- deterministic price validator -----------------------------------------
+# Soft prompt rules (NO_INVENT_DIRECTIVE) did NOT stop the LLM inventing prices
+# ('375 AED' fine-dining 2026-06-01; '600 AED/hr' Von Dutch 2026-06-06), so we
+# also CHECK the generated draft against known canonical prices and fail the
+# quality score on a mismatch (operator 2026-06-06: HARD block + regenerate).
+# CONSERVATIVE allowlist — only the yachts/items below are validated; unknown
+# items are NEVER flagged, so this cannot false-positive a legit quote on the
+# live send path. Expand as the canonical catalog is consolidated.
+_CANON_YACHT_RATES = {
+    "von dutch 40": {1400},                 # no discount (operator 2026-06-06)
+    "bliss 55": {1400, 1100},               # list 1,400; standing anchor 1,100
+    "sunseeker satoshi 70": {3000, 1500},   # 3,000; morning floor 1,500
+}
+_CANON_CATERING = {                          # term -> valid AED amount(s) (for 2/min)
+    "fine dining": {2500},
+    "premium bbq": {1500},
+    "premium barbecue": {1500},
+}
+_RATE_HR_RE = re.compile(
+    r"(?:AED\s*)?([\d][\d,]*)\s*(?:AED)?\s*(?:/\s*hr\b|/\s*hour\b|per\s*hour\b)",
+    re.I)
+_AED_AMT_RE = re.compile(r"AED\s*([\d][\d,]*)|([\d][\d,]*)\s*AED", re.I)
+_YACHT_RATE_PROXIMITY = 55  # a /hr rate must be within N chars of the yacht name
+
+
+def _price_num(s):
+    try:
+        return int(str(s).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_draft_prices(text):
+    """Return a list of price-mismatch strings for a customer-facing draft
+    (empty = clean / nothing checkable). CONSERVATIVE: validates only known
+    yachts/catering items; never flags unknown items. Pure; None-safe."""
+    if not text:
+        return []
+    low = text.lower()
+    out, seen = [], set()
+
+    def _add(msg):
+        if msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+
+    # 1) YACHT /hr rates: associate each /hr figure with the nearest PRECEDING
+    #    known yacht name within a short window (handles the multi-line yacht
+    #    card; the window stops a later unrelated rate — e.g. a jet ski — being
+    #    misattributed to the yacht).
+    events = []
+    for name in _CANON_YACHT_RATES:
+        start = 0
+        while True:
+            idx = low.find(name, start)
+            if idx < 0:
+                break
+            events.append((idx, 0, name))
+            start = idx + 1
+    for m in _RATE_HR_RE.finditer(text):
+        events.append((m.start(), 1, _price_num(m.group(1))))
+    events.sort()
+    cur_name, cur_pos = None, -10 ** 9
+    for pos, kind, val in events:
+        if kind == 0:
+            cur_name, cur_pos = val, pos
+        elif (cur_name is not None and val is not None
+              and pos - cur_pos <= _YACHT_RATE_PROXIMITY
+              and val not in _CANON_YACHT_RATES[cur_name]):
+            ok = "/".join(f"{r:,}" for r in sorted(_CANON_YACHT_RATES[cur_name]))
+            _add(f"{cur_name.title()} quoted AED {val:,}/hr (catalog: {ok}/hr)")
+
+    # 2) CATERING: a catering term with a nearby AED figure that isn't canonical.
+    #    Skip per-HOUR figures (yacht rates, not catering) to avoid false-positives
+    #    when a catering term sits near a yacht rate.
+    for term, valid in _CANON_CATERING.items():
+        for tm in re.finditer(re.escape(term), low):
+            window = text[tm.start():tm.start() + 90]
+            for am in _AED_AMT_RE.finditer(window):
+                amt = _price_num(am.group(1) or am.group(2))
+                if amt is None or amt < 100:
+                    continue
+                tail = window[am.end():am.end() + 9].lower()
+                if any(t in tail for t in ("/hr", "/ hr", "/hour", "per h")):
+                    continue
+                if amt not in valid:
+                    ok = "/".join(f"{v:,}" for v in sorted(valid))
+                    _add(f"{term.title()} quoted AED {amt:,} (catalog: {ok})")
+    return out
+
+
 def build_quality_query(p):
     """Compose the -q query for a FAST quality SCORE of an existing draft.
     Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns

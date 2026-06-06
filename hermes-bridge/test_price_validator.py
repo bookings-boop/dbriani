@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Deterministic price validator — catches fabricated prices a soft prompt rule
+can't (the NO_INVENT_DIRECTIVE existed yet the LLM still invented '375 AED'
+fine-dining 2026-06-01 AND '600 AED/hr' Von Dutch 2026-06-06).
+
+validate_draft_prices(text) returns a list of human-readable mismatch strings
+(empty = clean). CONSERVATIVE allowlist: only validates yachts/items it knows
+authoritatively (operator-confirmed 2026-06-06) — unknown yachts/items are NOT
+flagged, so it cannot false-positive a legit quote on the live send path.
+
+Run: python3 hermes-bridge/test_price_validator.py
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from server import validate_draft_prices  # noqa: E402
+
+
+# --- yacht hourly rates ------------------------------------------------------
+def test_von_dutch_600_is_flagged():
+    m = validate_draft_prices("Von Dutch 40 — up to 8 guests\n600 AED/hr special offer")
+    assert m, m
+    assert any("600" in x and "Von Dutch" in x for x in m), m
+
+
+def test_von_dutch_1400_is_clean():
+    assert validate_draft_prices("Von Dutch 40 — 8 guests\nAED 1,400/hr") == []
+
+
+def test_bliss_anchor_1100_and_list_1400_clean():
+    assert validate_draft_prices("Bliss 55 — up to 17 guests\n~AED 1,400/hr~ "
+                                 "AED 1,100/hr special offer") == []
+
+
+def test_bliss_wrong_rate_flagged():
+    m = validate_draft_prices("Bliss 55\nAED 999/hr")
+    assert any("999" in x for x in m), m
+
+
+def test_unknown_yacht_not_flagged():
+    # Zenith 64 (1,300/hr) is not in the conservative allowlist -> never flagged.
+    assert validate_draft_prices("Zenith 64 — up to 22 guests\nAED 1,300/hr") == []
+
+
+def test_multi_yacht_card_all_correct_is_clean():
+    draft = ("Zenith 64 — up to 22 guests\nAED 1,300/hr\n\n"
+             "Bliss 55 — up to 17 guests\n~AED 1,400/hr~ AED 1,100/hr\n\n"
+             "Sunseeker Satoshi 70 — up to 15 guests\nAED 3,000/hr")
+    assert validate_draft_prices(draft) == []
+
+
+def test_satoshi_morning_floor_1500_clean():
+    assert validate_draft_prices("Sunseeker Satoshi 70\nAED 1,500/hr morning") == []
+
+
+def test_yacht_then_unrelated_hourly_rate_not_false_positive():
+    # a jet-ski /hr rate well after the yacht card must NOT be attributed to the
+    # yacht (proximity guard) — else a legit draft would be wrongly flagged.
+    draft = ("Bliss 55 — up to 17 guests\nAED 1,100/hr\n\n"
+             "you can also add 2 jet skis at AED 600/hr each")
+    assert validate_draft_prices(draft) == []
+
+
+# --- catering ----------------------------------------------------------------
+def test_fine_dining_375_flagged():
+    m = validate_draft_prices("the fine dining menu for 2 starts from 375 AED per person")
+    assert any("375" in x and "Fine Dining" in x for x in m), m
+
+
+def test_fine_dining_2500_clean():
+    assert validate_draft_prices("fine dining for 2 — from AED 2,500 (chef included)") == []
+
+
+def test_bbq_1500_clean_2500_flagged():
+    assert validate_draft_prices("premium bbq for 2 — AED 1,500") == []
+    m = validate_draft_prices("premium bbq menu for 2 — AED 2,500")
+    assert any("2,500" in x for x in m), m
+
+
+def test_catering_term_near_yacht_hourly_rate_no_false_positive():
+    # 'fine dining' mentioned, but the nearby AED figure is a yacht /hr rate,
+    # not a catering price -> must NOT be flagged as a catering mismatch.
+    assert validate_draft_prices(
+        "fine dining available — the Satoshi is AED 3,000/hr") == []
+
+
+def test_empty_safe():
+    assert validate_draft_prices("") == []
+    assert validate_draft_prices(None) == []
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in list(globals().items())
+           if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn()
+        print("PASS", fn.__name__)
+    print(f"all {len(fns)} price_validator tests passed")
