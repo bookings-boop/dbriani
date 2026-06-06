@@ -30,6 +30,11 @@ LABELS = frozenset({
     # lead as unconvertible. Hidden from /review entirely; not in
     # pause_tail. Reopened only via explicit `/label <name> WARM`.
     "DISREGARDED",
+    # LOST — a LEGIT prospect who didn't convert (booked elsewhere, date passed,
+    # ghosted, lost on price). Distinct from DISREGARDED (genuine non-customer /
+    # spam). Operator-set via `/label <name> LOST`; queryable for win-back /
+    # post-mortem. Terminal: not auto-nudged; renders in its own 💔 LOST section.
+    "LOST",
 })
 
 # Label-priority ranking — higher = higher operator priority. Used by
@@ -45,6 +50,12 @@ _LABEL_RANK = {
     # signal won't bounce a disregarded lead back into /review.
     # Operator must explicitly /label them to reopen.
     "DISREGARDED": 7,
+    # LOST is terminal like DISREGARDED — the sticky-upward guard treats it as
+    # terminal so a stray HOT/WARM signal won't bounce a lost lead back. Rank 8
+    # (unique, above DISREGARDED): ranks must be collision-free
+    # (test_label_transition.test_no_rank_collisions) and LOST is the stickiest
+    # terminal state.
+    "LOST": 8,
 }
 
 # Signals strong enough to demote regardless of confidence dampening.

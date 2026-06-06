@@ -395,6 +395,10 @@ def score_lead(row, now_dt):
     # before pause_tail builds, so they're never displayed at all).
     if label == "DISREGARDED":
         return -100000
+    # LOST is terminal but VISIBLE (its own 💔 section) — small positive so it
+    # never falls into the negative pause_tail, and sorts last among the shown.
+    if label == "LOST":
+        return 1
     # CONFIRMED is a terminal/success state — short-circuit before any urgency
     # or damping math can take the score negative and dump them into the
     # paused tail. They render in their own ✅ section.
@@ -621,6 +625,12 @@ def render_review(scored, totals, mode="ondemand"):
         "NOT_A_CUSTOMER":  {"items": [], "cap": 12,
                             "header": "💤 NO ACTIVE SALE — 💔 lost (price/competitor/timing/ghosted) vs 🚫 not-a-customer (vendor/spam) · completed",
                             "emoji": "💤"},
+        # LOST — a legit prospect we lost (booked elsewhere / date passed /
+        # ghosted). Its OWN visible, queryable section for post-mortem + win-back
+        # (operator 2026-06-06: distinct from NOT_A_CUSTOMER vendor/spam).
+        "LOST":            {"items": [], "cap": 15,
+                            "header": "💔 LOST — legit prospect not won · investigate / win-back",
+                            "emoji": "💔"},
     }
     pause_tail = []
     seen_ids = []
@@ -642,7 +652,14 @@ def render_review(scored, totals, mode="ondemand"):
             pause_tail.append(row)
             continue
         if label not in sections:
-            continue
+            # CATCH-ALL (2026-06-06): never silently drop a lead whose label
+            # has no section (e.g. a new/typo'd label like SUPPLIER_B2B, or a
+            # label added to the DB before review.py is redeployed). Surface it
+            # in HOT for triage instead of vanishing. Operator hit ready leads
+            # disappearing entirely from /review.
+            print("render_review: unknown label %r for %r -> HOT (triage)"
+                  % (label, row.get("customer_id")), flush=True)
+            label = "HOT"
         # AWAITING REPLY — the customer messaged after our last outbound (or we
         # never replied): we OWE a reply. Pull these into a top, uncapped
         # section so an unanswered customer (especially a question) is NEVER
@@ -727,9 +744,10 @@ def render_review(scored, totals, mode="ondemand"):
                   ("WAITING_FOR_PAYMENT", "⏳ awaiting-pay"),
                   ("HOT", "🔥 hot"), ("NEEDS_ATTENTION", "⚠️ need-attn"),
                   ("WARM", "♨️ warm"), ("NEW", "🌱 new"), ("COLD", "❄️ cold"),
-                  ("CONFIRMED", "✅ confirmed"), ("NOT_A_CUSTOMER", "💤 no-sale")]
+                  ("CONFIRMED", "✅ confirmed"), ("NOT_A_CUSTOMER", "💤 no-sale"),
+                  ("LOST", "💔 lost")]
     _active_total = sum(len(sections[_k]["items"]) for _k, _ in _hdr_tiers
-                        if _k != "NOT_A_CUSTOMER")
+                        if _k not in ("NOT_A_CUSTOMER", "LOST"))
     _breakdown = " · ".join(f"{len(sections[_k]['items'])} {_lbl}"
                             for _k, _lbl in _hdr_tiers if sections[_k]["items"])
     _disregarded_n = sum(1 for _s, _r in scored
@@ -773,7 +791,7 @@ def render_review(scored, totals, mode="ondemand"):
 
     for label_key in ("AWAITING_REPLY", "WAITING_FOR_PAYMENT", "HOT",
                       "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED",
-                      "NOT_A_CUSTOMER"):
+                      "NOT_A_CUSTOMER", "LOST"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -925,7 +943,7 @@ def render_review(scored, totals, mode="ondemand"):
                                   row.get("last_nudge_drafted_at_seconds"))
                       if isinstance(s, (int, float))]
             _out2 = min(_out2c) if _out2c else None
-            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER"):
+            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER", "LOST"):
                 _reply_badge = ""
             elif isinstance(_cs2, (int, float)) and (_out2 is None or _cs2 < _out2):
                 _reply_badge = "🔴 needs your reply"

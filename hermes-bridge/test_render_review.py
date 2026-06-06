@@ -71,6 +71,18 @@ def test_future_date_negative_score_still_hidden():
     assert "fut@lid" not in _shown_cids(res)
 
 
+def test_unknown_label_is_surfaced_not_dropped():
+    # CATCH-ALL (2026-06-06): a lead whose label has no section (e.g. a new or
+    # typo'd label like SUPPLIER_B2B, or LOST before it was wired) must be
+    # surfaced for triage, never silently dropped. Operator hit leads vanishing
+    # from /review entirely.
+    row = _row("unk@lid", label="SUPPLIER_B2B", name="Mystery",
+               importance_score=50)
+    res = render_review([(50, row)], {}, "on-demand")
+    assert "unk@lid" in _shown_cids(res), \
+        "unknown-label lead must not vanish from /review"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

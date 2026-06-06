@@ -3148,7 +3148,7 @@ def scan_followup_eligibility():
         "  AND (cf.label IS NULL OR cf.label NOT IN ("
         "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
         "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
-        "       'DISREGARDED')) "
+        "       'DISREGARDED', 'LOST')) "
         # Active-negotiation suppression — paylink in last 24h.
         "  AND NOT EXISTS ("
         "       SELECT 1 FROM autonomous_sends a "

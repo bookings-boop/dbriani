@@ -1215,7 +1215,7 @@ def handle_label(payload, send):
                          "error": f"label must be one of {sorted(LABELS)}",
                          "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
                          "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
-                         "WAITING_FOR_PAYMENT, CONFIRMED, DISREGARDED, "
+                         "WAITING_FOR_PAYMENT, CONFIRMED, DISREGARDED, LOST, "
                          "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
         return
     cid, err = resolve_target(payload)
