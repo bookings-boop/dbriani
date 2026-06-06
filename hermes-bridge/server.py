@@ -2576,6 +2576,18 @@ def build_quality_query(p):
     hist = (p.get("history") or "").strip()
     _task, _show_msg = _quality_task_framing(p.get("incoming_message"), hist)
     parts.append(_task)
+    # Scorer alignment (2026-06-06): the live n8n quality-check call passes NO
+    # system_prompt, so the scorer fell back to the static system-prompt.md —
+    # which lacks the drafter's STYLE_DIRECTIVE/TONE_DIRECTIVE (those live in
+    # behavioral_context, appended at draft time, never in the base prompt). So
+    # the scorer judged drafts against a formatting/tone bar it never saw and
+    # clustered them at 6/10. Hand the scorer the SAME directives the drafter
+    # was given, to JUDGE against — added regardless of whether a system_prompt
+    # was supplied (the base prompt never carries them).
+    parts.append(
+        "\n--- DRAFTING RULES THE DRAFT WAS WRITTEN TO (judge against these; "
+        "do NOT penalise the draft for correctly following them) ---\n"
+        + STYLE_DIRECTIVE + "\n\n" + TONE_DIRECTIVE)
     if hist:
         parts.append("\n--- CONVERSATION SO FAR ---\n" + hist)
     elif _show_msg:

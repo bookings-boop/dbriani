@@ -62,6 +62,28 @@ def test_tone_directive_reaches_drafter():
     assert "maria" in t          # must preserve her existing voice
 
 
+def test_quality_query_includes_style_and_tone():
+    # Scorer alignment (2026-06-06): the SCORER must judge against the SAME
+    # STYLE/TONE directives the drafter got — otherwise a well-formatted draft is
+    # penalised against a bar the scorer never saw and clusters at 6/10.
+    # build_quality_query must embed them even with NO system_prompt + no DB.
+    orig = server._psql
+    server._psql = lambda *a, **k: ("", None)  # offline: no DB rules/lead row
+    try:
+        q = server.build_quality_query({
+            "system_prompt": "TEST BASE PROMPT",   # avoid the file fallback
+            "incoming_message": "hi, any availability Saturday?",
+            "customer_name": "Test",
+            "history": "",
+            "current_draft": "Sure — here are two options...",
+            "customer_id": "",   # empty → skip the DB lead-analysis block
+        })
+    finally:
+        server._psql = orig
+    assert server.STYLE_DIRECTIVE in q, "scorer query missing STYLE_DIRECTIVE"
+    assert server.TONE_DIRECTIVE in q, "scorer query missing TONE_DIRECTIVE"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
