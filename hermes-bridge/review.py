@@ -774,9 +774,27 @@ def render_review(scored, totals, mode="ondemand"):
                                     "for review · nurture for repeat or "
                                     "referral (no upsell)_")
                     else:
-                        imp_bits = (f"\n🧠 Hermes: *{imp}/100* — _booked & paid "
-                                    "· confirm logistics or upsell "
-                                    "(extra hour / add-ons)_")
+                        # Show the booking at a glance (operator 2026-06-06:
+                        # "confirmed but timing / what he paid for / how much
+                        # not visible"). yacht + date + party + amount paid.
+                        _det = []
+                        _bk = (row.get("booked_yacht") or "").strip()
+                        _dt = (row.get("dates") or "").strip()
+                        _ps = (row.get("party_size") or "").strip()
+                        _amt = (row.get("paid_amount") or "").strip()
+                        if _bk:
+                            _det.append("🛥 " + _md_escape(_bk))
+                        if _dt:
+                            _det.append("🗓 " + _md_escape(_dt))
+                        if _ps:
+                            _det.append("👥 " + _md_escape(_ps))
+                        if _amt:
+                            _det.append("💰 " + _md_escape(_amt) + " paid")
+                        imp_bits = (
+                            "\n✅ *booked & paid*"
+                            + (" — " + " · ".join(_det) if _det else "")
+                            + f"\n🧠 Hermes: *{imp}/100* · _confirm logistics or "
+                            "upsell (extra hour / add-ons)_")
                 else:
                     imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                     # STALENESS GUARD (2026-05-29): the cached

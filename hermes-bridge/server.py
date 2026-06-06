@@ -3299,7 +3299,16 @@ def read_lead_summary(filter_label=None):
         # booked_yacht — the single CONFIRMED yacht (vs the yachts accumulator).
         # Correlated subquery against customer_facts so no view change needed.
         "COALESCE((SELECT booked_yacht FROM customer_facts cf3 "
-        "  WHERE cf3.customer_id = v_lead_summary.customer_id),'')) "
+        "  WHERE cf3.customer_id = v_lead_summary.customer_id),''), "
+        # paid amount (2026-06-06): latest payment_received total + currency from
+        # autonomous_sends.notes (JSON) so the CONFIRMED card shows HOW MUCH was
+        # paid. String-only (no numeric cast) → a malformed row can never break
+        # /review. e.g. 'AED 3534.3'.
+        "COALESCE((SELECT COALESCE(a3.notes->>'currency','AED') || ' ' || "
+        "  COALESCE(a3.notes->>'total', a3.notes->>'amount','') "
+        "  FROM autonomous_sends a3 WHERE a3.customer_id = "
+        "  v_lead_summary.customer_id AND a3.kind = 'payment_received' "
+        "  ORDER BY a3.sent_at DESC LIMIT 1),'')) "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -3350,6 +3359,7 @@ def read_lead_summary(filter_label=None):
             "last_analyzed_at_seconds":
                 _seconds_since(parts[25]) if len(parts) > 25 else None,
             "booked_yacht": parts[26].strip() if len(parts) > 26 else "",
+            "paid_amount": parts[27].strip() if len(parts) > 27 else "",
         }
         rows.append(row)
     return rows
