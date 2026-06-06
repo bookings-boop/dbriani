@@ -99,6 +99,19 @@ def test_owed_reply_still_floats_above_higher_value():
     assert cids.index("owed@lid") < cids.index("rich@lid"), cids
 
 
+def test_review_hot_uncap_shows_every_lead_in_tier():
+    # Operator 2026-06-06: '+N more — /review hot to see all' was BROKEN — the
+    # tier-filtered view ALSO capped at 10, so buried high-intent leads
+    # (Milenski/Emma) were unreachable in ANY /review view. With uncap=True the
+    # filtered tier shows every lead.
+    leads = [(50 - i, _row(f"h{i}@lid", label="HOT", name=f"H{i}",
+                           importance_score=50 - i)) for i in range(14)]
+    capped = _shown_cids(render_review(leads, {}, "on-demand"))
+    uncapped = _shown_cids(render_review(leads, {}, "on-demand", uncap=True))
+    assert len(capped) <= 10, len(capped)
+    assert len(uncapped) == 14, len(uncapped)
+
+
 def test_unknown_label_is_surfaced_not_dropped():
     # CATCH-ALL (2026-06-06): a lead whose label has no section (e.g. a new or
     # typo'd label like SUPPLIER_B2B, or LOST before it was wired) must be

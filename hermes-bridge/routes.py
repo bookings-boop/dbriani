@@ -1602,7 +1602,9 @@ def handle_review(payload, send):
                 totals["PAUSED"] += 1
             elif lab in totals:
                 totals[lab] += 1
-        rendered = render_review(scored, totals, mode=mode)
+        rendered = render_review(
+            scored, totals, mode=mode,
+            uncap=(filter_label in ("hot", "warm", "cold")))
         # Phase 4: monthly edit-learning digest — prepend to the report header
         # on the 1st of the month (the cron's monthly summary) or on demand
         # (payload.digest=true, used for testing).

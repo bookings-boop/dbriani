@@ -584,7 +584,7 @@ def _expected_value(score, row):
     return base * like
 
 
-def render_review(scored, totals, mode="ondemand"):
+def render_review(scored, totals, mode="ondemand", uncap=False):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
     per lead — each lead's 3-button inline keyboard then sits with that lead's
@@ -799,7 +799,11 @@ def render_review(scored, totals, mode="ondemand"):
         items = sect["items"]
         if not items:
             continue
-        cap = sect["cap"]
+        # uncap=True (a tier-filtered `/review hot|warm|cold`): show EVERY lead in
+        # the tier so the "+N more — /review hot to see all" hint actually works
+        # (operator 2026-06-06: the filtered view also capped, so buried leads
+        # were unreachable in any view).
+        cap = len(items) if uncap else sect["cap"]
         shown = items[:cap]
         overflow = len(items) - len(shown)
         if overflow > 0:
