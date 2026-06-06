@@ -712,28 +712,25 @@ def render_review(scored, totals, mode="ondemand"):
         key=lambda it: (
             (it[1].get("label") or "") == "CONFIRMED",                 # active first
             _AWAIT_LABEL_PRIO.get(it[1].get("label") or "", 3),        # HOT → COLD
-            -_yacht_max_rate(it[1].get("yachts") or ""),               # rate desc
+            -_expected_value(it[0], it[1]),                            # value desc
             -(it[1].get("last_customer_message_at_seconds") or 0),     # longest-waiting
         ))
 
-    # STRICT rate-first ordering within each value-relevant section
-    # (operator 2026-05-29): order by the highest hourly rate of the
-    # yachts the customer wants, descending; the additive score is the
-    # tiebreaker (urgency/importance). This guarantees e.g. an
-    # AK Royalty 136 @18,000/hr ranks above a Tatti 110 @9,000/hr even
-    # when the additive rate bonus is capped. NEW: rate when known, else
-    # recency (the _recency_key pass above acts as stable tiebreaker).
-    # Owed-reply leads (customer waiting on US) float to the TOP of their tier
-    # so an unanswered customer is NEVER buried in a capped tier's overflow
-    # (2026-06-02: a HOT 'needs your reply' fishing lead with no yacht ranked
-    # 19/24 and vanished). Then rate-first, then score (operator's value order).
-    def _rate_key(item):
+    # VALUE-first ordering within each section (operator 2026-06-06: "highest
+    # potential value to lowest"). Rank by EXPECTED VALUE = yacht rate ×
+    # likelihood(label, importance), NOT raw hourly rate — so a high-intent lead
+    # on a cheaper yacht (Emma imp 88 @ 1,400) is not buried under a low-intent
+    # whale (@ 3,000, imp 10). Same measure as the "Top by value" header digest.
+    # Owed-reply leads (customer waiting on US) still float to the TOP of their
+    # tier so an unanswered customer is NEVER buried in a capped tier's overflow
+    # (2026-06-02). Then expected-value desc, then score (urgency tiebreak).
+    def _value_key(item):
         r = item[1]
         return (1 if _owes_reply(r) else 0,
-                _yacht_max_rate(r.get("yachts") or ""), item[0])
+                _expected_value(item[0], r), item[0])
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
                 "WARM", "COLD", "CONFIRMED", "NEW"):
-        sections[_lk]["items"].sort(key=_rate_key, reverse=True)
+        sections[_lk]["items"].sort(key=_value_key, reverse=True)
     # NO ACTIVE SALE: float the operator's active graceful-exits (passed-date
     # leads we've re-engaged) to the top so they're visible above stale
     # suppliers/spam within the capped bucket (2026-06-01: Marimuthu).

@@ -71,6 +71,34 @@ def test_future_date_negative_score_still_hidden():
     assert "fut@lid" not in _shown_cids(res)
 
 
+def test_main_list_ranks_by_expected_value_not_raw_rate():
+    # Operator 2026-06-06: rank by POTENTIAL VALUE (importance-weighted), not raw
+    # hourly rate. A high-intent lead on a cheaper yacht must outrank a low-intent
+    # lead on a pricier yacht (Milenski/Emma were buried under low-intent whales).
+    # Bliss 55 imp88 -> EV 1792 (rate 1400); Satoshi 70 imp10 -> EV 1500 (rate 3000).
+    hi = _row("hi@lid", label="HOT", name="HighIntent",
+              yachts="Bliss 55", importance_score=88)
+    lo = _row("lo@lid", label="HOT", name="LowIntent",
+              yachts="Sunseeker Satoshi 70", importance_score=10)
+    res = render_review([(0, hi), (0, lo)], {}, "on-demand")
+    cids = _shown_cids(res)
+    assert cids.index("hi@lid") < cids.index("lo@lid"), cids
+
+
+def test_owed_reply_still_floats_above_higher_value():
+    # owed-reply (revenue at risk) must still beat a higher-value non-owed lead.
+    owed = _row("owed@lid", label="HOT", name="Owed", yachts="Bliss 55",
+                importance_score=40, last_customer_message_at_seconds=600,
+                last_operator_reply_at_seconds=7200)   # customer after us -> owe
+    rich = _row("rich@lid", label="HOT", name="Rich", yachts="Sunseeker Satoshi 70",
+                importance_score=95,                    # higher EV but NOT owed
+                last_customer_message_at_seconds=7200,  # we replied after them
+                last_operator_reply_at_seconds=600)
+    res = render_review([(0, owed), (0, rich)], {}, "on-demand")
+    cids = _shown_cids(res)
+    assert cids.index("owed@lid") < cids.index("rich@lid"), cids
+
+
 def test_unknown_label_is_surfaced_not_dropped():
     # CATCH-ALL (2026-06-06): a lead whose label has no section (e.g. a new or
     # typo'd label like SUPPLIER_B2B, or LOST before it was wired) must be
