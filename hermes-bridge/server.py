@@ -2974,6 +2974,23 @@ def _passed_date_note(dates, reasoning="", now=None):
         "missing the (already-passed) date.")
 
 
+# Rejection / service-mismatch -> LOST (operator 2026-06-06). Tight patterns:
+# a CLEAR standalone decline (the negative lookahead excludes an engaged
+# "no thanks, what about X?" / "not interested IN the bigger one"), and an
+# EXPLICIT bareboat/no-captain ask (Dubriani is crewed-only, so it's a non-fit).
+_DECLINE_RE = re.compile(
+    r"\b(no\s+thanks?|no\s+thank\s+you|not\s+interested|i'?ll\s+pass|"
+    r"we'?ll\s+pass|not\s+for\s+(us|me)|all\s+good\s+thanks|"
+    r"booked\s+(elsewhere|already)|found\s+(another|someone\s+else)|"
+    r"changed\s+my\s+mind|no\s+longer\s+(interested|needed?))\b"
+    r"(?!\s*(in|about|but|,?\s*(what|how|can|could|do|is|are|maybe|unless)))",
+    re.I)
+_BAREBOAT_RE = re.compile(
+    r"\b(bareboat|self.?driv(?:e|ing|er)?|without\s+(a\s+|the\s+)?(captain|skipper|crew|"
+    r"boat\s+driver)|no\s+(captain|skipper|crew)\s+(needed|required|included)|"
+    r"(don'?t|do\s+not)\s+(want|need)\s+(a\s+)?(captain|skipper|crew))\b", re.I)
+
+
 def compute_label(latest_message, facts):
     """Match signal heuristics against latest message + cached facts.
     Returns (target_label, signal, evidence). NO DB writes. NO dampening
@@ -3003,6 +3020,16 @@ def compute_label(latest_message, facts):
     # should NOT sit at the top of /review as HOT.
     if dates and _is_past_booking_date(dates):
         return ("COLD", "date_passed", dates[:200])
+
+    # Rejection / service-mismatch -> LOST (operator 2026-06-06: Marc declined
+    # 'no thanks' AND wanted a bareboat charter we don't offer, yet stayed HOT
+    # 'push to book'). Clear standalone decline / explicit bareboat only; never
+    # for an already-CONFIRMED (paid) booking. The operator can /label to reopen.
+    if ((facts or {}).get("label") or "").strip().upper() != "CONFIRMED":
+        if _BAREBOAT_RE.search(msg):
+            return ("LOST", "service_mismatch", msg[:200])
+        if _DECLINE_RE.search(msg) and "?" not in msg:
+            return ("LOST", "declined", msg[:200])
 
     if customer_id and _has_recent_payment_intent(customer_id):
         return ("HOT", "payment_intent", "trigger in last 24h")
