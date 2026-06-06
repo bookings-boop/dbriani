@@ -138,6 +138,30 @@ def test_confirmed_not_owed_stays_in_own_section():
     assert _awaiting_section_for(row, 5000) == ""
 
 
+def test_confirmed_passed_event_owed_leaves_awaiting():
+    # Emilie 2026-06-06: a CONFIRMED booking whose event date has PASSED is a
+    # WON, completed deal. A stale pre-trip message must NOT resurrect it into
+    # the top AWAITING section (she was #1 in /review off a May-27 message for a
+    # May-28 event, score 0). Passed-event CONFIRMED stays in its CONFIRMED tier.
+    row = _r("CONFIRMED", importance_score=0, dates="Jan 1 2020",
+             last_customer_message_at_seconds=3600,    # customer msg 1h ago
+             last_operator_reply_at_seconds=7200,       # we replied 2h ago -> owe
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=1800)
+    assert _awaiting_section_for(row, 5000) == ""
+
+
+def test_confirmed_future_event_owed_stays_awaiting():
+    # Antonio regression: an UPCOMING CONFIRMED booking with an unanswered
+    # message still surfaces in AWAITING_REPLY (active post-booking thread).
+    row = _r("CONFIRMED", importance_score=90, dates="Dec 31 2099",
+             last_customer_message_at_seconds=3600,
+             last_operator_reply_at_seconds=7200,
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=1800)
+    assert _awaiting_section_for(row, 5000) == "AWAITING_REPLY"
+
+
 def test_non_owe_terminal_lead_is_untouched():
     # not owed (we replied more recently than the customer) + terminal -> stays
     # in its own tier; the fix only diverts OWED leads (scope guard).

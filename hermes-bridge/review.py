@@ -136,7 +136,13 @@ def _awaiting_section_for(row, score):
         # sit buried at the bottom CONFIRMED tier — surface it in AWAITING_REPLY
         # (Antonio 2026-06-06: a paid Jun-20 lead arranging a Saturday viewing
         # was invisible). A CONFIRMED lead we've already replied to stays put.
-        return "AWAITING_REPLY" if _owes_reply(row) else ""
+        # BUT a CONFIRMED booking whose event date has PASSED is a WON, completed
+        # deal — a stale pre-trip message must not resurrect it to the top
+        # AWAITING section (Emilie 2026-06-06: May-28 event, score 0, kept #1 by
+        # a May-27 message). Passed-event CONFIRMED stays in its CONFIRMED tier.
+        return ("AWAITING_REPLY"
+                if (_owes_reply(row) and not _booking_date_passed(row))
+                else "")
     _cs = row.get("last_customer_message_at_seconds")
     _rs = row.get("last_operator_reply_at_seconds")
     _ns = row.get("last_nudge_drafted_at_seconds")
