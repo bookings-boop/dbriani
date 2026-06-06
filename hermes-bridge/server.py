@@ -1277,6 +1277,26 @@ def _graceful_goodbye_line(label):
     return ""
 
 
+FIRST_CONTACT_DIRECTIVE = (
+    "EARLY IN THE CONVERSATION: greet the customer warmly and, if you don't yet "
+    "know their name, ask for it naturally as part of your reply. You may answer "
+    "their question, but do NOT lead with a generic, name-less 3-yacht options "
+    "dump before you have their name and basic context (occasion, date, group "
+    "size). Use the name at most once, naturally — never in the very first line, "
+    "never repeatedly.")
+
+
+def _first_contact_line(message_count):
+    """Early-conversation drafting directive (greet + ask the name before a
+    generic options dump). '' once past first contact (count > 3) or when the
+    count is unknown/non-numeric. Pure."""
+    try:
+        n = int(str(message_count).strip())
+    except (TypeError, ValueError):
+        return ""
+    return FIRST_CONTACT_DIRECTIVE if 0 < n <= 3 else ""
+
+
 def _lead_state_block(customer_id):
     """The lead's current analyzer state, framed so the DRAFTER fits its reply
     to it — mirrors what build_quality_query hands the SCORER (Pillar B). ''
@@ -1289,19 +1309,20 @@ def _lead_state_block(customer_id):
         "COALESCE(importance_score::text,'') || '~~' || "
         "COALESCE(importance_reasoning,'') || '~~' || "
         "COALESCE(dates,'') || '~~' || COALESCE(party_size::text,'') || '~~' || "
-        "COALESCE(yachts,'') "
+        "COALESCE(yachts,'') || '~~' || COALESCE(message_count::text,'') "
         "FROM customer_facts "
         "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
     row = (row or "").strip()
     if not row:
         return ""
-    lbl, isc, irea, dts, psize, ychts = (
-        row.splitlines()[0].split("~~") + ["", "", "", "", "", ""])[:6]
+    lbl, isc, irea, dts, psize, ychts, mct = (
+        row.splitlines()[0].split("~~") + ["", "", "", "", "", "", ""])[:7]
     _cap_line = _party_size_fit_line(psize, ychts)
+    _fc_line = _first_contact_line(mct)
     # Emit the block when there's analysis OR a known party size — the capacity
     # constraint must reach the drafter even on a first reply (before analysis),
     # which is exactly when an under-capacity yacht gets recommended.
-    if not (irea or isc or lbl) and not _cap_line:
+    if not (irea or isc or lbl) and not _cap_line and not _fc_line:
         return ""
     bar = "=" * 60
     lines = [
@@ -1320,6 +1341,8 @@ def _lead_state_block(customer_id):
     _gb = _graceful_goodbye_line(lbl)
     if _gb:
         lines.append(_gb)
+    if _fc_line:
+        lines.append(_fc_line)
     lines += [
         "",
         "Write a reply APPROPRIATE for this state. If the analyzer judged this "
