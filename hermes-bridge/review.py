@@ -130,8 +130,13 @@ def _awaiting_section_for(row, score):
     """
     label = row.get("label") or "NEW"
     if label == "CONFIRMED":
-        # A won/finished booking renders in CONFIRMED, never "awaiting reply".
-        return ""
+        # A paid/won booking normally renders in CONFIRMED. BUT a CONFIRMED
+        # customer with an UNANSWERED new message has an ACTIVE post-booking
+        # thread (viewing logistics, a time change, a question) that must NOT
+        # sit buried at the bottom CONFIRMED tier — surface it in AWAITING_REPLY
+        # (Antonio 2026-06-06: a paid Jun-20 lead arranging a Saturday viewing
+        # was invisible). A CONFIRMED lead we've already replied to stays put.
+        return "AWAITING_REPLY" if _owes_reply(row) else ""
     _cs = row.get("last_customer_message_at_seconds")
     _rs = row.get("last_operator_reply_at_seconds")
     _ns = row.get("last_nudge_drafted_at_seconds")
@@ -695,13 +700,30 @@ def render_review(scored, totals, mode="ondemand"):
     # ---- Single-message render (backward compat) ----------------------------
     when = ("Scheduled review" if mode == "scheduled"
             else "On-demand review")
+    # Full, accurate tier breakdown computed from the ACTUAL routed sections
+    # (not a partial totals dict) so the header can't undercount — operator
+    # 2026-06-06: the old "X hot · Y need-attn · Z cold" line omitted awaiting/
+    # warm/new/confirmed and read as "incomplete/inaccurate" against 154 active.
+    _hdr_tiers = [("AWAITING_REPLY", "📨 awaiting"),
+                  ("WAITING_FOR_PAYMENT", "⏳ awaiting-pay"),
+                  ("HOT", "🔥 hot"), ("NEEDS_ATTENTION", "⚠️ need-attn"),
+                  ("WARM", "♨️ warm"), ("NEW", "🌱 new"), ("COLD", "❄️ cold"),
+                  ("CONFIRMED", "✅ confirmed"), ("NOT_A_CUSTOMER", "💤 no-sale")]
+    _active_total = sum(len(sections[_k]["items"]) for _k, _ in _hdr_tiers
+                        if _k != "NOT_A_CUSTOMER")
+    _breakdown = " · ".join(f"{len(sections[_k]['items'])} {_lbl}"
+                            for _k, _lbl in _hdr_tiers if sections[_k]["items"])
+    _disregarded_n = sum(1 for _s, _r in scored
+                         if (_r.get("label") or "") == "DISREGARDED")
     header_lines = [f"📋 *Pipeline Review* — {when}",
-                    (f"{totals.get('total', 0)} active · "
-                     f"{totals.get('HOT', 0)} hot · "
-                     f"{totals.get('NEEDS_ATTENTION', 0)} need attention · "
-                     f"{totals.get('COLD', 0)} cold"),
-                    "_Prioritised view — top leads per tier shown; "
-                    "`/review <tier>` (e.g. `/review hot`) for the full list._"]
+                    f"*{_active_total} active* — {_breakdown}"]
+    if _disregarded_n:
+        header_lines.append(
+            f"🔒 {_disregarded_n} disregarded (hidden) — "
+            "`/label <name> WARM` to restore one")
+    header_lines.append(
+        "_Top leads per tier shown; `/review <tier>` (e.g. `/review hot`) "
+        "for a full tier._")
     lines = list(header_lines) + [""]
     keyboards = []
     per_lead_messages = []

@@ -115,10 +115,24 @@ def test_score_zero_not_owe_still_not_a_customer():
     assert _awaiting_section_for(row, 200) == "NOT_A_CUSTOMER"
 
 
-def test_confirmed_stays_in_own_section():
+def test_confirmed_owed_goes_to_awaiting():
+    # Antonio 2026-06-06: a PAID/CONFIRMED customer with an unanswered new
+    # message (active post-booking thread — viewing logistics) must surface in
+    # AWAITING_REPLY, not sit buried at the bottom CONFIRMED tier.
     row = _r("CONFIRMED", importance_score=90,
-             last_customer_message_at_seconds=3600,
-             last_operator_reply_at_seconds=7200,
+             last_customer_message_at_seconds=3600,   # customer msg 1h ago
+             last_operator_reply_at_seconds=7200,      # we replied 2h ago -> owe
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=1800)
+    assert _awaiting_section_for(row, 5000) == "AWAITING_REPLY"
+
+
+def test_confirmed_not_owed_stays_in_own_section():
+    # A CONFIRMED booking we've already replied to (no owed reply) stays in the
+    # CONFIRMED tier — unchanged (a post-booking "thanks" we already handled).
+    row = _r("CONFIRMED", importance_score=90,
+             last_customer_message_at_seconds=7200,    # customer msg 2h ago
+             last_operator_reply_at_seconds=3600,       # we replied 1h ago -> not owe
              last_analysis_signal="confirmed_terminal",
              last_analyzed_at_seconds=1800)
     assert _awaiting_section_for(row, 5000) == ""
