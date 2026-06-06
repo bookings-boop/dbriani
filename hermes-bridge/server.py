@@ -3498,6 +3498,16 @@ def sanitize_draft_messages(messages):
         if not out or len(out) < 6:
             out = "want me to send the payment link to lock it in?"
         cleaned.append(out)
+    # Bubble-count cap (operator 2026-06-06 'overtexting': Emma got 2-4 bubbles
+    # per reply, ~17 outbound to ~7 inbound). Cap the number of SEPARATE WhatsApp
+    # messages per reply; merge any overflow into the last bubble (newline-spaced,
+    # no content lost) so we send fewer, calmer messages. Per-bubble brevity /
+    # Ritz-Carlton tone is handled separately by the STYLE directive (n8n prompt).
+    MAX_BUBBLES = 4
+    if len(cleaned) > MAX_BUBBLES:
+        merged = "\n\n".join(cleaned[MAX_BUBBLES - 1:])
+        cleaned = cleaned[:MAX_BUBBLES - 1] + [merged]
+        stripped = True
     return cleaned, stripped
 
 
