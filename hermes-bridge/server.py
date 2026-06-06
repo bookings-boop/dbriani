@@ -1271,15 +1271,16 @@ def _lead_state_block(customer_id):
         "SELECT COALESCE(label,'') || '~~' || "
         "COALESCE(importance_score::text,'') || '~~' || "
         "COALESCE(importance_reasoning,'') || '~~' || "
-        "COALESCE(dates,'') || '~~' || COALESCE(party_size::text,'') "
+        "COALESCE(dates,'') || '~~' || COALESCE(party_size::text,'') || '~~' || "
+        "COALESCE(yachts,'') "
         "FROM customer_facts "
         "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
     row = (row or "").strip()
     if not row:
         return ""
-    lbl, isc, irea, dts, psize = (
-        row.splitlines()[0].split("~~") + ["", "", "", "", ""])[:5]
-    _cap_line = _party_size_fit_line(psize)
+    lbl, isc, irea, dts, psize, ychts = (
+        row.splitlines()[0].split("~~") + ["", "", "", "", "", ""])[:6]
+    _cap_line = _party_size_fit_line(psize, ychts)
     # Emit the block when there's analysis OR a known party size — the capacity
     # constraint must reach the drafter even on a first reply (before analysis),
     # which is exactly when an under-capacity yacht gets recommended.

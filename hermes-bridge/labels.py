@@ -1143,21 +1143,46 @@ def _deterministic_break(msg):
     return ""
 
 
-def _party_size_fit_line(party_size):
-    """Drafter capacity constraint: only recommend yachts that fit the stated
-    party. Returns a one-line instruction, or '' when the party size is unknown
-    / non-numeric / <= 0 (safe to concatenate). Rides _lead_state_block ->
-    behavioral_context().formatted -> the live drafter, no n8n change. Pure."""
+def _party_n(party_size):
+    """Best-effort party size as an int. Tries an exact int first (so '-3'/'0'
+    stay non-positive), then falls back to the LARGEST number in the string so
+    ranges like 'up to 10' / '1-10' / '6-8 guests' surface the worst-case size.
+    Returns 0 when no usable number is present."""
+    s = str(party_size or "").strip()
     try:
-        n = int(str(party_size).strip())
+        return int(s)
     except (TypeError, ValueError):
-        return ""
+        pass
+    nums = [int(x) for x in re.findall(r"\d+", s)]
+    return max(nums) if nums else 0
+
+
+def _party_size_fit_line(party_size, chosen=""):
+    """Drafter capacity constraint. Returns a one-line instruction, or '' when
+    the party size is unknown / non-positive (safe to concatenate). Rides
+    _lead_state_block -> behavioral_context().formatted -> the live drafter, no
+    n8n change. When the customer has chosen ONE specific yacht (e.g. a
+    landing-page pick), respect it (lead with it; offer an alternative only if it
+    truly can't fit) instead of upselling them off it. Pure."""
+    n = _party_n(party_size)
     if n <= 0:
         return ""
-    fit = (f"Party size: {n} guests — ONLY recommend yacht(s) that seat at "
-           f"least {n}. NEVER suggest a yacht whose max capacity is below "
-           f"{n}; if the party exceeds every single yacht, recommend the "
-           f"largest fitting option(s) or note combining two boats.")
+    picks = [y.strip() for y in str(chosen or "").split(",") if y.strip()]
+    chosen_one = picks[0] if len(picks) == 1 else ""
+    if chosen_one:
+        # Operator 2026-06-06: a Von Dutch 40 lead was pushed to a bigger boat.
+        # Respect a single, clearly-chosen yacht; the LLM has catalog capacities.
+        fit = (f"Party size: {n} guests. The customer specifically chose "
+               f"{chosen_one} — LEAD with {chosen_one} and respect that choice; "
+               f"do NOT push a bigger boat. If {chosen_one} comfortably fits "
+               f"{n}, recommend it. ONLY if it genuinely cannot fit {n}, warmly "
+               f"flag the gap and offer ONE larger fitting alternative ALONGSIDE "
+               f"it — never silently drop their chosen yacht.")
+    else:
+        fit = (f"Party size: {n} guests — ONLY recommend yacht(s) that seat at "
+               f"least {n}. NEVER suggest a yacht whose max capacity is below "
+               f"{n}; if the party exceeds every single yacht, recommend the "
+               f"largest fitting option(s) or note combining two boats.")
     if n < 10:
         # Rule 3 (2026-06-04): for a SMALL/intimate party, the capacity number
         # is a SILENT internal filter — still pick a yacht that comfortably

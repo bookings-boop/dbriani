@@ -71,6 +71,35 @@ def test_capacity_suppression_boundary_is_under_10():
     assert "not mention" not in _party_size_fit_line(10).lower()  # 10+
 
 
+# --- A-S4 (2026-06-06): respect a single chosen yacht; don't upsell off it -----
+def test_single_chosen_yacht_is_respected_not_upsold():
+    line = _party_size_fit_line(10, "Von Dutch 40")
+    low = line.lower()
+    assert "von dutch 40" in low, line
+    assert "lead with" in low, line
+    assert "never silently drop" in low, line
+    # the harsh general mandate is replaced by respect-the-pick for a single yacht
+    assert "never suggest a yacht whose max capacity is below" not in low, line
+
+
+def test_multiple_yachts_keeps_general_mandate():
+    # comparing across several yachts -> no single pick -> keep the hard mandate
+    line = _party_size_fit_line(10, "Von Dutch 40, Bliss 55, Satoshi 70").lower()
+    assert "only" in line and "never" in line, line
+    assert "at least 10" in line, line
+
+
+def test_no_chosen_yacht_keeps_general_mandate():
+    line = _party_size_fit_line(10, "").lower()
+    assert "only" in line and "never" in line, line
+
+
+def test_range_party_size_parsed_to_max():
+    assert "10" in _party_size_fit_line("up to 10"), "up to 10"
+    assert "10" in _party_size_fit_line("1-10"), "1-10"
+    assert _party_size_fit_line("-3") == ""   # exact int still wins -> empty
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
