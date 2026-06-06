@@ -555,6 +555,25 @@ def _owes_reply(row):
     return isinstance(cs, (int, float)) and (out is None or cs < out)
 
 
+def _expected_value(score, row):
+    """Rough expected booking VALUE for the 'top by value' digest (operator
+    2026-06-06: 'sort from high revenue to down'). booking_value (the top yacht's
+    AED/hr, or an importance-derived fallback when no yacht is set yet) ×
+    likelihood (label-tier weight blended with the analyzer importance). Higher =
+    surface sooner. Pure; None/junk-safe."""
+    rate = _yacht_max_rate(row.get("yachts") or "")
+    like = {"WAITING_FOR_PAYMENT": 0.95, "HOT": 1.0, "NEEDS_ATTENTION": 0.8,
+            "WARM": 0.55, "NEW": 0.4, "COLD": 0.2}.get(row.get("label") or "", 0.3)
+    imp = row.get("importance_score")
+    if isinstance(imp, int) and not isinstance(imp, bool):
+        like *= max(0.3, min(1.3, imp / 100.0 + 0.4))
+    # Yacht-unknown fallback: value the lead off its importance so a high-intent
+    # NEW lead with no yacht set yet doesn't rank at 0.
+    base = rate if rate else (imp * 50 if isinstance(imp, int) and not
+                              isinstance(imp, bool) else 0)
+    return base * like
+
+
 def render_review(scored, totals, mode="ondemand"):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -721,6 +740,30 @@ def render_review(scored, totals, mode="ondemand"):
         header_lines.append(
             f"🔒 {_disregarded_n} disregarded (hidden) — "
             "`/label <name> WARM` to restore one")
+    # 💰 Top-by-value digest (operator 2026-06-06: "sort from high revenue to
+    # down"). A value-ranked callout of the highest expected-value ACTIVE leads
+    # ACROSS all temperature tiers, so the whales surface at the very top
+    # regardless of tier. Text-only (the actionable card stays in its tier below,
+    # so no duplicate action buttons). Unanswered leads already lead the report
+    # via the AWAITING_REPLY section.
+    _ev_emoji = {"WAITING_FOR_PAYMENT": "⏳", "HOT": "🔥", "NEEDS_ATTENTION": "⚠️",
+                 "WARM": "♨️", "NEW": "🌱", "COLD": "❄️"}
+    _ev_pool = []
+    for _k in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD"):
+        for _sc, _r in sections[_k]["items"]:
+            _ev_pool.append((_expected_value(_sc, _r), _r))
+    _ev_pool.sort(key=lambda t: t[0], reverse=True)
+    _top = []
+    for _val, _r in _ev_pool[:8]:
+        if _val <= 0:
+            continue
+        _nm = _md_escape((_r.get("name") or "?").strip() or "?")
+        _em = _ev_emoji.get(_r.get("label") or "", "")
+        _rate = _yacht_max_rate(_r.get("yachts") or "")
+        _vtag = f" — AED {_rate:,}/hr" if _rate else ""
+        _top.append(f"{_em} {_nm}{_vtag}")
+    if _top:
+        header_lines.append("💰 *Top by value:* " + " · ".join(_top))
     header_lines.append(
         "_Top leads per tier shown; `/review <tier>` (e.g. `/review hot`) "
         "for a full tier._")
