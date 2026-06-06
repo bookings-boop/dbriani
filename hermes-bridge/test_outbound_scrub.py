@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import waha  # noqa: E402
-from waha import scrub_outbound  # noqa: E402
+from waha import scrub_outbound, DROP_OFF_PIN, PARKING_PIN  # noqa: E402
 
 # The exact text that leaked to the customer (2026-06-06).
 LEAK = ("Premium BBQ menu - sending alongside fine dining per operator "
@@ -112,6 +112,35 @@ def test_send_file_caption_scrubbed():
         assert captured["body"]["file"]["url"] == "https://x/f.pdf"
     finally:
         waha._waha_post = orig
+
+
+def test_stray_pin_replaced_with_canonical_dropoff():
+    # 2026-06-06: the n8n prompt had 6 different map pins (incl. a fake
+    # 'DubrianDubaiHarbour'); the bot sent whichever it pattern-matched. Any
+    # non-canonical maps link must be replaced with the canonical drop-off pin.
+    out = scrub_outbound("here's the location: "
+                         "https://maps.app.goo.gl/5riJbF5tyj5aUwqr5")
+    assert "5riJbF5tyj5aUwqr5" not in out, out
+    assert DROP_OFF_PIN in out, out
+
+
+def test_fake_pin_replaced():
+    out = scrub_outbound("https://maps.app.goo.gl/DubrianDubaiHarbour")
+    assert "DubrianDubaiHarbour" not in out, out
+    assert DROP_OFF_PIN in out, out
+
+
+def test_google_maps_stray_replaced():
+    out = scrub_outbound("location https://www.google.com/maps/place/xyz123 ok")
+    assert "google.com/maps" not in out, out
+    assert DROP_OFF_PIN in out, out
+
+
+def test_canonical_pins_preserved():
+    assert DROP_OFF_PIN in scrub_outbound("drop-off: " + DROP_OFF_PIN)
+    assert PARKING_PIN in scrub_outbound("parking: " + PARKING_PIN)
+    # the canonical parking pin must NOT be rewritten to the drop-off pin
+    assert scrub_outbound("parking: " + PARKING_PIN).count(DROP_OFF_PIN) == 0
 
 
 def test_send_text_blocks_when_scrub_empties_message():

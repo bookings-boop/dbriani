@@ -166,6 +166,34 @@ _NOTE_EMOJI_RE = re.compile(r"\s*\U0001F4DD[^\n]*")
 # Operator / internal names that must never appear in a customer message.
 _INTERNAL_NAMES = ("zayn",)
 
+# Canonical Dubai Harbour map pins (operator 2026-06-06: "when sending location
+# it should ALWAYS send this pin"). The n8n prompt had 6 stray pins incl. a fake
+# 'DubrianDubaiHarbour'; the bot sent whichever it pattern-matched. This guard
+# rewrites ANY non-canonical map link to the canonical DROP-OFF pin so a
+# wrong/old/placeholder pin can never reach a customer. The canonical parking
+# pin is preserved (it is in the allowed set).
+DROP_OFF_PIN = "https://maps.app.goo.gl/1aT4Vtqwe71FKi3AA"
+PARKING_PIN = "https://maps.app.goo.gl/kP8dHqhnrizYVxAw8"
+_CANONICAL_PINS = (DROP_OFF_PIN, PARKING_PIN)
+_MAPS_URL_RE = re.compile(
+    r"https?://(?:maps\.app\.goo\.gl/[^\s)]+"
+    r"|(?:www\.)?google\.[a-z.]+/maps[^\s)]*"
+    r"|goo\.gl/maps/[^\s)]+"
+    r"|maps\.google\.[a-z.]+/[^\s)]*)", re.I)
+
+
+def _canonicalize_pins(text):
+    """Replace any NON-canonical map link with the canonical DROP-OFF pin so a
+    wrong/old/placeholder pin can never reach a customer. Canonical pins
+    (drop-off + parking) are left untouched. Pure; None-safe."""
+    if not text:
+        return text
+
+    def _sub(m):
+        url = m.group(0).rstrip(".,);!?")
+        return m.group(0) if url in _CANONICAL_PINS else DROP_OFF_PIN
+    return _MAPS_URL_RE.sub(_sub, text)
+
 
 def scrub_outbound(text):
     """Remove internal operator notes/names from a customer-facing message.
@@ -181,6 +209,8 @@ def scrub_outbound(text):
     s = _OPRULE_RE.sub("", s)
     for _nm in _INTERNAL_NAMES:
         s = re.sub(r"\b%s\b" % re.escape(_nm), "", s, flags=re.I)
+    # rewrite any wrong/stray map pin to the canonical drop-off pin
+    s = _canonicalize_pins(s)
     # tidy whitespace + dangling connectors left by removals
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"[ \t]+([\n.,;:!?])", r"\1", s)
