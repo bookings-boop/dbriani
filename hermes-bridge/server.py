@@ -2546,7 +2546,10 @@ def _quality_task_framing(incoming, history):
             "CTA, no false claim of prior contact, no assumptions about a "
             "conversation that hasn't happened. Do NOT rewrite — only score and "
             "flag. 8-10 = send as-is; 5-7 = usable but has issues; 1-4 = should "
-            "be regenerated.",
+            "be regenerated. An 8 is the BAR for a strong opener: warm, "
+            "on-brand, clear hook + soft CTA, no false claim of prior contact. "
+            "If you cannot name a SPECIFIC flaw, score it 8 — do NOT default to "
+            "6-7. Reserve 9-10 for an excellent, perfectly-judged opener.",
             False,
         )
     return (
@@ -2554,7 +2557,11 @@ def _quality_task_framing(incoming, history):
         "operator review. SCORE its quality 1-10 against Maria's persona, the "
         "hard rules above, and the conversation. Do NOT rewrite it — only "
         "score and flag. 8-10 = send as-is; 5-7 = usable but has issues; "
-        "1-4 = should be regenerated.",
+        "1-4 = should be regenerated. An 8 is the BAR for a normal GOOD reply: "
+        "on-brand tone, correct formatting, answers the question, no rule "
+        "violation, no invented facts. If you cannot name a SPECIFIC flaw, "
+        "score it 8 — do NOT default to 6-7. Reserve 9-10 for an excellent, "
+        "proactive, perfectly-tailored reply.",
         True,
     )
 

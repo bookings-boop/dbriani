@@ -46,6 +46,17 @@ def test_whitespace_is_treated_as_empty():
     assert show_msg is False
 
 
+def test_rubric_has_positive_8_anchor():
+    # 2026-06-06: drafts clustered at 6 because the rubric defined only
+    # "5-7 = usable" with NO positive definition of 8. Both framings (reply +
+    # opener) must tell the scorer to score a flawless draft an 8 rather than
+    # default to 6-7.
+    for incoming, history in [("hi any availability?", ""), ("", "")]:
+        task = _quality_task_framing(incoming, history)[0].lower()
+        assert "score it 8" in task
+        assert "do not default to 6-7" in task
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
