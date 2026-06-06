@@ -1260,6 +1260,23 @@ def behavioral_context(customer_id):
             "formatted": formatted}
 
 
+GRACEFUL_GOODBYE_DIRECTIVE = (
+    "THIS LEAD IS LOST (they declined, or want something Dubriani doesn't offer "
+    "— e.g. a captain-less / bareboat / self-drive charter). If a reply is "
+    "warranted, write a BRIEF, warm, gracious GOODBYE: thank them for "
+    "considering Dubriani, wish them well, and leave the door open for a future "
+    "charter. Do NOT push the sale, re-pitch yachts, quote prices, or ask "
+    "qualifying questions — a sales-y reply here is WRONG and will be rejected.")
+
+
+def _graceful_goodbye_line(label):
+    """Drafting directive for a LOST lead — a warm goodbye, no sales push.
+    Returns '' for any other label (safe to concatenate). Pure."""
+    if (label or "").strip().upper() == "LOST":
+        return GRACEFUL_GOODBYE_DIRECTIVE
+    return ""
+
+
 def _lead_state_block(customer_id):
     """The lead's current analyzer state, framed so the DRAFTER fits its reply
     to it — mirrors what build_quality_query hands the SCORER (Pillar B). ''
@@ -1300,6 +1317,9 @@ def _lead_state_block(customer_id):
         lines.append(_pd)
     if _cap_line:
         lines.append(_cap_line)
+    _gb = _graceful_goodbye_line(lbl)
+    if _gb:
+        lines.append(_gb)
     lines += [
         "",
         "Write a reply APPROPRIATE for this state. If the analyzer judged this "
