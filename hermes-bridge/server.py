@@ -2584,6 +2584,10 @@ _CANON_CATERING = {                          # term -> valid AED amount(s) (for 
     "premium bbq": {1500},
     "premium barbecue": {1500},
 }
+_CANON_ADDONS = {                            # add-on term -> valid AED amount(s)
+    "balloon": {300},                        # romantic balloon decor — from AED 300
+    "birthday cake": {300},                  # birthday cake — from AED 300
+}
 _RATE_HR_RE = re.compile(
     r"(?:AED\s*)?([\d][\d,]*)\s*(?:AED)?\s*(?:/\s*hr\b|/\s*hour\b|per\s*hour\b)",
     re.I)
@@ -2641,7 +2645,7 @@ def validate_draft_prices(text):
     # 2) CATERING: a catering term with a nearby AED figure that isn't canonical.
     #    Skip per-HOUR figures (yacht rates, not catering) to avoid false-positives
     #    when a catering term sits near a yacht rate.
-    for term, valid in _CANON_CATERING.items():
+    for term, valid in list(_CANON_CATERING.items()) + list(_CANON_ADDONS.items()):
         for tm in re.finditer(re.escape(term), low):
             window = text[tm.start():tm.start() + 90]
             for am in _AED_AMT_RE.finditer(window):

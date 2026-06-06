@@ -85,6 +85,30 @@ def test_catering_term_near_yacht_hourly_rate_no_false_positive():
         "fine dining available — the Satoshi is AED 3,000/hr") == []
 
 
+# --- add-ons (balloon decor / birthday cake = AED 300) ----------------------
+def test_addon_balloon_wrong_price_flagged():
+    m = validate_draft_prices("romantic balloon decor inside cabin — AED 500")
+    assert any("300" in x for x in m), m
+
+
+def test_addon_balloon_correct_300_clean():
+    assert validate_draft_prices("romantic balloon decor — from AED 300") == []
+
+
+def test_addon_birthday_cake_wrong_flagged():
+    m = validate_draft_prices("birthday cake — AED 150")
+    assert any("Birthday Cake" in x for x in m), m
+
+
+def test_addon_birthday_cake_300_clean():
+    assert validate_draft_prices("birthday cake — from AED 300") == []
+
+
+def test_addon_term_near_yacht_rate_no_false_positive():
+    # 'balloon' mentioned but the nearby AED figure is a yacht /hr rate.
+    assert validate_draft_prices("balloon decor available — the Satoshi is AED 3,000/hr") == []
+
+
 def test_empty_safe():
     assert validate_draft_prices("") == []
     assert validate_draft_prices(None) == []
