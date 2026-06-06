@@ -5008,22 +5008,35 @@ def handle_quality_check(payload, send):
                                 AUTOSEND_MIN_SCORE, _draft_log_write)
             from labels import _quality_floor_ok
             _sh_cid = canonicalize_cid(_sh_cid)
-            if get_mode(_sh_cid) == "shadow":
-                _wd = ("would_send"
-                       if _quality_floor_ok(score, AUTOSEND_MIN_SCORE)
-                       else "would_hold")
-                _sh_did = ((payload.get("draft_id") or "").strip()
-                           or ("shadow:" + _sh_cid + ":"
-                               + str(int(time.time() * 1000))))
-                _draft_log_write(_sh_did, customer_id=_sh_cid, mode="shadow",
-                                 score=score, score_flags=", ".join(flags),
-                                 score_summary=summary, outcome=_wd,
-                                 is_shadow=True,
-                                 draft_text=payload.get("current_draft"))
-                log(f"SHADOW {_sh_cid} score={score} -> {_wd} "
-                    "(logged, NOT sent)")
+            _mode = get_mode(_sh_cid)
+            _is_shadow = (_mode == "shadow")
+            # Score telemetry (2026-06-06): persist EVERY badge score, not just
+            # shadow mode — in approval mode the old code logged 0 scored rows,
+            # so the 6/10 problem was unmeasurable. Reuses the score just
+            # computed (no extra scoring, no n8n). Shadow conversations still
+            # also carry the would_send/would_hold outcome. Stable per-draft id
+            # (draft_id, else a hash of the draft text) so re-scoring the same
+            # draft UPSERTs one row instead of piling up duplicates.
+            _wd = ("would_send"
+                   if _quality_floor_ok(score, AUTOSEND_MIN_SCORE)
+                   else "would_hold")
+            _sh_did = (payload.get("draft_id") or "").strip()
+            if not _sh_did:
+                import hashlib as _hl
+                _dh = _hl.md5(
+                    (payload.get("current_draft") or "").encode()
+                ).hexdigest()[:10]
+                _sh_did = "score:" + _sh_cid + ":" + _dh
+            _draft_log_write(_sh_did, customer_id=_sh_cid, mode=_mode,
+                             score=score, score_flags=", ".join(flags),
+                             score_summary=summary, outcome=_wd,
+                             is_shadow=_is_shadow,
+                             draft_text=payload.get("current_draft"))
+            log(f"score-log {_sh_cid} score={score} mode={_mode} "
+                + ("SHADOW would=" + _wd + " (NOT sent)" if _is_shadow
+                   else "(badge telemetry)"))
     except Exception as _she:
-        log(f"shadow-log non-fatal: {_she!r}")
+        log(f"score-log non-fatal: {_she!r}")
     send(200, {"ok": True, "score": score, "flags": flags,
                      "summary": summary, "badge": badge,
                      "elapsed_ms": elapsed})
