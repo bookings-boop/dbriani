@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -140,6 +141,61 @@ def _waha_post(path, body, timeout=30):
     return None, "WAHA POST failed: exhausted retries"
 
 
+# --- send-boundary scrub: internal operator notes/names never reach a customer
+#
+# 2026-06-06 incident (Xeno Accounts): a customer received a file caption
+# containing the verbatim internal note "...per operator rule 23 (Zayn to
+# also send ... manually)". "Zayn" is the OPERATOR (the /draft response field
+# is `notes_for_zayn`). The leak path was a file caption (sendFile + sendText
+# fallback) that bypassed sanitize_draft_messages(). scrub_outbound() runs at
+# THIS send boundary, so EVERY customer-facing path (text / file caption /
+# image caption) is covered. Telegram operator cards use a different path
+# (_tg_post) and are intentionally NOT scrubbed (the operator must see notes).
+_INTERNAL_MARKERS = (r"operator", r"rule\s*\d+", r"manually", r"internal",
+                     r"to also send", r"do not send", r"notes?_for_",
+                     r"n8n", r"backend")
+# A parenthetical/bracketed segment containing any internal marker.
+_PAREN_INTERNAL_RE = re.compile(
+    r"[\(\[][^\)\]]*(?:%s)[^\)\]]*[\)\]]" % "|".join(_INTERNAL_MARKERS), re.I)
+# Bare "per operator rule 23" / "operator rule 7" citations.
+_OPRULE_RE = re.compile(r"\b(?:per\s+)?operator\s+rule\s*\d+\b", re.I)
+# An internal notes block: "notes_for_zayn: ..." (to end of message).
+_NOTES_BLOCK_RE = re.compile(r"\bnotes?_for_\w+.*", re.I | re.S)
+# The operator-card pen emoji notes line.
+_NOTE_EMOJI_RE = re.compile(r"\s*\U0001F4DD[^\n]*")
+# Operator / internal names that must never appear in a customer message.
+_INTERNAL_NAMES = ("zayn",)
+
+
+def scrub_outbound(text):
+    """Remove internal operator notes/names from a customer-facing message.
+    Returns the cleaned string (may be empty). Never raises. Applied at the
+    WAHA send boundary so no send path can leak internal content."""
+    if not text:
+        return ""
+    s = str(text)
+    before = s
+    s = _NOTES_BLOCK_RE.sub("", s)
+    s = _NOTE_EMOJI_RE.sub("", s)
+    s = _PAREN_INTERNAL_RE.sub("", s)
+    s = _OPRULE_RE.sub("", s)
+    for _nm in _INTERNAL_NAMES:
+        s = re.sub(r"\b%s\b" % re.escape(_nm), "", s, flags=re.I)
+    # tidy whitespace + dangling connectors left by removals
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"[ \t]+([\n.,;:!?])", r"\1", s)
+    s = re.sub(r"(?:\s[-–—])+\s*(?=\n|$)", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    s = s.strip()
+    if s != before.strip():
+        try:
+            print("[scrub_outbound] stripped internal content from an "
+                  "outbound message", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    return s
+
+
 def waha_send_file(customer_id, file_url, caption="", filename=None):
     """POST /api/sendFile — send a generic file (PDF, doc, etc.) to a
     WhatsApp customer. Pass file_url (publicly fetchable) or a
@@ -147,6 +203,7 @@ def waha_send_file(customer_id, file_url, caption="", filename=None):
     Returns (ok, err)."""
     if not customer_id or not file_url:
         return False, "customer_id and file_url required"
+    caption = scrub_outbound(caption)  # never leak internal notes in a caption
     body = {
         "session": "default",
         "chatId": customer_id,
@@ -166,6 +223,7 @@ def waha_send_image(customer_id, image_url, caption=""):
     Returns (ok, err)."""
     if not customer_id or not image_url:
         return False, "customer_id and image_url required"
+    caption = scrub_outbound(caption)  # never leak internal notes in a caption
     body = {
         "session": "default",
         "chatId": customer_id,
@@ -186,6 +244,10 @@ def waha_send_text(customer_id, text):
     Returns (ok, err)."""
     if not customer_id or not text:
         return False, "customer_id and text required"
+    text = scrub_outbound(text)  # never leak internal notes/operator names
+    if not text:
+        # message was ENTIRELY internal content — do not send a blank
+        return False, "blocked: message empty after internal-content scrub"
     body = {
         "session": "default",
         "chatId": customer_id,
