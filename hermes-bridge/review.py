@@ -831,7 +831,12 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                                     else "")))
                 imp_bits = "\n↳ " + _tag + _md_escape(_no_sale_reason(row))
             elif isinstance(imp, int):
-                if label_key == "CONFIRMED":
+                # Gate the booked & paid detail on the lead's REAL label, not the
+                # SECTION (label_key): a CONFIRMED + owed booking is routed to
+                # AWAITING_REPLY (Antonio 2026-06-06) and must STILL show its
+                # CONFIRMED status / paid amount / booking detail there, not fall
+                # to the bare generic 'Hermes: N/100' line.
+                if (row.get("label") or "") == "CONFIRMED":
                     # Booked & paid. A PAST event (Émilie/Saif, 2026-06-02)
                     # must NOT show the open-sale score or 'confirm logistics/
                     # upsell' guidance — render a won/post-event nurture line.

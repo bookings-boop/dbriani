@@ -112,6 +112,23 @@ def test_review_hot_uncap_shows_every_lead_in_tier():
     assert len(uncapped) == 14, len(uncapped)
 
 
+def test_confirmed_owed_shows_paid_detail_in_awaiting():
+    # Antonio 2026-06-06: a CONFIRMED + owed booking surfaced in AWAITING_REPLY
+    # must STILL show the booked & paid detail (status, yacht, date, amount) —
+    # not the bare generic 'Hermes: N/100' line. The detail was gated on the
+    # SECTION (label_key) instead of the lead's real label.
+    row = _row("ant@lid", label="CONFIRMED", name="Antonio",
+               booked_yacht="Bliss 55", dates="Dec 31 2099", party_size="12 guests",
+               paid_amount="AED 3534.3", importance_score=88,
+               last_customer_message_at_seconds=600,     # customer after us -> owed
+               last_operator_reply_at_seconds=7200)
+    res = render_review([(5000, row)], {}, "on-demand")
+    text = "\n".join(m.get("text", "") for m in (res.get("per_lead_messages") or []))
+    assert "AWAITING_REPLY" in text, text          # routed to AWAITING (owed)
+    assert "booked & paid" in text, text           # but shows CONFIRMED detail
+    assert "AED 3534.3" in text, text              # and the paid amount
+
+
 def test_unknown_label_is_surfaced_not_dropped():
     # CATCH-ALL (2026-06-06): a lead whose label has no section (e.g. a new or
     # typo'd label like SUPPLIER_B2B, or LOST before it was wired) must be
