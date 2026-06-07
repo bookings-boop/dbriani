@@ -1880,7 +1880,19 @@ def handle_info(payload, send):
                 suggested_action = parts[2].strip()
                 importance_at = parts[3].strip()
                 break
-        if importance_score or importance_reasoning or suggested_action:
+        if label == "CONFIRMED":
+            # A won, PAID booking is not a convertible lead — never surface the
+            # analyzer's convertibility score / "likely LOST" verdict here.
+            # 2026-06-07: it scored a 157-msg CONFIRMED booking (Émilie) 0/100
+            # "date passed / first contact" off EMPTY WAHA history, contradicting
+            # the "booked & paid" status on the same card. Show post-confirm
+            # guidance instead.
+            lines.append("")
+            _na = _md_escape(suggested_action) if suggested_action else ""
+            lines.append("   ✅ *Booked & paid* — post-confirm: "
+                         + (_na or "confirm logistics / add-ons; collect any "
+                            "balance owed."))
+        elif importance_score or importance_reasoning or suggested_action:
             lines.append("")
             # Honest verdict surfacing (safe-render 2026-05-30): a score of
             # 0 means the analyzer judged the lead not worth pursuing
