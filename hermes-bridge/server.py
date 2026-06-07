@@ -1262,12 +1262,17 @@ def behavioral_context(customer_id):
 
 
 GRACEFUL_GOODBYE_DIRECTIVE = (
-    "THIS LEAD IS LOST (they declined, or want something Dubriani doesn't offer "
-    "— e.g. a captain-less / bareboat / self-drive charter). If a reply is "
-    "warranted, write a BRIEF, warm, gracious GOODBYE: thank them for "
-    "considering Dubriani, wish them well, and leave the door open for a future "
-    "charter. Do NOT push the sale, re-pitch yachts, quote prices, or ask "
-    "qualifying questions — a sales-y reply here is WRONG and will be rejected.")
+    "THIS LEAD IS LOST (they declined, found/booked elsewhere, or want something "
+    "Dubriani doesn't offer — e.g. a captain-less / bareboat / self-drive "
+    "charter). Do NOT go silent — a polite decline still deserves a reply. Write "
+    "a BRIEF, warm, gracious GOODBYE: thank them for considering Dubriani; if it "
+    "fits naturally, lightly ask whether there was anything we could have done "
+    "better; and leave the door open for a future charter. Do NOT push the sale, "
+    "re-pitch yachts, quote prices, or ask qualifying questions — a sales-y reply "
+    "here is WRONG and will be rejected. Example tone (adapt, don't copy): "
+    "\"totally understand — thanks for letting me know. if you don't mind me "
+    "asking, was there anything we could've done better? either way, hope we get "
+    "to host you another time.\"")
 
 
 def _graceful_goodbye_line(label):
@@ -3089,7 +3094,13 @@ def _passed_date_note(dates, reasoning="", now=None):
 _DECLINE_RE = re.compile(
     r"\b(no\s+thanks?|no\s+thank\s+you|not\s+interested|i'?ll\s+pass|"
     r"we'?ll\s+pass|not\s+for\s+(us|me)|all\s+good\s+thanks|"
-    r"booked\s+(elsewhere|already)|found\s+(another|someone\s+else)|"
+    r"booked\s+(elsewhere|already)|"
+    # found-elsewhere / lost-to-competitor (2026-06-07 Anya "yes we found thank
+    # you"): bare "we found ..." UNLESS followed by a benign object (the/a/your/
+    # it/out/some/you/that/us = location, date, number, etc. — NOT a decline),
+    # plus explicit "found another/someone/one".
+    r"found\s+(another|someone(\s+else)?|one)|"
+    r"we\s+(have\s+|'?ve\s+)?found(?!\s+(the|a|an|your|it|out|some|you|that|us))|"
     r"changed\s+my\s+mind|no\s+longer\s+(interested|needed?))\b"
     r"(?!\s*(in|about|but|,?\s*(what|how|can|could|do|is|are|maybe|unless)))",
     re.I)
