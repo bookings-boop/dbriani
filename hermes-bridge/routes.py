@@ -87,6 +87,30 @@ def _drain_reanalyze_queue(limit):
     return cids
 
 
+# --- AREA B: HARD never-demote-a-won/paid rule (2026-06-07) ------------------
+# The hourly sweep's auto-COLD path demotes a lead on a 'close' verdict OR
+# importance_score 0. The RCA (954c52b8) found 11 "demote BLOCKED" saves in 5
+# days where a None/unreliable/score-0 analysis would otherwise have demoted a
+# lead that was ALREADY booked/paid — the lead only survived because the
+# heuristic _demote_to_cold_blocked elif happened to fire. That is a lucky save,
+# not a rule. This pure gate makes won/in-flight/paid leads CATEGORICALLY
+# immune to a degraded-analysis demotion, and runs BEFORE the heuristic guards.
+def _won_or_paid_protected(prev_label, ever_booked, paid_received):
+    """True when a lead must NEVER be auto-COLD demoted by a degraded / close /
+    score-0 analysis, because it is won, in-flight, or has paid evidence:
+      - its current label is a won/in-flight stage (CONFIRMED /
+        WAITING_FOR_PAYMENT), OR
+      - it EVER reached a booked/paid label (ever_booked), OR
+      - it has recorded payment_received evidence.
+    Pure, deterministic, None-safe. Only ever ADDS protection — it cannot cause
+    a demotion, so a false positive simply keeps a lead out of auto-COLD (the
+    safe direction; the operator can still /label it)."""
+    lbl = (prev_label or "").strip().upper()
+    if lbl in ("CONFIRMED", "WAITING_FOR_PAYMENT"):
+        return True
+    return bool(ever_booked) or bool(paid_received)
+
+
 def resolve_target(payload):
     """Return (customer_id, error_text). On success: ('cid…@lid', None).
     On any miss: ('', '⚠️ ...'). Handles either:
@@ -2029,11 +2053,58 @@ def handle_info(payload, send):
             # analyzer's convertibility score / "likely LOST" verdict here.
             # 2026-06-07: it scored a 157-msg CONFIRMED booking (Émilie) 0/100
             # "date passed / first contact" off EMPTY WAHA history, contradicting
-            # the "booked & paid" status on the same card. Show post-confirm
-            # guidance instead.
+            # the "booked & paid" status on the same card. Show the ITEMISED
+            # booking (Xeno 2026-06-07: "paid but not showing the date they
+            # booked and timings") — date + TIME + yacht + ADD-ONS + amount —
+            # plus post-confirm guidance, instead of a vague line.
+            from review import _booking_detail_line
+            # Pull the structured booking facts. booking_time / addons /
+            # booking_date_abs are populated by the facts extractor; fall back
+            # gracefully to booked_yacht-only if those columns are not present
+            # yet (pre-migration) so /info NEVER breaks.
+            _bk_row = {
+                "yachts": row.get("yachts") or "",
+                "dates": row.get("dates") or "",
+                "party_size": party_size,
+            }
+            _bo, _be = _psql(
+                "SELECT COALESCE(booked_yacht,''), COALESCE(booking_time,''), "
+                "COALESCE(addons,''), COALESCE(booking_date_abs,'') "
+                f"FROM customer_facts WHERE customer_id = '{cid_e}'")
+            if _be:  # new columns absent — degrade to booked_yacht only
+                _bo, _be = _psql(
+                    "SELECT COALESCE(booked_yacht,'') FROM customer_facts "
+                    f"WHERE customer_id = '{cid_e}'")
+                _bl = (_bo or "").strip().splitlines()
+                if _bl:
+                    _bk_row["booked_yacht"] = _bl[0].split("|")[0].strip()
+            else:
+                _bl = (_bo or "").strip().splitlines()
+                if _bl:
+                    _bc = _bl[0].split("|")
+                    _bk_row["booked_yacht"] = (
+                        _bc[0].strip() if len(_bc) > 0 else "")
+                    _bk_row["booking_time"] = (
+                        _bc[1].strip() if len(_bc) > 1 else "")
+                    _bk_row["addons"] = _bc[2].strip() if len(_bc) > 2 else ""
+                    _bk_row["booking_date_abs"] = (
+                        _bc[3].strip() if len(_bc) > 3 else "")
+            # Amount paid — FIRST (deposit) payment_received, same source the
+            # /review card uses. Read-only display; no payment logic touched.
+            _po, _pe = _psql(
+                "SELECT COALESCE(notes->>'currency','AED') || ' ' || "
+                "COALESCE(notes->>'total', notes->>'amount','') "
+                f"FROM autonomous_sends WHERE customer_id = '{cid_e}' "
+                "AND kind = 'payment_received' ORDER BY sent_at ASC LIMIT 1")
+            _pl = (_po or "").strip().splitlines()
+            if _pl and _pl[0].strip():
+                _bk_row["paid_amount"] = _pl[0].strip()
+            _det = _booking_detail_line(_bk_row)
             lines.append("")
+            lines.append("   ✅ *Booked & paid*"
+                         + (" — " + _det if _det else ""))
             _na = _md_escape(suggested_action) if suggested_action else ""
-            lines.append("   ✅ *Booked & paid* — post-confirm: "
+            lines.append("   ↳ post-confirm: "
                          + (_na or "confirm logistics / add-ons; collect any "
                             "balance owed."))
         elif importance_score or importance_reasoning or suggested_action:
@@ -3999,6 +4070,15 @@ def handle_pipeline_analyze(payload, send):
                             f"customer_id = {_lit(cid)} AND to_label IN "
                             "('CONFIRMED','WAITING_FOR_PAYMENT') LIMIT 1")
                         ever_booked_ = bool((eb_ or "").strip())
+                        # AREA B (2026-06-07): recorded payment evidence is a
+                        # HARD protect signal too — a lead we actually received
+                        # money from must never be auto-COLD'd off a degraded
+                        # analysis even if its label was somehow reset.
+                        pr_, _pre = _psql(
+                            "SELECT 1 FROM autonomous_sends WHERE "
+                            f"customer_id = {_lit(cid)} AND "
+                            "kind = 'payment_received' LIMIT 1")
+                        paid_received_ = bool((pr_ or "").strip())
                         # #13 (stress #11): never auto-undo a RECENT manual
                         # operator override (the manual HOT reverts) — respect
                         # the human decision until it ages out.
@@ -4024,7 +4104,21 @@ def handle_pipeline_analyze(payload, send):
                         # substantial lead) must NOT drive the label. Don't let a
                         # 0-score off incomplete history auto-COLD a real lead.
                         from analysis_guard import is_analysis_unreliable
-                        if is_analysis_unreliable(mc_, len(history_), reasoning_):
+                        # AREA B (2026-06-07): HARD, FIRST rule — a won /
+                        # in-flight / paid lead is CATEGORICALLY immune to a
+                        # degraded/score-0/close demotion. This replaces the
+                        # "lucky save" (the heuristic _demote_to_cold_blocked
+                        # happening to fire) that produced 11 demote-BLOCKED
+                        # events in 5d; ever_booked/paid is now a deterministic
+                        # gate, not a contingency.
+                        if _won_or_paid_protected(
+                                prev_lbl_, ever_booked_, paid_received_):
+                            log("pipeline-analyze demote BLOCKED "
+                                f"cid={cid} (won/in-flight/paid — categorical; "
+                                f"ever_booked={ever_booked_} "
+                                f"paid={paid_received_})")
+                        elif is_analysis_unreliable(
+                                mc_, len(history_), reasoning_):
                             log("pipeline-analyze demote BLOCKED "
                                 f"cid={cid} (analysis unreliable — incomplete "
                                 f"history; mc={mc_} hist_len={len(history_)})")

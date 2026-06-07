@@ -63,6 +63,72 @@ def test_values_are_literal_escaped():
     assert "'O''Brien'" in sql, sql
 
 
+# --- migration 011: booking_date_abs / booking_time / addons persistence -----
+# W5+W4 captured these in extract_customer_facts + render them in review/info,
+# but _upsert_facts_sql never wrote them (dead data). They must now (a) be in
+# the INSERT column list + VALUES, and (b) update STICKILY on conflict so a
+# later chit-chat message that extracts NOTHING does not blank a previously
+# captured value, while a non-blank re-statement DOES replace it.
+
+_BK_FACTS = {"dates": "Jun 20", "yachts": "Bliss 55", "party_size": "8",
+             "booking_date_abs": "2026-06-20", "booking_time": "5PM-9PM",
+             "addons": "BBQ, jetski"}
+
+
+def test_booking_detail_columns_in_insert_and_values():
+    sql = _upsert_facts_sql("x@c.us", "Bob", _BK_FACTS)
+    # the three new columns must be in the INSERT column list ...
+    assert "booking_date_abs" in sql, sql
+    assert "booking_time" in sql, sql
+    assert "addons" in sql, sql
+    # ... and the captured values must flow into VALUES via _lit.
+    assert "'2026-06-20'" in sql, sql
+    assert "'5PM-9PM'" in sql, sql
+    assert "'BBQ, jetski'" in sql, sql
+
+
+def test_booking_detail_sticky_update_on_conflict():
+    # A non-blank re-extraction REPLACES (NULLIF passes the value through,
+    # COALESCE takes EXCLUDED); a blank one (EXCLUDED -> NULL via _lit ->
+    # NULLIF stays NULL) falls back to the stored customer_facts value, so a
+    # later chit-chat message can NEVER blank a captured date/time/addons.
+    sql = _upsert_facts_sql("x@c.us", "Bob", _BK_FACTS)
+    assert ("booking_date_abs = COALESCE(NULLIF(EXCLUDED.booking_date_abs,''), "
+            "customer_facts.booking_date_abs)") in sql, sql
+    assert ("booking_time = COALESCE(NULLIF(EXCLUDED.booking_time,''), "
+            "customer_facts.booking_time)") in sql, sql
+    assert ("addons = COALESCE(NULLIF(EXCLUDED.addons,''), "
+            "customer_facts.addons)") in sql, sql
+    # NOT an unconditional overwrite — that is exactly the blanking bug we avoid.
+    assert "booking_date_abs = EXCLUDED.booking_date_abs," not in sql, sql
+    assert "booking_time = EXCLUDED.booking_time," not in sql, sql
+    assert "addons = EXCLUDED.addons," not in sql, sql
+
+
+def test_blank_booking_detail_inserts_null():
+    # A message with no date/time/addons: _lit('') -> NULL, so the INSERT
+    # carries NULL (not ''), and on conflict the sticky COALESCE keeps any
+    # prior value. The columns are still listed (so the row shape is stable).
+    sql = _upsert_facts_sql("x@c.us", "Bob", {
+        "dates": "", "yachts": "", "party_size": "",
+        "booking_date_abs": "", "booking_time": "", "addons": ""})
+    assert "booking_date_abs" in sql and "booking_time" in sql \
+        and "addons" in sql, sql
+    # the sticky-keep clause is present regardless of the (blank) values.
+    assert "COALESCE(NULLIF(EXCLUDED.booking_date_abs,'')" in sql, sql
+
+
+def test_existing_facts_logic_untouched():
+    # Guard: adding booking detail must not disturb the name-lock / dates /
+    # yachts / party_size / message_count contract.
+    sql = _upsert_facts_sql("x@c.us", "Bob", _BK_FACTS)
+    assert "name = CASE WHEN customer_facts.name_locked" in sql, sql
+    assert "dates = EXCLUDED.dates" in sql, sql
+    assert "yachts = EXCLUDED.yachts" in sql, sql
+    assert "party_size = EXCLUDED.party_size" in sql, sql
+    assert "message_count = customer_facts.message_count + 1" in sql, sql
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

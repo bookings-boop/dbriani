@@ -626,6 +626,52 @@ def _yacht_display(row, label_key):
     return yachts
 
 
+def _booking_detail_line(row):
+    """Itemised booking detail for a CONFIRMED / paid lead's card (Xeno
+    2026-06-07: "paid but not showing the date they booked and timings").
+    Renders, in order, whatever is present:
+        🛥 yacht · 🗓 date · 🕐 time · 👥 party · ➕ add-ons · 💰 amount paid
+    Reads the structured booking facts DEFENSIVELY: prefers the normalized
+    absolute date (booking_date_abs) over the raw (possibly stale relative)
+    dates string, and the single booked_yacht over the discussed-yachts
+    accumulator. NEVER fabricates a value — a field absent from the row is
+    simply omitted — and returns '' when nothing is known, so the caller can
+    degrade gracefully. Pure; None-safe."""
+    from util import _md_escape
+    row = row or {}
+
+    def _s(*keys):
+        for k in keys:
+            v = row.get(k)
+            v = v.strip() if isinstance(v, str) else ("" if v is None
+                                                      else str(v).strip())
+            if v:
+                return v
+        return ""
+
+    yacht = _s("booked_yacht", "yachts")
+    date = _s("booking_date_abs", "dates")
+    time_ = _s("booking_time")
+    party = _s("party_size")
+    addons = _s("addons")
+    amount = _s("paid_amount")
+
+    det = []
+    if yacht:
+        det.append("🛥 " + _md_escape(yacht))
+    if date:
+        det.append("🗓 " + _md_escape(date))
+    if time_:
+        det.append("🕐 " + _md_escape(time_))
+    if party:
+        det.append("👥 " + _md_escape(party))
+    if addons:
+        det.append("➕ " + _md_escape(addons))
+    if amount:
+        det.append("💰 " + _md_escape(amount) + " paid")
+    return " · ".join(det)
+
+
 def _owes_reply(row):
     """True when WE owe the customer a reply — the customer messaged more
     recently than our last outbound (operator reply OR nudge). Mirrors the
@@ -989,23 +1035,14 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                     else:
                         # Show the booking at a glance (operator 2026-06-06:
                         # "confirmed but timing / what he paid for / how much
-                        # not visible"). yacht + date + party + amount paid.
-                        _det = []
-                        _bk = (row.get("booked_yacht") or "").strip()
-                        _dt = (row.get("dates") or "").strip()
-                        _ps = (row.get("party_size") or "").strip()
-                        _amt = (row.get("paid_amount") or "").strip()
-                        if _bk:
-                            _det.append("🛥 " + _md_escape(_bk))
-                        if _dt:
-                            _det.append("🗓 " + _md_escape(_dt))
-                        if _ps:
-                            _det.append("👥 " + _md_escape(_ps))
-                        if _amt:
-                            _det.append("💰 " + _md_escape(_amt) + " paid")
+                        # not visible"; Xeno 2026-06-07: "paid but not showing
+                        # the date they booked and timings"). Itemised line:
+                        # yacht · date · TIME · party · ADD-ONS · amount paid,
+                        # read defensively from the structured booking facts.
+                        _det = _booking_detail_line(row)
                         imp_bits = (
                             "\n✅ *booked & paid*"
-                            + (" — " + " · ".join(_det) if _det else "")
+                            + (" — " + _det if _det else "")
                             + f"\n🧠 Hermes: *{imp}/100* · _confirm logistics or "
                             "upsell (extra hour / add-ons)_"
                             + _scope_change_hint(row))

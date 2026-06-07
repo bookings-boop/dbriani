@@ -59,7 +59,8 @@ from labels import (  # noqa: F401
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
     _MONTH_NUM, _parse_booking_date, _clean_message_bubbles,
-    _passed_date_close_is_wrong, _party_size_fit_line, _accumulate_feedback,
+    _passed_date_close_is_wrong, _PASSED_CLAIM_RE,
+    _party_size_fit_line, _accumulate_feedback,
     _draft_log_columns, is_valid_mode,
     slot_passed, _parse_booking_time, _dubai_now,
     _booked_yacht_from_accumulator,
@@ -2340,10 +2341,24 @@ def get_customer_facts(customer_id):
     cid returns the canonical row's facts."""
     customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
-    sql = ("SELECT name, dates, yachts, party_size, message_count "
+    # Pull the structured booking detail (migration 011: booking_date_abs /
+    # booking_time / addons) so the analyzer's relative-date veto
+    # (_booking_abs_date reads facts['booking_date_abs']) and the CONFIRMED
+    # booking line have it. COALESCE so a NULL never collapses a positional
+    # field; the three trail name/dates/yachts/party_size/message_count.
+    sql = ("SELECT name, dates, yachts, party_size, message_count, "
+           "COALESCE(booking_date_abs,''), COALESCE(booking_time,''), "
+           "COALESCE(addons,'') "
            f"FROM customer_facts WHERE customer_id = '{cid}'")
     try:
         out, err = _psql(sql)
+        if err:
+            # Pre-migration-011 (deploy→migration window) the booking-detail
+            # columns don't exist yet — degrade to the base column set so facts
+            # NEVER vanish system-wide. Mirrors routes.handle_info's fallback.
+            sql = ("SELECT name, dates, yachts, party_size, message_count "
+                   f"FROM customer_facts WHERE customer_id = '{cid}'")
+            out, err = _psql(sql)
         if err:
             log("customer_facts fetch failed:", err)
             return None
@@ -2355,7 +2370,10 @@ def get_customer_facts(customer_id):
             return None
         return {"name": p[0], "dates": p[1], "yachts": p[2],
                 "party_size": p[3],
-                "message_count": int(p[4]) if p[4].strip().isdigit() else 0}
+                "message_count": int(p[4]) if p[4].strip().isdigit() else 0,
+                "booking_date_abs": p[5].strip() if len(p) > 5 else "",
+                "booking_time": p[6].strip() if len(p) > 6 else "",
+                "addons": p[7].strip() if len(p) > 7 else ""}
     except Exception as e:
         log("customer_facts fetch error:", repr(e))
         return None
@@ -2375,14 +2393,29 @@ def _upsert_facts_sql(customer_id, name, facts):
     facts = facts or {}
     return (
         "INSERT INTO customer_facts (customer_id, name, dates, yachts, "
-        "party_size, message_count, updated_at) VALUES ("
+        "party_size, booking_date_abs, booking_time, addons, "
+        "message_count, updated_at) VALUES ("
         + ", ".join([_lit(customer_id), _lit(name), _lit(facts.get("dates")),
-                     _lit(facts.get("yachts")), _lit(facts.get("party_size"))])
+                     _lit(facts.get("yachts")), _lit(facts.get("party_size")),
+                     _lit(facts.get("booking_date_abs")),
+                     _lit(facts.get("booking_time")),
+                     _lit(facts.get("addons"))])
         + ", 1, now()) ON CONFLICT (customer_id) DO UPDATE SET "
         "name = CASE WHEN customer_facts.name_locked "
         "THEN customer_facts.name ELSE EXCLUDED.name END, "
         "dates = EXCLUDED.dates, "
         "yachts = EXCLUDED.yachts, party_size = EXCLUDED.party_size, "
+        # Structured booking detail (migration 011). STICKY: _lit turns a
+        # blank extraction into NULL, so NULLIF(EXCLUDED.x,'') stays NULL and
+        # COALESCE falls back to the stored value — a later chit-chat message
+        # that captures no date/time/addons can NEVER blank a previously
+        # captured value, while a non-blank re-statement DOES replace it.
+        "booking_date_abs = COALESCE(NULLIF(EXCLUDED.booking_date_abs,''), "
+        "customer_facts.booking_date_abs), "
+        "booking_time = COALESCE(NULLIF(EXCLUDED.booking_time,''), "
+        "customer_facts.booking_time), "
+        "addons = COALESCE(NULLIF(EXCLUDED.addons,''), "
+        "customer_facts.addons), "
         "message_count = customer_facts.message_count + 1, updated_at = now() "
         "RETURNING message_count"
     )
@@ -2424,20 +2457,206 @@ def upsert_customer_facts(customer_id, name, facts):
         return None, repr(e)
 
 
+# --- capture-time normalization helpers (pure; unit-tested in
+#     test_extract_capture_retry.py) -----------------------------------------
+_WEEKDAY_NUM = {
+    "mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+    "wed": 2, "weds": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3,
+    "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+    "sun": 6, "sunday": 6,
+}
+_REL_TODAY_RE = re.compile(
+    r"\b(today|tonight|this\s+(?:evening|afternoon|morning|night))\b", re.I)
+_REL_TOMORROW_RE = re.compile(r"\btomorrow\b", re.I)
+_REL_DAY_AFTER_RE = re.compile(r"\bday\s+after\s+tomorrow\b", re.I)
+_REL_IN_N_RE = re.compile(r"\bin\s+(\d{1,3})\s+days?\b", re.I)
+_REL_WEEKEND_RE = re.compile(r"\bthis\s+weekend\b", re.I)
+_REL_WEEKDAY_RE = re.compile(
+    r"\b(next\s+)?(mon(?:day)?|tue(?:s|sday)?|wed(?:s|nesday)?|"
+    r"thu(?:r|rs|rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.I)
+
+
+def _resolve_relative_date(phrase, anchor_ts):
+    """Resolve a RELATIVE booking-date phrase to an absolute 'YYYY-MM-DD'
+    string, anchored to anchor_ts (a datetime — the message/extraction time).
+    Handles: today/tonight, tomorrow, 'day after tomorrow', 'in N days',
+    'this weekend', a bare weekday ('Friday'/'Sat' = the coming occurrence,
+    today if it is that weekday) and 'next <weekday>' (the following week =
+    coming-occurrence + 7).
+
+    Returns None when the phrase carries no resolvable RELATIVE date — in
+    particular an already-ABSOLUTE date (e.g. 'Sat May 23') returns None so the
+    caller leaves it for labels._parse_booking_date. Pure/deterministic;
+    None-safe."""
+    import datetime as _dt
+    if not phrase or anchor_ts is None:
+        return None
+    s = str(phrase).strip()
+    if not s:
+        return None
+    # Already absolute (has a month name)? leave it untouched.
+    if _parse_booking_date(s) is not None:
+        return None
+    try:
+        base = anchor_ts.date()
+    except AttributeError:
+        return None
+
+    if _REL_DAY_AFTER_RE.search(s):
+        return (base + _dt.timedelta(days=2)).isoformat()
+    if _REL_TOMORROW_RE.search(s):
+        return (base + _dt.timedelta(days=1)).isoformat()
+    if _REL_TODAY_RE.search(s):
+        return base.isoformat()
+    m = _REL_IN_N_RE.search(s)
+    if m:
+        try:
+            return (base + _dt.timedelta(days=int(m.group(1)))).isoformat()
+        except (ValueError, OverflowError):
+            return None
+    if _REL_WEEKEND_RE.search(s):
+        # Coming Saturday (today if it already is Saturday).
+        days = (5 - base.weekday()) % 7
+        return (base + _dt.timedelta(days=days)).isoformat()
+    m = _REL_WEEKDAY_RE.search(s)
+    if m:
+        is_next = bool(m.group(1))
+        wd = _WEEKDAY_NUM.get(m.group(2).lower())
+        if wd is None:
+            return None
+        days = (wd - base.weekday()) % 7   # 0 == today for a bare weekday
+        if is_next:
+            days += 7                      # the SAME weekday next week
+        return (base + _dt.timedelta(days=days)).isoformat()
+    return None
+
+
+def _booking_abs_date(facts, dates):
+    """Resolve the booking date to a date object for the analyzer's future
+    anchor + passed-date veto. Prefers a pre-resolved facts['booking_date_abs']
+    (an ISO 'YYYY-MM-DD' captured at extraction, which covers relative phrases
+    that labels._parse_booking_date can't), falling back to parsing the free
+    'dates' string. Returns datetime.date or None. Pure; None-safe."""
+    import datetime as _dt
+    raw = str((facts or {}).get("booking_date_abs") or "").strip()
+    if raw:
+        try:
+            return _dt.date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return _parse_booking_date(dates)
+
+
+# Booking-time capture. A range is accepted only when it carries a meridian
+# (am/pm) or a ':MM' clock — so a party-size range ('6-8 guests') or a phone
+# number is never mistaken for a time. Never fabricates.
+_BT_RANGE_RE = re.compile(
+    r"(\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?)\s*"
+    r"(?:-|–|—|to|till|until)\s*"
+    r"(\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?)", re.I)
+_BT_MERIDIAN_RE = re.compile(r"[ap]\.?m\.?", re.I)
+_BT_SINGLE_RE = re.compile(r"\b(\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?)", re.I)
+_BT_SINGLE24_RE = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
+
+
+def _norm_time_token(tok):
+    """Canonicalize a single clock token: strip spaces, drop the dots in
+    'a.m.'/'p.m.', upper-case the meridian. '5 p.m.' -> '5PM'. Pure."""
+    return re.sub(r"\s+", "", str(tok or "")).replace(".", "").upper()
+
+
+def _extract_booking_time(text):
+    """Pure scan for a booking TIME in free text: a range ('5PM-9PM', '4-7pm',
+    '17:00-21:00') or a single clock time ('5pm', '5:30 p.m.'), returned in a
+    canonical form. Returns '' when no real time is present. Conservative — a
+    bare numeric range without a meridian/clock (party size, phone) is NOT a
+    time, so it is never fabricated. None-safe."""
+    if not text:
+        return ""
+    s = str(text)
+    for m in _BT_RANGE_RE.finditer(s):
+        g = m.group(0)
+        if _BT_MERIDIAN_RE.search(g) or ":" in g:
+            return _norm_time_token(m.group(1)) + "-" + \
+                _norm_time_token(m.group(2))
+    m = _BT_SINGLE_RE.search(s)
+    if m:
+        return _norm_time_token(m.group(1))
+    m = _BT_SINGLE24_RE.search(s)
+    if m:
+        return _norm_time_token(m.group(0))
+    return ""
+
+
+# Add-on capture. (canonical label, detection regex). Order is fixed so output
+# is deterministic. Only captures what is literally present — never invents.
+_ADDON_PATTERNS = [
+    ("BBQ", re.compile(r"\b(?:bbq|barbe?cue|barbie)\b", re.I)),
+    ("jetski", re.compile(r"\bjet[\s-]?ski(?:s|ing)?\b", re.I)),
+    ("decoration", re.compile(r"\b(?:decoration?s?|decor|balloons?)\b", re.I)),
+    ("photographer", re.compile(
+        r"\b(?:photographer|photography|photo[\s-]?shoot)\b", re.I)),
+    ("videographer", re.compile(r"\b(?:videographer|videography)\b", re.I)),
+    ("DJ", re.compile(r"\bdj\b", re.I)),
+    ("cake", re.compile(r"\bcakes?\b", re.I)),
+    ("flowers", re.compile(r"\b(?:flowers?|floral|roses?)\b", re.I)),
+    ("catering", re.compile(r"\bcater(?:ing|ers?|ed)?\b", re.I)),
+    ("dancers", re.compile(r"\b(?:dancers?|performers?)\b", re.I)),
+]
+
+
+def _extract_addons(text):
+    """Pure scan for booking ADD-ONS (BBQ, jetski, decoration, photographer,
+    DJ, cake, flowers, catering, etc.) present in free text. Returns a
+    comma-separated, de-duplicated, fixed-order list, or '' when none. Only
+    captures what is literally present — never fabricates. None-safe."""
+    if not text:
+        return ""
+    s = str(text)
+    out = []
+    for canon, pat in _ADDON_PATTERNS:
+        if pat.search(s) and canon not in out:
+            out.append(canon)
+    return ", ".join(out)
+
+
+def _coalesce_capture(model_val, source_text, scan):
+    """Prefer a value found in the actual SOURCE text (deterministic, can't be
+    hallucinated); fall back to a model-provided value only if the model's own
+    string itself contains a real token (re-validated by the same pure scan).
+    This is the anti-fabrication gate for booking_time/addons. Pure."""
+    found = scan(source_text)
+    if found:
+        return found
+    return scan(model_val or "")
+
+
 def extract_customer_facts(incoming_message, history):
     """Hermes call: extract {name,dates,yachts,party_size} from the message +
     history. Returns a dict, or None on timeout/error/bad output — the caller
-    then falls back to cached facts."""
+    then falls back to cached facts.
+
+    Also returns capture-time enrichments (never fabricated):
+      - booking_date_abs: relative dates ('tomorrow') resolved to an absolute
+        'YYYY-MM-DD' anchored to the extraction time (keeps 'dates' verbatim for
+        display) so the analyzer future-anchor + passed-date veto stop no-op-ing;
+      - booking_time / addons: the booking window + add-ons (BBQ/jetski/...)
+        scanned from the conversation for the booking-detail card."""
     q = (
         "TASK: From the WhatsApp conversation below, extract the customer's "
         "current yacht-charter booking facts for an internal CRM header. "
         "Return ONLY a JSON object with exactly these keys, using an empty "
         'string "" for anything not yet known (never guess):\n'
-        '{"name":"","dates":"","yachts":"","party_size":""}\n'
+        '{"name":"","dates":"","yachts":"","party_size":"",'
+        '"booking_time":"","addons":""}\n'
         "- name: the customer's first/full name if they have given it\n"
         '- dates: charter date(s) of interest, short (e.g. "Sat Dec 14")\n'
         "- yachts: every yacht name discussed, comma-separated\n"
         '- party_size: group size (e.g. "6-8 guests")\n'
+        '- booking_time: the requested time window if stated '
+        '(e.g. "5PM-9PM"); "" if none\n'
+        '- addons: extras requested (BBQ, jetski, decoration, photographer, '
+        'DJ, cake, ...), comma-separated; "" if none\n'
         "Consider the WHOLE conversation, not just the latest line. Output "
         "only the JSON object — no markdown fences, no commentary.\n\n"
         "--- CONVERSATION ---\n" + (history or "(no prior history)") +
@@ -2458,13 +2677,85 @@ def extract_customer_facts(incoming_message, history):
     if not isinstance(parsed, dict):
         log("extract_customer_facts: no JSON in hermes output")
         return None
-    return {k: str(parsed.get(k) or "").strip()
-            for k in ("name", "dates", "yachts", "party_size")}
+    facts = {k: str(parsed.get(k) or "").strip()
+             for k in ("name", "dates", "yachts", "party_size")}
+    # Capture-time enrichments (pure, never fabricated). Anchor relative dates
+    # to NOW (the extraction moment) so 'tomorrow' becomes an absolute date the
+    # analyzer's future-anchor + passed-date veto can actually use.
+    anchor = _dubai_now()
+    abs_date = _resolve_relative_date(facts["dates"], anchor)
+    if abs_date is None:
+        d = _parse_booking_date(facts["dates"])
+        abs_date = d.isoformat() if d is not None else ""
+    facts["booking_date_abs"] = abs_date
+    src = (incoming_message or "") + "\n" + (history or "")
+    facts["booking_time"] = _coalesce_capture(
+        str(parsed.get("booking_time") or ""), src, _extract_booking_time)
+    facts["addons"] = _coalesce_capture(
+        str(parsed.get("addons") or ""), src, _extract_addons)
+    return facts
 
 
 # --- pattern-recognition analyzer (used by /lead-analyze-disregard +
 #     /pipeline-analyze hourly importance ranker) ----------------------------
 ANALYZE_LEAD_TIMEOUT = int(os.environ.get("BRIDGE_ANALYZE_TIMEOUT", "45"))
+# Bounded retry for the analyzer: the box logged 263 timeout/rc failures in 5
+# days (saturation/CLI cold-start) → hermes_analyze_lead returned None → the
+# stale prior score was retained for ~41% of active leads. A single short-
+# backoff retry recovers the transient ones; on FINAL failure we still return
+# None (caller keeps the prior score — unchanged behaviour). Fail-safe.
+ANALYZE_LEAD_RETRIES = int(os.environ.get("BRIDGE_ANALYZE_RETRIES", "1"))
+ANALYZE_LEAD_RETRY_BACKOFF = float(
+    os.environ.get("BRIDGE_ANALYZE_RETRY_BACKOFF", "2.0"))
+
+
+def _run_hermes_analyze(q, customer_id):
+    """Call run_hermes for the lead analyzer with a bounded retry on a
+    timeout / transient rc!=0 / unexpected exception. Returns the
+    (rc, out, err, elapsed) tuple ONLY on a clean rc==0 completion, else None
+    once every attempt is exhausted (so the caller keeps the prior score —
+    same as the original single-shot behaviour). Never raises."""
+    attempts = max(1, 1 + ANALYZE_LEAD_RETRIES)
+    for i in range(attempts):
+        try:
+            rc, out, err, elapsed = run_hermes(
+                q, timeout=ANALYZE_LEAD_TIMEOUT, priority="background")
+        except subprocess.TimeoutExpired:
+            log(f"hermes_analyze_lead: timeout {ANALYZE_LEAD_TIMEOUT}s "
+                f"cid={customer_id} attempt={i + 1}/{attempts}")
+        except Exception as e:
+            log(f"hermes_analyze_lead: error cid={customer_id} "
+                f"attempt={i + 1}/{attempts}", repr(e))
+        else:
+            if rc == 0:
+                return rc, out, err, elapsed
+            log(f"hermes_analyze_lead: rc={rc} cid={customer_id} "
+                f"attempt={i + 1}/{attempts} err={(err or '')[:200]!r}")
+        # Transient failure — back off before the next attempt (never after the
+        # final one). Sleep is best-effort; a clock hiccup must not raise.
+        if i + 1 < attempts and ANALYZE_LEAD_RETRY_BACKOFF > 0:
+            try:
+                time.sleep(ANALYZE_LEAD_RETRY_BACKOFF)
+            except Exception:
+                pass
+    return None
+
+
+def _analyzer_passed_close_is_wrong(facts, dates, reasoning, today):
+    """True when the analyzer's 'date passed / event over' close is a
+    hallucination because the booking is actually in the FUTURE. Extends the
+    absolute-only labels._passed_date_close_is_wrong with the captured absolute
+    date (facts['booking_date_abs']), so a RELATIVE phrase ('tomorrow' frozen
+    days ago, the Émilie class) that labels can't parse is finally caught.
+    Pure; None-safe."""
+    if _passed_date_close_is_wrong(dates, reasoning, today):
+        return True
+    if reasoning and _PASSED_CLAIM_RE.search(reasoning):
+        d = _booking_abs_date(facts, dates)
+        if d is not None and d > today:
+            return True
+    return False
+
 
 # UAE working hours (Asia/Dubai = UTC+4, no DST). Used by /pipeline-analyze
 # cron to skip overnight runs — keeps the Hermes spend in business hours.
@@ -2493,7 +2784,9 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     # future-guard when the booking date deterministically parses to the future.
     _today_anchor = _dubai_now().date()  # Dubai date (box runs UTC; was wrong
     #                                      00:00-04:00 UTC = late evening Dubai)
-    _bd_anchor = _parse_booking_date(dates)
+    # Prefer the captured absolute date (covers relative phrases labels can't
+    # parse) so the future-anchor warning fires for 'tomorrow'-class dates too.
+    _bd_anchor = _booking_abs_date(facts, dates)
     _date_anchor = f"Today's date: {_today_anchor.isoformat()} (Asia/Dubai)\n"
     if _bd_anchor is not None and _bd_anchor > _today_anchor:
         _date_anchor += (
@@ -2628,20 +2921,12 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         f"Silent for: {sh}\n\n"
         f"--- CONVERSATION ---\n{history or '(no history available)'}"
     )
-    try:
-        rc, out, err, elapsed = run_hermes(q, timeout=ANALYZE_LEAD_TIMEOUT,
-                                           priority="background")
-    except subprocess.TimeoutExpired:
-        log(f"hermes_analyze_lead: timeout {ANALYZE_LEAD_TIMEOUT}s "
-            f"cid={customer_id}")
+    res = _run_hermes_analyze(q, customer_id)
+    if res is None:
+        # Every attempt failed (timeout/transient rc/exception) — return None
+        # so the caller keeps the prior score, never auto-closes on a failure.
         return None
-    except Exception as e:
-        log("hermes_analyze_lead: error", repr(e))
-        return None
-    if rc != 0:
-        log(f"hermes_analyze_lead: rc={rc} cid={customer_id} "
-            f"err={(err or '')[:200]!r}")
-        return None
+    rc, out, err, elapsed = res
     parsed, _ = extract_json(out)
     if not isinstance(parsed, dict):
         log(f"hermes_analyze_lead: no JSON cid={customer_id}")
@@ -2660,8 +2945,10 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
     # sometimes reads a long SILENCE as the booking being over — returning
     # verdict=close for a date that is actually in the FUTURE, which would
     # auto-kill a live booking and surface "<date> has passed" on the card. If
-    # the date deterministically parses to the future, override the close.
-    if verdict == "close" and _passed_date_close_is_wrong(dates, reasoning):
+    # the date is in the future (absolute OR a captured relative date), override
+    # the close. (Relative dates were the silent gap — the Émilie class.)
+    if verdict == "close" and _analyzer_passed_close_is_wrong(
+            facts, dates, reasoning, _today_anchor):
         log(f"hermes_analyze_lead: VETO false passed-date close "
             f"cid={customer_id} dates={dates!r}")
         verdict = "keep_open"
@@ -3885,10 +4172,29 @@ def read_lead_summary(filter_label=None):
         "  COALESCE(a3.notes->>'total', a3.notes->>'amount','') "
         "  FROM autonomous_sends a3 WHERE a3.customer_id = "
         "  v_lead_summary.customer_id AND a3.kind = 'payment_received' "
-        "  ORDER BY a3.sent_at ASC LIMIT 1),'')) "
-        f"FROM v_lead_summary {where}"
+        "  ORDER BY a3.sent_at ASC LIMIT 1),'')"   # NB: closes COALESCE only
     )
-    out, err = _psql(sql, timeout=20)
+    # Structured booking detail (migration 011): booking_time / addons /
+    # booking_date_abs feed the itemised CONFIRMED booking line
+    # (review._booking_detail_line). Correlated subqueries against
+    # customer_facts so the shared v_lead_summary view needs no change. Built
+    # as a separate fragment so we can retry WITHOUT it when the columns aren't
+    # present yet (deploy→migration window) — /review must never go blank.
+    booking_cols = (
+        ", COALESCE((SELECT cf4.booking_time FROM customer_facts cf4 "
+        "  WHERE cf4.customer_id = v_lead_summary.customer_id),''), "
+        "COALESCE((SELECT cf5.addons FROM customer_facts cf5 "
+        "  WHERE cf5.customer_id = v_lead_summary.customer_id),''), "
+        "COALESCE((SELECT cf6.booking_date_abs FROM customer_facts cf6 "
+        "  WHERE cf6.customer_id = v_lead_summary.customer_id),'')"
+    )
+    select_tail = f") FROM v_lead_summary {where}"   # closes concat_ws
+    out, err = _psql(sql + booking_cols + select_tail, timeout=20)
+    if err:
+        # Pre-migration-011 fallback: booking-detail columns absent — retry
+        # WITHOUT them so /review keeps rendering (booking line degrades to the
+        # raw dates/booked_yacht the same way routes.handle_info does).
+        out, err = _psql(sql + select_tail, timeout=20)
     if err:
         log("read_lead_summary err:", err)
         return []
@@ -3937,6 +4243,11 @@ def read_lead_summary(filter_label=None):
                 _seconds_since(parts[25]) if len(parts) > 25 else None,
             "booked_yacht": parts[26].strip() if len(parts) > 26 else "",
             "paid_amount": parts[27].strip() if len(parts) > 27 else "",
+            # Structured booking detail (migration 011). Absent when the
+            # pre-migration fallback query ran (shorter row) → default ''.
+            "booking_time": parts[28].strip() if len(parts) > 28 else "",
+            "addons": parts[29].strip() if len(parts) > 29 else "",
+            "booking_date_abs": parts[30].strip() if len(parts) > 30 else "",
         }
         rows.append(row)
     return rows
@@ -4290,6 +4601,19 @@ def _ensure_schema():
             log("⚠️ SCHEMA WARNING: customer_facts.name_locked MISSING — apply "
                 "migration 009 as the table owner, or EVERY inbound facts UPSERT "
                 "will fail and freeze message_count system-wide.")
+        # migration 011: _upsert_facts_sql also writes booking_date_abs /
+        # booking_time / addons on EVERY inbound. Same failure mode as 009 —
+        # an un-migrated env freezes the facts UPSERT. Surface it loudly so a
+        # DR rebuild / fresh clone applies 011 before (or with) this code.
+        out, err = _psql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='customer_facts' AND column_name IN "
+            "('booking_date_abs','booking_time','addons')")
+        if not err and len((out or "").strip().splitlines()) < 3:
+            log("⚠️ SCHEMA WARNING: customer_facts booking-detail columns "
+                "(booking_date_abs/booking_time/addons) MISSING — apply "
+                "migration 011 as the table owner, or EVERY inbound facts "
+                "UPSERT will fail and freeze message_count system-wide.")
     except Exception as e:  # noqa: BLE001
         log("ensure_schema check non-fatal:", repr(e))
 
