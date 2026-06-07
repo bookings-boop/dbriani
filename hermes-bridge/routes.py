@@ -3469,6 +3469,22 @@ def handle_reconcile_identities(payload, send):
             f"'auto:identity_merge', {_lit('WAHA-resolved dup -> ' + canon)}, "
             f"COALESCE(message_count,0), now(), 'system' FROM customer_facts "
             f"WHERE customer_id = {_lit(dup)}")
+        # Re-activate a STALE canonical when this merge brings in an ACTIVE dup
+        # (audit #3 companion, 2026-06-07): a returning customer's fresh @c.us
+        # enquiry (classified active) merged into their old @lid canonical must
+        # not stay buried under its LOST/DISREGARDED/COLD label. Won/in-flight
+        # canon (CONFIRMED/WAITING/PAUSED) is never downgraded.
+        from labels import _merged_label
+        from server import apply_label_transition
+        _cl = (facts.get(canon) or ("", ""))[0]
+        _dl = (facts.get(dup) or ("", ""))[0]
+        _bumped = _merged_label(_cl, _dl)
+        if _bumped and _bumped != _cl:
+            apply_label_transition(
+                canon, _cl, _bumped, signal="merge_reactivate",
+                evidence=(f"returning customer — active dup {dup} ({_dl}) "
+                          f"merged into stale {_cl} canon"),
+                message_count=0, created_by="system")
         merged += 1
         pairs.append(dup + " -> " + canon)
     log(f"reconcile-identities: checked={checked} merged={merged} "

@@ -480,6 +480,23 @@ def _is_reengage_enquiry(msg):
     return bool(_REENGAGE_INTENT_RE.search(m))
 
 
+_MERGE_STALE = ("LOST", "DISREGARDED", "COLD")
+_MERGE_ACTIVE = ("NEW", "WARM", "HOT", "NEEDS_ATTENTION")
+
+
+def _merged_label(canon_label, dup_label):
+    """On an identity merge, re-activate a STALE canonical when the merged-in
+    duplicate is an ACTIVE lead (audit #3 companion, 2026-06-07): a returning
+    customer whose old @lid is LOST/DISREGARDED/COLD sends a fresh enquiry under
+    a new @c.us (classified active) — the merge must not bury that active lead
+    under the old stale label. Never downgrades a won/in-flight canonical
+    (CONFIRMED/WAITING_FOR_PAYMENT/PAUSED_*) — those win. Returns the label the
+    canonical should carry post-merge. Pure."""
+    if canon_label in _MERGE_STALE and dup_label in _MERGE_ACTIVE:
+        return dup_label
+    return canon_label
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------
