@@ -2470,6 +2470,22 @@ def build_query(p):
     if _bctx:
         parts.append(_bctx)
         parts.append("=" * 60)
+    # Profile-lookup (Layer 1, 2026-06-07) — inject RETURNING-customer context
+    # (name / country / known preferences) so drafts to known clients are
+    # personalized. Gated by PROFILE_LOOKUP_ENABLED (default OFF -> the prompt is
+    # byte-for-byte unchanged). Fail-safe: profile_block never raises, and any
+    # error here is swallowed so the draft path is never broken.
+    try:
+        import profile_lookup
+        if profile_lookup.enabled():
+            from waha import phone_for_cid
+            _pblock = profile_lookup.profile_block(
+                p.get("customer_id") or "", phone_resolver=phone_for_cid)
+            if _pblock:
+                parts.append(_pblock)
+                parts.append("=" * 60)
+    except Exception:
+        pass
     parts.append(
         "TASK: You are drafting a WhatsApp reply for Dubriani Yachts, in the "
         "persona and rules defined above. This is an internal drafting tool — "
