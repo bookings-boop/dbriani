@@ -3010,6 +3010,145 @@ def handle_daily_feedback_sweep(payload, send):
             _redis(["DEL", lock])
 
 
+def _should_bump_nudge(payload):
+    """Whether handle_draft_followup should bump the nudge cooldown/cap NOW.
+
+    CAP-BURN FIX (2026-06-07): handle_followup_sweep passes no_state_bump:True
+    because IT commits the bump only AFTER a confirmed Telegram post (so a
+    failed post never burns the lead's follow-up budget). Before this guard the
+    bump fired unconditionally here AND again post-confirm = +2 per single card,
+    which is why Milena's followup_count overshot to 3 (cap is 2). Pure +
+    tolerant of non-dict input (defaults to bumping)."""
+    try:
+        return not bool((payload or {}).get("no_state_bump"))
+    except Exception:  # noqa: BLE001 — never block the draft on a bad payload
+        return True
+
+
+def _claim_reengage(cid, ttl_secs):
+    """Atomic per-candidate reengage CLAIM — the cross-engine/cross-run dedup.
+
+    `SET reengage:claim:<cid> 1 NX EX <ttl>` via Redis: returns True only if
+    THIS caller won the claim (the key did not already exist). Any other engine
+    or concurrent run that scanned the same lead in the same window loses the
+    claim and skips, so no two callers can double-post even if both pass the
+    (eventually-consistent) 48h SQL cooldown gate at the same instant — the
+    TOCTOU race that gave Milena two cards.
+
+    FAIL-OPEN on a Redis error or empty reply (return True so we still draft):
+    the legacy engine is already disabled, so the claim is defense-in-depth and
+    a Redis outage must never silently kill reengage coverage — the 48h SQL
+    cooldown remains the backstop. Empty cid -> False (nothing to claim)."""
+    try:
+        if not (cid or "").strip():
+            return False
+        out, err = _redis(["SET", f"reengage:claim:{cid}", "1",
+                           "NX", "EX", str(int(ttl_secs))])
+        if err:
+            return True  # fail-open: don't lose the lead on a Redis error
+        return (out or "").strip().upper().startswith("OK")
+    except Exception:  # noqa: BLE001 — fail-open, never block reengage on Redis
+        return True
+
+
+def _last_history_bubble(history, who):
+    """From a formatted analyzer-history string (lines shaped
+    'Customer (5m ago): "..."' / 'Dubriani (2h ago): "..."'), return
+    (body, ago_tag) for the LAST line spoken by `who` ('Customer' or
+    'Dubriani'), else (None, None). Pure; tolerant of malformed lines —
+    NEVER raises (it feeds an operator-display-only summary)."""
+    try:
+        prefix = who + " ("
+        found = None
+        for line in (history or "").splitlines():
+            if line.startswith(prefix):
+                found = line
+        if not found:
+            return (None, None)
+        ago = ""
+        try:
+            ago = found[found.index("(") + 1:found.index(")")].strip()
+        except ValueError:
+            ago = ""
+        body = ""
+        if '"' in found:
+            first = found.index('"')
+            last = found.rfind('"')
+            if last > first:
+                body = found[first + 1:last]
+        return (body.strip() or None, ago or None)
+    except Exception:  # noqa: BLE001 — display-only; degrade to nothing
+        return (None, None)
+
+
+def _followup_situation_summary(history, row, party_size=None,
+                                silence_hours=None):
+    """Pure, None-safe 1-2 line operator SITUATION SUMMARY for a follow-up card.
+
+    Operator ask (2026-06-07): brief the operator on where the lead stands
+    BEFORE the suggested message. Derived CHEAPLY — NO extra LLM call, NO
+    network — purely from the already-fetched analyzer-history string + the
+    label row. Never raises; returns '' when there is nothing useful to say.
+
+      Line 1 (status):  🧷 LABEL · yacht · date · N pax  (whichever are known)
+      Line 2 (context): they: "<last customer msg>" (Xago) · we: "<last us>" (Yago)
+
+    NEVER fabricates a price — there is no price/quote column anywhere in
+    customer_facts; price lives only in the chat text we already echo verbatim.
+    Bodies are truncated to ~90 chars. Markdown is NOT escaped here — the card
+    poster (handle_followup_sweep) already retries plain-text on a parse error,
+    so a stray * / _ in a quoted message can never drop the card."""
+    try:
+        row = row or {}
+        label = (str(row.get("label") or "")).strip()
+        yacht = (str(row.get("yachts") or "")).strip()
+        date = (str(row.get("dates") or "")).strip()
+        party = (str(party_size or "")).strip()
+        bits = []
+        if label:
+            bits.append(label)
+        if yacht:
+            bits.append(yacht)
+        if date:
+            bits.append(date)
+        if party:
+            bits.append(f"{party} pax")
+        lines = []
+        if bits:
+            lines.append("🧷 " + " · ".join(bits))
+
+        def _trim(s):
+            s = " ".join((s or "").split())
+            return (s[:90] + "…") if len(s) > 90 else s
+
+        cust_body, cust_ago = _last_history_bubble(history, "Customer")
+        us_body, us_ago = _last_history_bubble(history, "Dubriani")
+        ctx = []
+        if cust_body:
+            seg = 'they: "' + _trim(cust_body) + '"'
+            if cust_ago:
+                seg += f" ({cust_ago})"
+            ctx.append(seg)
+        if us_body:
+            seg = 'we: "' + _trim(us_body) + '"'
+            if us_ago:
+                seg += f" ({us_ago})"
+            ctx.append(seg)
+        if ctx:
+            lines.append(" · ".join(ctx))
+        elif silence_hours is not None:
+            # First-contact / @lid leads have empty WAHA history — still give
+            # the operator the silence duration so the card isn't context-free.
+            try:
+                lines.append(f"silent {float(silence_hours):.0f}h, no prior "
+                             "messages on file")
+            except (TypeError, ValueError):
+                pass
+        return "\n".join(lines).strip()
+    except Exception:  # noqa: BLE001 — display-only; never break the card
+        return ""
+
+
 def handle_draft_followup(payload, send):
     """POST /draft-followup — generate a follow-up draft via Hermes.
     Body: {customer_id, history?, customer_name?, silence_window?, silence_hours?}.
@@ -3412,10 +3551,14 @@ def handle_draft_followup(payload, send):
                 f"facts=yacht:{bool((row or {}).get('yachts'))},"
                 f"date:{bool((row or {}).get('dates'))},party:{bool(_pf)}")
         # Mark the nudge so the report damps + reengage_attempts increments.
-        try:
-            upsert_conversation_state(cid, "nudge_drafted")
-        except Exception as _e:
-            log("draft_followup nudge_drafted err:", repr(_e))
+        # CAP-BURN FIX: honor no_state_bump — handle_followup_sweep defers the
+        # bump until AFTER a confirmed post, so bumping here too double-counts
+        # (Milena hit followup_count=3 > cap 2).
+        if _should_bump_nudge(payload):
+            try:
+                upsert_conversation_state(cid, "nudge_drafted")
+            except Exception as _e:
+                log("draft_followup nudge_drafted err:", repr(_e))
         log(f"draft-followup cid={cid!r} label={label} "
             f"waha_used={waha_used} waha_count={waha_count} "
             f"draft_len={len(draft_text)} elapsed={elapsed}s")
@@ -3442,6 +3585,29 @@ def handle_draft_followup(payload, send):
                 notes_for_zayn = (
                     "Auto-fallback: the drafter returned no usable message; this "
                     "placeholder is anchored to the known yacht/date/party.")
+        # Operator SITUATION SUMMARY (2026-06-07) — a cheap, no-LLM 1-2 line
+        # context block so the operator is briefed on where the lead stands
+        # BEFORE the suggested message. Built from the history + label row we
+        # already fetched (party_size is on customer_facts, not in row → one
+        # tiny SELECT). Best-effort: never blocks/raises the draft. Consumed by
+        # handle_followup_sweep's card; the (default-disabled) n8n branch can
+        # also read this key if ever re-enabled.
+        situation_summary = ""
+        try:
+            _sit_party = ""
+            try:
+                _spo, _ = _psql(
+                    "SELECT COALESCE(party_size,'') FROM customer_facts WHERE "
+                    "customer_id = " + _lit(cid) + " AND merged_into IS NULL")
+                _sit_party = ((_spo or "").strip().splitlines()
+                              or [""])[0].strip()
+            except Exception:
+                _sit_party = ""
+            situation_summary = _followup_situation_summary(
+                history, row, _sit_party, silence_hours)
+        except Exception as _se:  # noqa: BLE001 — display-only
+            log("draft_followup situation summary err:", repr(_se))
+            situation_summary = ""
         send(200, {
             "ok": True, "customer_id": cid, "label": label,
             "draft_text": draft_text,
@@ -3450,6 +3616,7 @@ def handle_draft_followup(payload, send):
             "quality_badge": quality_badge,
             "fallback_used": fallback_used,
             "degraded": _degraded,
+            "situation_summary": situation_summary,
             "approval_card_header": (
                 f"🔔 PROACTIVE FOLLOW-UP — {label.lower()}"),
             "session_id": extract_session(out, err),
@@ -4737,10 +4904,23 @@ def handle_hourly_sweep(payload, send):
         # Proactive follow-up engine — runs AFTER label-eval so
         # newly-transitioned labels (e.g. WARM→COLD via cold-decay)
         # are considered. Fail-safe: empty list on any error.
-        try:
-            eligible_followups = scan_followup_eligibility()
-        except Exception as _fe:
-            log("followup_scan EXC:", repr(_fe))
+        #
+        # DEDUP (2026-06-07): the */30 cron `/followup-sweep` is the CANONICAL
+        # reengage owner (Redis lock, recipient-verify, quality badge, Layer-3
+        # exclusion guard, deferred-bump-after-post). This legacy n8n hourly
+        # follow-up branch ALSO drafted+posted on the SAME population and
+        # collided at the top of every hour → Milena got two cards. Self-disable
+        # it: emit NO follow-ups unless HOURLY_SWEEP_FOLLOWUPS=1, so the n8n
+        # "Split Followups" branch iterates an empty array and posts nothing.
+        # /hourly-sweep keeps doing its real job (label re-analysis + cold-decay)
+        # — untouched above. Skipping the scan entirely also saves the work.
+        if os.environ.get("HOURLY_SWEEP_FOLLOWUPS", "0") == "1":
+            try:
+                eligible_followups = scan_followup_eligibility()
+            except Exception as _fe:
+                log("followup_scan EXC:", repr(_fe))
+                eligible_followups = []
+        else:
             eligible_followups = []
         elapsed_ms = int((_time.time() - t0) * 1000)
         log(f"hourly-sweep scanned={scanned} transitions={transitions} "
@@ -5742,6 +5922,13 @@ def handle_followup_sweep(payload, send):
         limit = int(payload.get("limit") or 0)
     except (TypeError, ValueError):
         limit = 0
+    # Per-candidate dedup-claim TTL — comfortably covers a batch's worst-case
+    # runtime yet stays under the */30 cron cadence so a failed post is retried
+    # next run. Env-tunable.
+    try:
+        REENGAGE_CLAIM_TTL = int(os.environ.get("REENGAGE_CLAIM_TTL", "900"))
+    except (TypeError, ValueError):
+        REENGAGE_CLAIM_TTL = 900
     lock = "lock:followup_sweep"
     if not dry:
         # EX comfortably exceeds worst-case batch runtime (up to `limit`
@@ -5780,6 +5967,16 @@ def handle_followup_sweep(payload, send):
                     "customer_id": cid, "name": name, "label": label,
                     "silence_hours": shrs, "window": window,
                     "phrase_preview": GHOST_RECOVERY_PHRASES.get(window, "")})
+                continue
+            # DEDUP CLAIM (2026-06-07): atomically reserve this lead BEFORE the
+            # (slow) draft so no concurrent run / future engine that scanned the
+            # same candidate in the same window can also draft+post it. TTL is
+            # well under the */30 cron cadence so a FAILED post (which never
+            # bumps the 48h cooldown) is retried next run; a SUCCESSFUL post
+            # bumps last_nudge_drafted_at and the SQL cooldown takes over.
+            if not _claim_reengage(cid, REENGAGE_CLAIM_TTL):
+                log("followup-sweep claim lost (already carded this cycle):",
+                    cid)
                 continue
             # Real run: draft via the native pipeline (capture its JSON return).
             cap = {}
@@ -5840,6 +6037,20 @@ def handle_followup_sweep(payload, send):
                     phone = ""
             card = build_followup_card(header, name, cid, label, shrs, badge,
                                        draft_text, draft_id, phone=phone)
+            # SITUATION SUMMARY (2026-06-07): inject the no-LLM operator context
+            # block between the recipient/confirm line and the suggested message
+            # so the operator is briefed before the draft. build_followup_card is
+            # a sibling module (pure card composition); inject into the composed
+            # text after its stable "confirm the recipient" marker. Plain-text
+            # retry below covers any stray Markdown in a quoted message.
+            _sit = (body.get("situation_summary") or "").strip()
+            if _sit:
+                _marker = "⚠️ _confirm the recipient above before sending_"
+                if _marker in card["text"]:
+                    card["text"] = card["text"].replace(
+                        _marker, _marker + "\n" + _sit, 1)
+                else:
+                    card["text"] = card["text"].rstrip() + "\n\n" + _sit
             # Post with Markdown; on a parse/transport error retry as PLAIN text
             # so a stray * / _ in the LLM draft can never drop the card (which
             # would otherwise waste the deferred-bump and silently lose the lead).
@@ -5854,6 +6065,13 @@ def handle_followup_sweep(payload, send):
             if _terr:
                 log("followup-sweep tg err (no bump, will retry next run):",
                     cid, _terr)
+                # Release the dedup claim so the next run can retry immediately
+                # (mirrors the no-bump "retry next run" contract — a failed post
+                # must not silently lock the lead out for the claim TTL).
+                try:
+                    _redis(["DEL", f"reengage:claim:{cid}"])
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
                 skipped_error += 1
                 continue
             # Confirmed posted → NOW commit the cooldown/cap bump (deferred from

@@ -636,6 +636,7 @@ def build_analyzer_history(customer_id, waha_limit=100):
     if not rows:
         return waha_fetch_history(customer_id, limit=waha_limit)
     # Top up with WAHA messages NEWER than the newest durable ts (best-effort).
+    topup = []
     try:
         max_ts = max(int(r.get("ts") or 0) for r in rows)
         waha_rows = waha_fetch_raw(customer_id, limit=waha_limit) or []
@@ -644,7 +645,22 @@ def build_analyzer_history(customer_id, waha_limit=100):
                  and (r.get("body") or "").strip()]
         combined = sorted(rows + topup, key=lambda r: int(r.get("ts") or 0))
     except Exception:
+        topup = []
         combined = rows
+    # READ-PATH PERSIST (Wave-2 eviction-resilience, 2026-06-07): durably
+    # capture the WAHA top-up rows we just fetched so EACH analysis
+    # incrementally hardens this lead's history against WAHA
+    # eviction/truncation — WITHOUT a bulk reload that would degrade WAHA.
+    # record_message is fail-safe + idempotent (ON CONFLICT DO NOTHING on the
+    # provider msg_id), so a replayed row is a no-op, never a duplicate. Fully
+    # isolated below the read build: a persist failure NEVER affects the history
+    # we already assembled / return.
+    for _tr in topup:
+        try:
+            record_message(customer_id, _tr.get("direction"),
+                           _tr.get("body"), msg_id=_tr.get("msg_id"))
+        except Exception:  # noqa: BLE001 — never break the read on a persist err
+            pass
     body_rows = [r for r in combined if (r.get("body") or "").strip()]
     if not body_rows:
         return waha_fetch_history(customer_id, limit=waha_limit)

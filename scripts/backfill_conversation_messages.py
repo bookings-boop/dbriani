@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import os
 import sys
+import time
 
 # Make the bridge package importable whether run from the repo root or scripts/.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -212,6 +213,8 @@ def main(argv=None):
         if args.limit_cids > 0:
             cids = cids[:args.limit_cids]
         for i, cid in enumerate(cids, 1):
+            time.sleep(0.4)  # rate-limit: a tight 173-call burst overwhelms the
+            # WAHA WhatsApp session → it returns empty (non-raising) for all.
             try:
                 waha_rows = server.waha_fetch_raw(cid, limit=args.waha_limit)
             except Exception as e:  # never let one lead abort the backfill

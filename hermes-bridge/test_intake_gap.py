@@ -21,7 +21,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from intake import intake_gaps  # noqa: E402
+from intake import canon_phone, intake_gaps  # noqa: E402
 
 NOW = 1_700_000_000
 
@@ -60,6 +60,70 @@ def test_ms_timestamp_normalized():
     c = {"id": "971000@c.us", "conversationTimestamp": (NOW - 3600) * 1000,
          "lastMessage": {"fromMe": False, "body": "hi"}}
     assert len(intake_gaps([c], set(), NOW)) == 1
+
+
+# ── NEVER-MISS hardening (2026-06-07) ──────────────────────────────────
+
+def test_no_age_cap_flags_old_never_ingested():
+    """max_age_days=None — a never-ingested inbound lead must NEVER age out of
+    detection (the old 7-day cap let a buried drop go permanently invisible)."""
+    g = intake_gaps([_chat("971000@c.us", 90.0, name="Old Lead")], set(), NOW,
+                    max_age_days=None)
+    assert len(g) == 1 and g[0]["cid"] == "971000@c.us", g
+    assert g[0]["age_days"] >= 89, g  # age still reported on the card
+
+
+def test_age_cap_still_applies_when_set():
+    """A numeric cap still windows (legacy alert path) — old chat excluded."""
+    assert intake_gaps([_chat("971000@c.us", 30.0)], set(), NOW,
+                       max_age_days=7) == []
+
+
+def test_canon_folds_lid_to_cus_no_false_gap():
+    """An @lid chat already ingested under its @c.us identity is NOT a gap once
+    a lid-aware canon resolver folds the two identity domains together."""
+    lid_map = {"63977933553823@lid": "971568241103"}
+    canon = lambda c: canon_phone(c, lid_map)  # noqa: E731
+    chats = [_chat("63977933553823@lid", 1.0, name="Antonio")]
+    cf = {"971568241103@c.us"}
+    assert intake_gaps(chats, cf, NOW, max_age_days=None, canon=canon) == []
+
+
+def test_canon_unresolved_lid_still_flagged():
+    """A truly-dropped @lid lead with no lid-map entry stays DISTINCT and is
+    still flagged (fail-toward-flagging — never silently miss a lead)."""
+    canon = lambda c: canon_phone(c, {})  # noqa: E731
+    chats = [_chat("99999999999999@lid", 1.0, name="Ghost")]
+    g = intake_gaps(chats, {"971568241103@c.us"}, NOW,
+                    max_age_days=None, canon=canon)
+    assert len(g) == 1 and g[0]["cid"] == "99999999999999@lid", g
+
+
+def test_canon_phone_normalizes_uae_variants():
+    """Identity normalize: 0xxxxxxxxx / 5xxxxxxxx / 00-prefixed / +-spaced all
+    canonicalise to the same 971 key so cf-set membership matches regardless of
+    how the number was stored."""
+    assert canon_phone("971568241103@c.us") == "971568241103"
+    assert canon_phone("0568241103@c.us") == "971568241103"
+    assert canon_phone("568241103@c.us") == "971568241103"
+    assert canon_phone("00971568241103@c.us") == "971568241103"
+    assert canon_phone("+971 56 824 1103@c.us") == "971568241103"
+    # lid resolves through the map to the same key
+    assert canon_phone("63977933553823@lid",
+                       {"63977933553823@lid": "971568241103"}) == "971568241103"
+
+
+def test_canon_phone_none_safe():
+    assert canon_phone(None) == ""
+    assert canon_phone("") == ""
+
+
+def test_cf_phone_variant_match_suppresses_gap():
+    """cf stored as 0-prefixed / lid; the same chat under @c.us is suppressed by
+    the default (phone-only) canon — no false gap from format drift."""
+    chats = [_chat("971568241103@c.us", 1.0)]
+    assert intake_gaps(chats, {"0568241103@c.us"}, NOW,
+                       max_age_days=None) == []
 
 
 if __name__ == "__main__":

@@ -182,6 +182,35 @@ def inject_prompt_into_workflow(prompt_text, workflow_path):
     return data, patched
 
 
+def _assert_apply_improvement_solid(path):
+    """Fail-closed deploy guard (audit #1 RCA, 2026-06-07).
+
+    The n8n 'Apply Improvement' node MUST carry the deterministic DRAFT-section
+    rebuild (fmtHdr(g.messages) spliced between the '💬 DRAFT' header and the
+    '\\n\\n📝 Notes' delimiter) and NEVER the brittle indexOf swap that appended
+    'improved draft:' dead text under Notes (what-I-see != what-sends). This
+    full-import re-pushes the ENTIRE repo workflow JSON, so a stale/regressed
+    copy here would silently revert the live fix — the exact 06-06->06-07
+    regression. die() before the import can ever happen so it can NEVER silently
+    regress again. Repo is patched/kept solid via scripts/patch_apply_improvement.py."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except Exception as e:
+        die(f"Apply-Improvement guard: could not parse workflow JSON: {e!r}")
+    node = next((n for n in data.get("nodes", [])
+                 if n.get("name") == "Apply Improvement"), None)
+    if not node:
+        die("Apply Improvement node missing from workflow JSON — refusing to deploy")
+    code = (node.get("parameters") or {}).get("jsCode", "")
+    if "improved draft:" in code:
+        die("Apply Improvement: brittle 'improved draft:' append present — refusing "
+            "to deploy a regressed workflow (audit #1 RCA 2026-06-07). "
+            "Re-run scripts/patch_apply_improvement.py to restore the rebuild.")
+    if "fmtHdr(g.messages)" not in code:
+        die("Apply Improvement: deterministic rebuild marker fmtHdr(g.messages) "
+            "missing — refusing to deploy. Re-run scripts/patch_apply_improvement.py.")
+
+
 def wait_for_n8n_ready(timeout=120):
     """Poll healthz until n8n responds 200. Returns True if up, False on
     timeout."""
@@ -327,6 +356,11 @@ def main():
     existing_pretty = WORKFLOW_PATH.read_text() if WORKFLOW_PATH.exists() else ""
     workflow_unchanged = (new_pretty == existing_pretty)
     WORKFLOW_PATH.write_text(new_pretty)
+    # Post-write / pre-import invariant (audit #1): the exact JSON about to be
+    # imported (== what goes live) must carry the Apply-Improvement rebuild and
+    # never the brittle 'improved draft:' append. Runs on BOTH the changed and
+    # unchanged paths so a future deploy can never silently regress the fix.
+    _assert_apply_improvement_solid(WORKFLOW_PATH)
     tmp_local = Path(f"/tmp/wf-deploy-{ts}.json")
     tmp_local.write_text(json.dumps(patched_data))
     if workflow_unchanged:
