@@ -5390,6 +5390,172 @@ def handle_draft_gated(payload, send):
                "override": bool(override)})
 
 
+def handle_followup_sweep(payload, send):
+    """POST /followup-sweep — proactive ghost-recovery follow-up (2026-06-07).
+
+    Scans quoted-but-silent leads (server.scan_followup_eligibility), drafts each
+    via the NATIVE pipeline (handle_draft_followup: full WAHA context + verified
+    Voss ghost-recovery phrasing + Layer-3 exclusion guard + nudge-cooldown bump),
+    persists each as a pending draft, and SELF-POSTS a one-tap ✅ Send card to the
+    operator's Telegram. APPROVAL-FIRST: nothing reaches the customer until the
+    operator taps Send (callback send:<draft_id> → n8n → /queue claim-send → WAHA,
+    from the BUSINESS number).
+
+    payload {dry_run?: bool, limit?: int}. dry_run lists candidates + the phrase
+    each draft will be based on WITHOUT drafting (no Hermes call, no cooldown bump,
+    no post — fully side-effect-free). Returns {ok, dry_run, posted,
+    skipped_excluded, skipped_error, count, candidates}. Mirrors the self-posting
+    pattern of handle_daily_feedback_sweep; card markup mirrors /assist draft_nudge."""
+    from server import (scan_followup_eligibility, _draft_save, _tg_post,
+                        upsert_conversation_state,
+                        DEFAULT_ADMIN_CHAT, GHOST_RECOVERY_PHRASES)
+    from reengage_quote import build_followup_card
+    import time as _t
+    import random as _r
+    import string as _s
+    try:
+        from waha import phone_for_cid as _phone_for_cid
+    except Exception:  # noqa: BLE001 — phone display is best-effort
+        _phone_for_cid = None
+    dry = bool(payload.get("dry_run"))
+    try:
+        limit = int(payload.get("limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    lock = "lock:followup_sweep"
+    if not dry:
+        # EX comfortably exceeds worst-case batch runtime (up to `limit`
+        # sequential Hermes drafts) so the lock can't lapse mid-run and admit
+        # a concurrent sweep.
+        _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "1800"])
+        if (_lk or "").strip() != "OK":
+            send(200, {"ok": True, "skipped": True,
+                       "skipped_reason": "previous_sweep_running",
+                       "posted": 0, "candidates": []})
+            return
+    posted = skipped_excluded = skipped_error = 0
+    report = []
+    try:
+        try:
+            cands = scan_followup_eligibility()
+        except Exception as e:  # noqa: BLE001
+            log("followup-sweep scan err:", repr(e))
+            send(200, {"ok": False, "error": "scan failed",
+                       "posted": 0, "candidates": []})
+            return
+        if limit > 0:
+            cands = cands[:limit]
+        for c in cands:
+            cid = (c.get("customer_id") or "").strip()
+            if not cid:
+                continue
+            window = c.get("silence_window")
+            name = c.get("name") or ""
+            label = c.get("label") or ""
+            shrs = c.get("silence_hours")
+            if dry:
+                # Side-effect-free preview: NO draft (no Hermes call, no cooldown
+                # bump, no post) — show the verified phrase the draft is based on.
+                report.append({
+                    "customer_id": cid, "name": name, "label": label,
+                    "silence_hours": shrs, "window": window,
+                    "phrase_preview": GHOST_RECOVERY_PHRASES.get(window, "")})
+                continue
+            # Real run: draft via the native pipeline (capture its JSON return).
+            cap = {}
+
+            def _cap(_status, body, _c=cap):
+                _c["body"] = body
+
+            try:
+                handle_draft_followup({
+                    "customer_id": cid, "silence_window": window,
+                    "silence_hours": shrs, "customer_name": name,
+                    # defer the cooldown/cap bump to AFTER a confirmed post
+                    "no_state_bump": True,
+                }, _cap)
+            except Exception as e:  # noqa: BLE001
+                log("followup-sweep draft err:", cid, repr(e))
+                skipped_error += 1
+                continue
+            body = cap.get("body", {}) or {}
+            if body.get("excluded"):
+                skipped_excluded += 1
+                continue
+            draft_text = (body.get("draft_text") or "").strip()
+            if not body.get("ok") or not draft_text:
+                skipped_error += 1
+                continue
+            name = body.get("customer_name") or name
+            label = body.get("label") or label
+            header = body.get("approval_card_header") or "🔔 PROACTIVE FOLLOW-UP"
+            badge = body.get("quality_badge") or ""
+            draft_id = (str(int(_t.time() * 1000)) + "_"
+                        + "".join(_r.choices(_s.ascii_lowercase + _s.digits,
+                                             k=5)))
+            draft_obj = {
+                "id": draft_id, "customer_phone": cid, "customer_name": name,
+                "customer_message": "", "conversation_history": "",
+                "messages": [draft_text], "draft_text": draft_text,
+                "messages_sent_count": 0,
+                "notes": "Proactive ghost-recovery follow-up (auto-sweep)",
+                "status": "pending", "telegram_chat_id": DEFAULT_ADMIN_CHAT,
+                "telegram_message_id": None, "is_followup": True,
+                "is_lead": False, "is_payment": False,
+                "break_condition": {"hit": False},
+            }
+            try:
+                _draft_save(draft_obj)
+            except Exception as e:  # noqa: BLE001
+                log("followup-sweep _draft_save err:", cid, repr(e))
+                skipped_error += 1
+                continue
+            # Resolve the real phone so the operator can verify the one-tap
+            # recipient (best-effort; falls back to cid digits in the card).
+            phone = ""
+            if _phone_for_cid is not None:
+                try:
+                    phone = _phone_for_cid(cid) or ""
+                except Exception:  # noqa: BLE001
+                    phone = ""
+            card = build_followup_card(header, name, cid, label, shrs, badge,
+                                       draft_text, draft_id, phone=phone)
+            # Post with Markdown; on a parse/transport error retry as PLAIN text
+            # so a stray * / _ in the LLM draft can never drop the card (which
+            # would otherwise waste the deferred-bump and silently lose the lead).
+            _resp, _terr = _tg_post("sendMessage", {
+                "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                "parse_mode": "Markdown", "reply_markup": card["reply_markup"]})
+            if _terr:
+                log("followup-sweep tg markdown err, retrying plain:", cid, _terr)
+                _resp, _terr = _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                    "reply_markup": card["reply_markup"]})
+            if _terr:
+                log("followup-sweep tg err (no bump, will retry next run):",
+                    cid, _terr)
+                skipped_error += 1
+                continue
+            # Confirmed posted → NOW commit the cooldown/cap bump (deferred from
+            # handle_draft_followup via no_state_bump) so a failed post never
+            # burns the lead's follow-up budget.
+            try:
+                upsert_conversation_state(cid, "nudge_drafted")
+            except Exception as _e:  # noqa: BLE001
+                log("followup-sweep post-bump err:", cid, repr(_e))
+            posted += 1
+            report.append({
+                "customer_id": cid, "name": name, "label": label,
+                "silence_hours": shrs, "window": window, "draft_id": draft_id})
+        send(200, {"ok": True, "dry_run": dry, "posted": posted,
+                   "skipped_excluded": skipped_excluded,
+                   "skipped_error": skipped_error,
+                   "count": len(report), "candidates": report})
+    finally:
+        if not dry:
+            _redis(["DEL", lock])
+
+
 def handle_learn(payload, send):
     from server import (
         VALID_SCOPES,
