@@ -570,6 +570,16 @@ def handle_queue(payload, send):
         claimed = bool(out and out.strip().upper() == "OK")
         if claimed:
             log(f"send-claim WON did={did} ttl={ttl}s")
+            # Durable conversation store (migration 010): record the approved
+            # outbound at the atomic send-commit (claim WON fires once per draft
+            # via Redis NX; keyed on draft id so any retry dedupes). This is the
+            # in-bridge OUTBOUND capture — the bot's reply about to be fanned to
+            # WAHA. Fail-safe — never blocks the send; no-ops before migration.
+            try:
+                from server import record_outbound_draft
+                record_outbound_draft(_sd)
+            except Exception:
+                pass
             # Mark this phone so a sibling card's claim-send is blocked
             # within the same window. NX: first WON claim wins; the
             # phone key expires with the draft claim TTL.
@@ -1661,10 +1671,71 @@ def handle_conversation_state(payload, send):
             send(200, {"ok": False, "degraded": True,
                              "error": err[:200]})
             return
+        # Durable conversation store (migration 010): if n8n included the
+        # inbound body on a customer_message event (extended payload — see the
+        # n8n note in handle_record_message), record it. Today's payload has NO
+        # body, so this no-ops until n8n is updated; never fabricate an empty
+        # inbound. Fail-safe — record_message never raises / no-ops pre-migration.
+        if event == "customer_message":
+            try:
+                from server import record_message
+                _body = (payload.get("body")
+                         or payload.get("incoming_message")
+                         or payload.get("message"))
+                if _body:
+                    record_message(cid, "in", _body,
+                                   payload.get("msg_id")
+                                   or payload.get("message_id"))
+            except Exception:
+                pass
         send(200, {"ok": True, "customer_id": cid, "event": event})
     except Exception as e:
         log("conversation_state EXC:", repr(e))
         send(200, {"ok": False, "degraded": True, "error": str(e)})
+
+
+def handle_record_message(payload, send):
+    """POST /record-message — thin, FAIL-SAFE writer for the durable
+    conversation store (migration 010). Lets n8n persist a message body it
+    already has, at the points the bridge itself can't see it:
+
+      • INBOUND at WEBHOOK time — call this right after the WAHA Webhook node,
+        BEFORE the Filter/Claude nodes. That is RECORD-BEFORE-AI: the lead's
+        message is durably stored before any AI/credit/timeout can drop it
+        (the +971568241103 silent-intake-drop root cause). direction='in'.
+      • OUTBOUND operator DIRECT replies — a WAHA `fromMe` event (the operator
+        typed straight into WhatsApp, bypassing the draft cards), once fromMe
+        capture is enabled. direction='out'.
+
+    ADDITIVE + FAIL-SAFE: it only RECORDS a body; it NEVER blocks message flow.
+    ALWAYS returns 200 (even on bad input or a swallowed error) so a transient
+    failure here can never break the n8n inbound path. record_message is itself
+    fail-safe — it no-ops (returns False) BEFORE migration 010 is applied — and
+    idempotent on msg_id (INSERT ... ON CONFLICT DO NOTHING), so n8n may post
+    at-least-once without ever creating a duplicate row."""
+    try:
+        from server import record_message
+        cid = (payload.get("customer_id")
+               or payload.get("customer_phone") or "").strip()
+        direction = (payload.get("direction") or "").strip().lower()
+        body = payload.get("body")
+        if body is None:
+            body = payload.get("message")
+        if body is None:
+            body = payload.get("text")
+        msg_id = (payload.get("msg_id") or payload.get("message_id")
+                  or payload.get("id") or "")
+        ok = record_message(cid, direction, body, msg_id or None)
+        send(200, {"ok": bool(ok), "customer_id": cid,
+                   "direction": direction})
+    except Exception as e:
+        try:
+            log("record_message endpoint EXC:", repr(e))
+        except Exception:
+            pass
+        # Fail-safe: even a totally unexpected error returns 200 so the n8n
+        # inbound path is never broken by the durable-store write.
+        send(200, {"ok": False, "degraded": True})
 
 
 # ============================================================================
@@ -2952,6 +3023,7 @@ def handle_draft_followup(payload, send):
     from server import (
         GHOST_RECOVERY_PHRASES,
         GHOST_RECOVERY_WINDOWS,
+        build_analyzer_history,
         build_query,
         extract_json,
         extract_session,
@@ -3002,14 +3074,17 @@ def handle_draft_followup(payload, send):
     row = None
     name = ""
     try:
-        # Always pull live WAHA history if the caller didn't provide one
-        # (or provided a stale/short one). The customer-message path's
-        # /draft already gets history via the workflow's WAHA fetch —
-        # this brings /draft-followup to parity.
+        # Pull history if the caller didn't provide one (or gave a stale/short
+        # one). Use the DURABLE read-path (migration 010) — the full ordered
+        # conversation_messages store topped up with WAHA, windowed to the
+        # earliest booking signals + recent — so the nudge sees the booking
+        # context, not just WAHA's blunt last-10 (operator: "nudge draft is
+        # not considering his last messages"). Falls back to WAHA-only when the
+        # store is empty/absent, so this is at-worst parity with before.
         waha_used = False
         waha_count = 0
         if len(history.strip()) < 50:
-            waha = waha_fetch_history(cid, limit=10)
+            waha = build_analyzer_history(cid, waha_limit=30)
             if not waha.get("err") and waha.get("history"):
                 history = waha["history"]
                 waha_used = True
@@ -3587,6 +3662,7 @@ def handle_pipeline_analyze(payload, send):
         _is_uae_working_hours,
         _name_fallback,
         apply_label_transition,
+        build_analyzer_history,
         get_current_label_row,
         get_customer_facts,
         hermes_analyze_lead,
@@ -3676,8 +3752,14 @@ def handle_pipeline_analyze(payload, send):
                            / 3600.0)
                 except (ValueError, IndexError):
                     sh_ = None
-                waha_ = waha_fetch_history(cid, limit=100)
-                history_ = (waha_ or {}).get("history") or ""
+                # Durable read-path (migration 010): read the FULL ordered
+                # conversation_messages store + top up with WAHA newer than
+                # the last stored ts; gracefully falls back to WAHA-only when
+                # the store is empty/absent for this cid. Replaces the bare
+                # live WAHA fetch that evicts/truncates (8% empty, 17% degraded
+                # — a 157-msg CONFIRMED booking was scored 0/100).
+                hist_ = build_analyzer_history(cid, waha_limit=100)
+                history_ = (hist_ or {}).get("history") or ""
                 v_ = hermes_analyze_lead(cid, history_, facts_,
                                          message_count=mc_,
                                          silent_hours=sh_)
@@ -3939,6 +4021,7 @@ def handle_lead_analyze_disregard(payload, send):
         _md_escape,
         _name_fallback,
         apply_label_transition,
+        build_analyzer_history,
         get_current_label_row,
         get_customer_facts,
         hermes_analyze_lead,
@@ -4018,8 +4101,10 @@ def handle_lead_analyze_disregard(payload, send):
         except (ValueError, IndexError):
             silent_h = None
 
-        waha = waha_fetch_history(cid, limit=100)
-        history = (waha or {}).get("history") or ""
+        # Durable read-path (migration 010) with graceful WAHA-only fallback —
+        # same source the hourly pipeline analyzer uses (build_analyzer_history).
+        hist = build_analyzer_history(cid, waha_limit=100)
+        history = (hist or {}).get("history") or ""
 
         verdict_obj = hermes_analyze_lead(
             cid, history, facts, message_count=mc,
@@ -4845,6 +4930,19 @@ def handle_draft(payload, send):
     if not (payload.get("incoming_message") or "").strip():
         send(400, {"ok": False, "error": "incoming_message is required"})
         return
+    # Durable conversation store (migration 010): record the inbound BEFORE
+    # Hermes runs so a Hermes timeout / credit error / unparseable reply can
+    # never drop the lead's message (in-bridge record-before-AI, mirroring the
+    # n8n /record-message hook). Fail-safe — record_message never raises and
+    # no-ops cleanly before the migration is applied.
+    try:
+        from server import record_message
+        record_message(
+            payload.get("customer_id") or payload.get("customer_phone"),
+            "in", payload.get("incoming_message"),
+            payload.get("message_id") or payload.get("msg_id"))
+    except Exception:
+        pass
     query = build_query(payload)
     try:
         rc, out, err, elapsed = run_hermes(query)

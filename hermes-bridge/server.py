@@ -50,7 +50,7 @@ from waha import (  # noqa: F401 — re-exported for handlers
 )
 from waha import (  # noqa: F401
     WAHA_API_KEY, WAHA_BASE,
-    _waha_get, waha_lookup_push_name, waha_fetch_history,
+    _waha_get, waha_lookup_push_name, waha_fetch_history, waha_fetch_raw,
 )
 from labels import (  # noqa: F401
     LABELS, _LABEL_RANK, _HARD_DEMOTE_SIGNALS, _TIER_BELOW,
@@ -114,6 +114,7 @@ from routes import (  # noqa: F401
     handle_poll_payments,
     handle_queue,
     handle_reconcile_identities,
+    handle_record_message,
     handle_refresh_facts,
     handle_review,
     handle_rules,
@@ -393,6 +394,271 @@ def _draft_log_write(draft_id, **fields):
                 + ": " + repr(e))
         except Exception:
             pass
+
+
+def _record_message_sql(customer_id, direction, body, msg_id=None):
+    """Pure builder for the idempotent conversation_messages INSERT
+    (migration 010). Extracted so the exact INSERT ... ON CONFLICT shape is
+    unit-testable without a DB.
+
+    Idempotent ingest: ON CONFLICT (customer_id, msg_id) WHERE msg_id IS NOT
+    NULL DO NOTHING dedupes a replayed inbound/outbound carrying the same
+    provider msg_id. The WHERE predicate matches the PARTIAL unique index from
+    migration 010 so that index is used as the conflict arbiter; a row with a
+    NULL msg_id never matches the predicate, so id-less events (at-least-once
+    delivery, some events carry no stable id) are always appended."""
+    cols = ["customer_id", "direction", "body", "msg_id"]
+    vals = [_lit(customer_id), _lit(direction), _lit(body), _lit(msg_id)]
+    return ("INSERT INTO conversation_messages (" + ", ".join(cols)
+            + ") VALUES (" + ", ".join(vals)
+            + ") ON CONFLICT (customer_id, msg_id) WHERE msg_id IS NOT NULL "
+            + "DO NOTHING")
+
+
+def record_message(customer_id, direction, body, msg_id=None):
+    """FAIL-SAFE append to the durable conversation store (migration 010).
+
+    Runs on EVERY inbound + outbound, so — exactly like _draft_log_write — it
+    MUST NEVER raise and MUST NEVER break the message flow. It is purely
+    additive: it only RECORDS the message body so hermes_analyze_lead + the
+    drafter stop depending on a live WAHA fetch (which evicts/truncates
+    history — measured 8% empty, 17% degraded). Any failure is swallowed:
+    log once + return False. Critically this includes the period BEFORE the
+    operator applies migration 010 — the table is absent, psql returns a
+    relation-does-not-exist error, and this must silently no-op (hermes_rw
+    cannot CREATE the table itself).
+
+    Returns True only if the INSERT was issued without error. Dedupe is in
+    SQL (ON CONFLICT DO NOTHING on the provider msg_id), so a replayed event
+    is a no-op, never a duplicate row. Cheap validation (direction, cid
+    presence) runs BEFORE any psql/canonicalize call so a bad call never
+    touches the DB."""
+    try:
+        d = (str(direction).strip() if direction is not None else "")
+        if d not in ("in", "out"):
+            return False
+        raw = (str(customer_id).strip() if customer_id is not None else "")
+        if not raw:
+            return False
+        cid = canonicalize_cid(raw)
+        if not cid:
+            return False
+        b = "" if body is None else str(body)
+        mid = (str(msg_id).strip() if msg_id is not None else "") or None
+        sql = _record_message_sql(cid, d, b, mid)
+        _out, err = _psql(sql, timeout=6)
+        if err:
+            log("record_message non-fatal cid=" + repr(cid)
+                + ": " + str(err)[:200])
+            return False
+        return True
+    except Exception as e:
+        try:
+            log("record_message non-fatal cid=" + repr(customer_id)
+                + ": " + repr(e))
+        except Exception:
+            pass
+        return False
+
+
+def record_outbound_draft(draft):
+    """FAIL-SAFE: record an approved/committed outbound draft into the durable
+    conversation store (migration 010), direction='out'.
+
+    Called at the atomic send-commit point — the claim-send WON branch in
+    handle_queue, where the operator-approved draft is about to be fanned to
+    WAHA. The draft's `messages` are the final bubbles being sent and
+    `customer_phone` is the already-canonicalized cid (set in _draft_save). The
+    draft id is used as the msg_id so a replayed/duplicate claim dedupes via the
+    INSERT ... ON CONFLICT (claim-send is already once-per-draft via Redis NX,
+    but record on the id to be defensive against retries).
+
+    Mirrors record_message's discipline (it delegates to it): NEVER raises,
+    NEVER blocks the send, and no-ops cleanly BEFORE migration 010 is applied.
+    Returns True only when record_message issued a clean INSERT; False on any
+    bad/empty draft (no phone, no string bubbles) WITHOUT touching the DB."""
+    try:
+        if not isinstance(draft, dict):
+            return False
+        cid = (draft.get("customer_phone") or "").strip()
+        if not cid:
+            return False
+        msgs = draft.get("messages")
+        if not isinstance(msgs, list):
+            return False
+        # Only real string bubbles — a dict/number/empty bubble is junk we must
+        # never persist as transcript (mirrors _clean_message_bubbles intent).
+        parts = [m for m in msgs if isinstance(m, str) and m.strip()]
+        if not parts:
+            return False
+        body = "\n\n".join(parts)
+        did = (str(draft.get("id")).strip()
+               if draft.get("id") is not None else "") or None
+        return record_message(cid, "out", body, did)
+    except Exception as e:
+        try:
+            log("record_outbound_draft non-fatal: " + repr(e))
+        except Exception:
+            pass
+        return False
+
+
+# ---------------------------------------------------------------------------
+# DURABLE READ-PATH (migration 010) — feed hermes_analyze_lead from the durable
+# conversation_messages store instead of a live WAHA fetch that evicts/truncates
+# (8% empty, 17% degraded; a 157-msg CONFIRMED booking -> WAHA 0 -> scored 0).
+# build_analyzer_history reads the FULL ordered store, TOPS UP with a live WAHA
+# fetch for anything newer than the last stored ts, and FALLS BACK to today's
+# WAHA-only fetch when the store is empty/absent for a cid (fail-safe).
+# ---------------------------------------------------------------------------
+
+# _psql is fixed `-tA` (single tuple per line, fields joined by '|', rows by
+# '\n'). Message bodies routinely contain '|' AND newlines, so a naive
+# multi-column SELECT would be unparseable. Instead we emit ONE column per row,
+# joining fields with US (chr 31) and replacing in-body newlines with RS (chr
+# 30) IN SQL, then split on those control chars in Python.
+_CONV_FS = "\x1f"   # US — field separator (between ts/direction/body/msg_id)
+_CONV_NL = "\x1e"   # RS — stands in for an in-body newline so each DB row is
+#                     exactly one psql output line
+
+
+def _durable_history_sql(customer_id):
+    """Pure builder: ordered, FULL durable history for a cid, encoded so the
+    `-tA` output is one parseable line per message (see _CONV_FS / _CONV_NL).
+    Newest-last (ORDER BY ts ASC) — the analyzer reads oldest-first."""
+    body = ("replace(replace(replace(replace(coalesce(body,''), "
+            "chr(31), ' '), chr(13), ' '), chr(10), chr(30)), chr(9), ' ')")
+    return (
+        "SELECT EXTRACT(EPOCH FROM ts)::bigint || chr(31) || direction "
+        "|| chr(31) || " + body + " || chr(31) || coalesce(msg_id,'') "
+        "FROM conversation_messages WHERE customer_id = "
+        + _lit(customer_id) + " ORDER BY ts ASC, id ASC")
+
+
+def _parse_conv_rows(out):
+    """Pure parser for _durable_history_sql output → list of
+    {ts:int, direction, body, msg_id}. Tolerant: short/garbage lines are
+    skipped, never raise (the read-path must be fail-safe)."""
+    rows = []
+    for line in (out or "").split("\n"):
+        if not line:
+            continue
+        parts = line.split(_CONV_FS)
+        if len(parts) < 4:
+            continue
+        try:
+            ts = int(parts[0])
+        except (ValueError, TypeError):
+            continue
+        rows.append({
+            "ts": ts,
+            "direction": parts[1],
+            "body": parts[2].replace(_CONV_NL, "\n"),
+            "msg_id": (parts[3] or None),
+        })
+    return rows
+
+
+# Booking / payment / date signals — used to decide which EARLY messages to
+# keep when windowing a long chat so a 157-msg booking's date/payment is never
+# lost to tail-only truncation. Over-inclusion is fine (we cap at max_signal).
+_BOOKING_SIGNAL_RE = re.compile(
+    r"\b(pay|paid|payment|paylink|deposit|balance|invoice|transfer|receipt|"
+    r"confirm|confirmed|book|booked|booking|reserve|reserved|"
+    r"aed|usd|dirham|today|tonight|tomorrow|weekend|"
+    r"mon|tue|wed|thu|fri|sat|sun|"
+    r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b", re.I)
+
+
+def _has_booking_signal(body):
+    return bool(_BOOKING_SIGNAL_RE.search(body or ""))
+
+
+def _select_history_window(rows, recent_n=20, max_signal=6):
+    """Smarter than waha.py's blunt `with_body[-20:]`. For a SHORT chat return
+    everything; for a LONG chat keep the EARLIEST booking-signal messages (so
+    the date/payment/booking that lives early is never lost) PLUS a recent
+    window. Returns (window_rows_chronological, truncated_bool)."""
+    n = len(rows)
+    if n <= recent_n + max_signal:
+        return list(rows), False
+    recent = rows[-recent_n:]
+    head = rows[:-recent_n]
+    signal = [r for r in head
+              if _has_booking_signal(r.get("body") or "")][:max_signal]
+    window = signal + recent           # head precedes recent → still ordered
+    return window, (len(window) < n)
+
+
+def _format_conv_history(rows, now_ts):
+    """Format durable rows into the EXACT history-line shape the analyzer
+    expects (identical to waha_fetch_history): oldest-first, body→single line,
+    240-char cap, relative-age tag."""
+    lines = []
+    for m in rows:
+        who = "Dubriani" if m.get("direction") == "out" else "Customer"
+        secs = max(0, now_ts - int(m.get("ts") or now_ts))
+        ago = (f"{secs // 60}m" if secs < 5400 else
+               f"{secs // 3600}h" if secs < 129600 else
+               f"{secs // 86400}d")
+        body = (m.get("body") or "").replace("\n", " ").strip()[:240]
+        lines.append(f'{who} ({ago} ago): "{body}"')
+    return "\n".join(lines)
+
+
+def build_analyzer_history(customer_id, waha_limit=100):
+    """FAIL-SAFE durable history for hermes_analyze_lead.
+
+    Reads the FULL ordered conversation_messages store for `customer_id`, TOPS
+    UP with a live WAHA fetch for anything strictly NEWER than the last stored
+    ts, applies smarter windowing (earliest booking-signal + recent), and
+    returns the SAME dict shape as waha_fetch_history
+    ({history,last_message,push_name,count,err}) plus source='durable'.
+
+    Graceful fallback (mirrors the draft_log / record_message discipline): if
+    migration 010 is not applied (psql relation error), the store is empty for
+    this cid, or ANY error occurs, fall back to today's WAHA-only fetch so the
+    analyzer always gets the best available history and message flow is never
+    broken."""
+    try:
+        raw = (str(customer_id).strip() if customer_id is not None else "")
+        cid = canonicalize_cid(raw) or raw
+        out, err = _psql(_durable_history_sql(cid), timeout=8)
+        rows = [] if err else _parse_conv_rows(out)
+    except Exception as e:
+        try:
+            log("build_analyzer_history durable-read non-fatal cid="
+                + repr(customer_id) + ": " + repr(e))
+        except Exception:
+            pass
+        rows = []
+    # Empty / absent store for this cid → graceful WAHA-only fallback.
+    if not rows:
+        return waha_fetch_history(customer_id, limit=waha_limit)
+    # Top up with WAHA messages NEWER than the newest durable ts (best-effort).
+    try:
+        max_ts = max(int(r.get("ts") or 0) for r in rows)
+        waha_rows = waha_fetch_raw(customer_id, limit=waha_limit) or []
+        topup = [r for r in waha_rows
+                 if int(r.get("ts") or 0) > max_ts
+                 and (r.get("body") or "").strip()]
+        combined = sorted(rows + topup, key=lambda r: int(r.get("ts") or 0))
+    except Exception:
+        combined = rows
+    body_rows = [r for r in combined if (r.get("body") or "").strip()]
+    if not body_rows:
+        return waha_fetch_history(customer_id, limit=waha_limit)
+    window, truncated = _select_history_window(body_rows)
+    history = _format_conv_history(window, int(time.time()))
+    if truncated:
+        history = (
+            f"[Showing {len(window)} of {len(body_rows)} stored messages — "
+            f"earliest booking signals + recent window; the booking/date may "
+            f"predate this window. Do NOT read a recent silence as the event "
+            f"being over.]\n" + history)
+    last = (body_rows[-1].get("body") or "").strip()[:500]
+    return {"history": history, "last_message": last, "push_name": "",
+            "count": len(body_rows), "err": None, "source": "durable"}
 
 
 def _supersede_pending_for_cid(cid, except_did=None):
@@ -3864,6 +4130,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/poll-payments",
                              "/lead-analyze-disregard",
                              "/pipeline-analyze",
+                             "/record-message",
                              "/dormancy-sweep", "/daily-feedback-sweep",
                              "/send-file", "/list-files",
                              "/edit-capture", "/edit-feedback", "/edit-rule",
@@ -3984,6 +4251,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_pipeline_analyze(payload, self._send)
         elif self.path == "/reconcile-identities":
             handle_reconcile_identities(payload, self._send)
+        elif self.path == "/record-message":
+            handle_record_message(payload, self._send)
         else:
             handle_draft(payload, self._send)
 

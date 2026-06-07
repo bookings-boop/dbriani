@@ -621,3 +621,46 @@ def waha_fetch_history(customer_id, limit=30):
     last = (with_body[-1].get("body") or "").strip()[:500]
     return {"history": history, "last_message": last,
             "push_name": push_name, "count": len(with_body), "err": None}
+
+
+def _waha_msg_id(m):
+    """Extract a stable provider message id from a WAHA message dict, or None.
+    WAHA's `id` is sometimes a bare string and sometimes an object with a
+    `_serialized` form — normalise both."""
+    i = m.get("id")
+    if isinstance(i, dict):
+        i = i.get("_serialized") or i.get("id")
+    i = (str(i).strip() if i not in (None, "") else "")
+    return i or None
+
+
+def waha_fetch_raw(customer_id, limit=100):
+    """RAW message list for the durable conversation store (migration 010) —
+    the top-up half of build_analyzer_history + the WAHA seed half of
+    scripts/backfill_conversation_messages.py.
+
+    Returns a list of {ts:int, direction:'in'|'out', body:str, msg_id:str|None},
+    oldest-first (body may be empty — callers that build transcript filter
+    empties). Unlike waha_fetch_history this does NOT format / truncate / cap —
+    it surfaces the structured messages so the durable store can window them
+    itself. NON-RAISING: any error / no-history -> [] (the caller then keeps its
+    durable rows or falls back, so a WAHA outage never breaks analysis)."""
+    try:
+        msgs, err = _waha_get(
+            f"/api/default/chats/{customer_id}/messages?"
+            f"limit={limit}&downloadMedia=false")
+        if err or not isinstance(msgs, list) or not msgs:
+            return []
+        out = []
+        for m in sorted(msgs, key=lambda x: x.get("timestamp", 0)):
+            if not isinstance(m, dict):
+                continue
+            out.append({
+                "ts": int(m.get("timestamp") or 0),
+                "direction": "out" if m.get("fromMe") else "in",
+                "body": (m.get("body") or ""),
+                "msg_id": _waha_msg_id(m),
+            })
+        return out
+    except Exception:
+        return []
