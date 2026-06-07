@@ -2333,6 +2333,77 @@ def canonicalize_cid(cid):
     return cid
 
 
+# ── known-paid-customer recognition (Step 2 pivot, 2026-06-07) ───────────────
+# A NARROW, gated cue that tells the drafter "this is a returning paid customer".
+# The data now comes from a SIMPLE draft-time phone lookup
+# (known_customers.lookup -> {name, revenue_aed, n_bookings}); the dead
+# "upsert clean profiles into customer_facts" approach reached almost none of the
+# 1,383 all-time payers (customer_facts held only ~222 active-lead rows). Gated by
+# KNOWN_CUSTOMER_PROFILE_ENABLED (default OFF -> the draft prompt is byte-for-byte
+# unchanged) and NEVER fabricated (no block on zero / missing data). NOTE: the
+# n8n Build-Prompt path is separate (not in this repo); it would need the same
+# block added there if the operator later wants the cue on that path too.
+
+def _kc_to_float(v):
+    """Parse a numeric profile value to float, or None on blank / non-numeric."""
+    s = (str(v) if v is not None else "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kc_to_int(v):
+    f = _kc_to_float(v)
+    return int(f) if f is not None else None
+
+
+def known_customer_profile_enabled():
+    """Read the gate from the env (default OFF) — mirrors profile_lookup.enabled()."""
+    return os.environ.get("KNOWN_CUSTOMER_PROFILE_ENABLED", "0").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
+def _known_customer_text(lifetime_revenue_aed, n_bookings):
+    """PURE: the one-line recognition cue, or "" when there is no real revenue /
+    booking data. Never fabricates an 'AED 0' figure or a '0 booking(s)' phrase —
+    it builds with whatever real data is present (both / revenue-only /
+    bookings-only)."""
+    rev = _kc_to_float(lifetime_revenue_aed)
+    nb = _kc_to_int(n_bookings)
+    has_rev = rev is not None and rev > 0
+    has_nb = nb is not None and nb > 0
+    if not has_rev and not has_nb:
+        return ""
+    if has_rev and has_nb:
+        return ("\U0001F3C6 RETURNING PAID CUSTOMER — "
+                f"AED {rev:,.0f} lifetime across {nb} booking(s); "
+                "greet warmly, they know us.")
+    if has_rev:
+        return ("\U0001F3C6 RETURNING PAID CUSTOMER — "
+                f"AED {rev:,.0f} lifetime; greet warmly, they know us.")
+    return ("\U0001F3C6 RETURNING PAID CUSTOMER — "
+            f"{nb} booking(s) on record; greet warmly, they know us.")
+
+
+def known_customer_block(data):
+    """Gated recognition block for the draft prompt, or "". `data` is a
+    known_customers.lookup result ({name, revenue_aed, n_bookings}) or None.
+    Gated by KNOWN_CUSTOMER_PROFILE_ENABLED (default OFF). Fail-safe + never
+    fabricates."""
+    try:
+        if not known_customer_profile_enabled():
+            return ""
+        if not data:
+            return ""
+        return _known_customer_text(data.get("revenue_aed"),
+                                    data.get("n_bookings"))
+    except Exception:  # noqa: BLE001 — must never break the draft path
+        return ""
+
+
 def get_customer_facts(customer_id):
     """The customer_facts row as a dict, or None if absent / on error.
     Degrades to None so the header logic never breaks over a DB read.
@@ -3052,6 +3123,23 @@ def build_query(p):
                 p.get("customer_id") or "", phone_resolver=phone_for_cid)
             if _pblock:
                 parts.append(_pblock)
+                parts.append("=" * 60)
+    except Exception:
+        pass
+    # Known-paid-customer recognition (Step 2 pivot, 2026-06-07) — a one-line
+    # "returning paid customer" cue built from a SIMPLE draft-time phone lookup
+    # (known_customers.lookup -> {name, revenue_aed, n_bookings}), keyed by the
+    # sender's cid/phone already in this payload. Gated by
+    # KNOWN_CUSTOMER_PROFILE_ENABLED (default OFF -> prompt byte-for-byte
+    # unchanged; the lookup is also skipped when OFF). Graceful skip on no phone /
+    # no match / an @lid (lookup returns None). Fail-safe + never fabricates.
+    try:
+        if known_customer_profile_enabled():
+            import known_customers
+            _ident = p.get("customer_id") or p.get("phone") or ""
+            _kcblock = known_customer_block(known_customers.lookup(_ident))
+            if _kcblock:
+                parts.append(_kcblock)
                 parts.append("=" * 60)
     except Exception:
         pass
