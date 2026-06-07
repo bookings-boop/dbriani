@@ -1357,23 +1357,8 @@ def handle_label_eval(payload, send):
             })
             return
 
-        # LOST / DISREGARDED are terminal too (labels.py _LABEL_RANK 8/7) —
-        # operator/Hermes CLOSED them. Never auto-reopen on a stray inbound:
-        # the sticky-upward guard below is gated on confidence<0.4, but a fresh
-        # money_mentioned/lets_do_it signal scores 1.0, so any 4-digit run
-        # (phone/order-id/price) would otherwise re-classify a closed lead to
-        # HOT. Operator must /label to reopen. Audit #3, 2026-06-07.
-        if previous_label in ("LOST", "DISREGARDED"):
-            send(200, {
-                "ok": True, "customer_id": cid,
-                "label": previous_label,
-                "previous_label": previous_label,
-                "changed": False, "signal": "terminal_closed",
-                "confidence": 1.0,
-                "evidence": "terminal label; auto-eval suppressed (/label to reopen)",
-                "interrupt_required": False, "alert_text": None,
-            })
-            return
+        # (LOST/DISREGARDED terminal handling moved BELOW compute_label — they
+        # now reopen on a genuine fresh enquiry, audit #3 refined 2026-06-07.)
 
         # If locked (PAUSED via /label or /snooze), short-circuit.
         if skip_if_locked and row.get("label_locked_until"):
@@ -1400,6 +1385,30 @@ def handle_label_eval(payload, send):
         applied = target
         if confidence < CONFIDENCE_DEMOTE_THRESHOLD:
             applied = _TIER_BELOW.get(target, target)
+
+        # Terminal LOST/DISREGARDED reopen ONLY on a genuine fresh booking
+        # enquiry (audit #3 REFINED 2026-06-07). The earlier unconditional
+        # terminal short-circuit buried RETURNING customers — a previously-LOST
+        # lead (merged into their old @lid canonical) who texts "I'd like to
+        # check availability" stayed invisible. A stray inbound (bare number /
+        # 'thanks' / emoji) still must NOT reopen a closed lead.
+        if previous_label in ("LOST", "DISREGARDED"):
+            from labels import _is_reengage_enquiry
+            reopen = (_LABEL_RANK.get(applied, 0) < _LABEL_RANK[previous_label]
+                      and _is_reengage_enquiry(msg))
+            if not reopen:
+                send(200, {
+                    "ok": True, "customer_id": cid,
+                    "label": previous_label, "previous_label": previous_label,
+                    "changed": False, "signal": "terminal_closed",
+                    "confidence": 1.0,
+                    "evidence": ("terminal label; no fresh-enquiry signal "
+                                 "(/label to reopen)"),
+                    "interrupt_required": False, "alert_text": None,
+                })
+                return
+            # genuine re-engagement → fall through; the transition reopens to
+            # `applied` (sticky guard won't block — confidence is 1.0).
 
         # STICKY-UPWARD guard. Prevents a single weak/dampened signal
         # from demoting a customer who was previously HOT (or higher)

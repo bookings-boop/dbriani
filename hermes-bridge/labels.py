@@ -457,6 +457,29 @@ def _close_label_for(reasoning):
     return "DISREGARDED" if bkt in ("NOT_A_CUSTOMER", "COMPLETED") else "LOST"
 
 
+_REENGAGE_INTENT_RE = re.compile(
+    r"\b(?:avail|book|charter|yacht|rent|hire|cruise|sail|date|guest|pax|"
+    r"hour|pric|cost|quote|rate|budget|interest|enquir|inquir|how\s+much|"
+    r"looking\s+for|do\s+you\s+have|can\s+(?:i|we|you)|tomorrow|"
+    r"this\s+(?:week|weekend|fri|sat|sun|mon|tue|wed|thu)|next\s+(?:week|weekend)|"
+    r"weekend|birthday|anniversary|party|deposit|pay|still\s+available|"
+    r"any\s+availability)", re.IGNORECASE)
+
+
+def _is_reengage_enquiry(msg):
+    """True when a message from a previously-CLOSED (LOST/DISREGARDED) customer
+    is a GENUINE fresh booking enquiry that should REOPEN the lead — vs a stray
+    inbound (a bare phone/order number, 'thanks', 'ok', an emoji) that must NOT
+    reopen a terminal lead (audit #3's stray-reopen concern). Heuristic over
+    forward-looking booking-intent language. Errs toward reopening (a wrongly
+    reopened lead is operator-reversible; a buried returning customer is lost
+    revenue). Pure. 2026-06-07."""
+    m = (msg or "").strip()
+    if len(m) < 6:          # 'ok', 'thanks', a bare token / emoji — not an enquiry
+        return False
+    return bool(_REENGAGE_INTENT_RE.search(m))
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------
