@@ -3938,22 +3938,28 @@ def handle_lead_analyze_disregard(payload, send):
         suggested_e = _md_escape(suggested) if suggested else ""
 
         if verdict == "close":
-            # Auto-close. apply_label_transition writes the audit row.
+            # Route by REASON (operator/audit 2026-06-07): a real customer who
+            # didn't convert (price/competitor/timing/ghost) is LOST, not
+            # DISREGARDED — only a genuine non-customer (vendor/spam/wrong-number)
+            # is DISREGARDED. Previously EVERY close → DISREGARDED, burying real
+            # lost sales under the "not a customer" bucket (95 leads).
+            from labels import _close_label_for
+            _clabel = _close_label_for(reasoning)
+            _emoji = "🛑" if _clabel == "DISREGARDED" else "💔"
             apply_label_transition(
-                cid, cur_label, "DISREGARDED",
+                cid, cur_label, _clabel,
                 signal="hermes_disregard",
                 evidence=(reasoning or "")[:240],
                 message_count=mc,
                 created_by="operator:disregard_button")
             tx = (
-                f"🛑 *DISREGARDED* — {nm_e}\n"
+                f"{_emoji} *{_clabel}* — {nm_e}\n"
                 f"_Hermes analysis:_ {reasoning_e}"
-                f"\n\n→ label flipped {cur_label} → DISREGARDED. "
-                "Hidden from /review.\n"
+                f"\n\n→ {cur_label} → {_clabel}.\n"
                 f"_Undo with_ `/label {nm_e} WARM`")
             send(200, {
                 "ok": True, "verdict": "close",
-                "label_before": cur_label, "label_after": "DISREGARDED",
+                "label_before": cur_label, "label_after": _clabel,
                 "reasoning": reasoning, "telegram_text": tx})
         else:
             tx = (

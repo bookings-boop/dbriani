@@ -445,6 +445,18 @@ def _close_bucket(reasoning):
     return "", ""
 
 
+def _close_label_for(reasoning):
+    """The terminal LABEL for a 'close' verdict (operator/audit 2026-06-07).
+    DISREGARDED only for a genuine non-customer (vendor/seller/spam/wrong-number)
+    or a completed booking; otherwise LOST — a real customer who didn't convert
+    (price/competitor/timing/ghost) AND the unclear case. Never brand a real
+    customer 'not a customer'. Previously every analyzer 'close' → DISREGARDED,
+    burying 95 real lost sales (price/competitor/timing/ghost) under the
+    'not a customer' bucket. Pure."""
+    bkt, _ = _close_bucket(reasoning)
+    return "DISREGARDED" if bkt in ("NOT_A_CUSTOMER", "COMPLETED") else "LOST"
+
+
 # ---------------------------------------------------------------------------
 # R4 — no-draft fallback (2026-06-02)
 # ---------------------------------------------------------------------------

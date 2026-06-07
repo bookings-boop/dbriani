@@ -14,7 +14,27 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from labels import _close_bucket  # noqa: E402
+from labels import _close_bucket, _close_label_for  # noqa: E402
+
+
+def test_close_label_routes_real_losses_to_LOST():
+    # Operator/audit 2026-06-07: 95 leads were DISREGARDED ("not a customer")
+    # that were really lost SALES. A 'close' verdict on price/competitor/timing/
+    # ghost = LOST, never DISREGARDED.
+    assert _close_label_for("Rule 4: too expensive / out of budget") == "LOST"
+    assert _close_label_for("customer found another one, booked elsewhere") == "LOST"
+    assert _close_label_for("Booking date passed; customer ghosted, no reply") == "LOST"
+
+
+def test_close_label_keeps_noncustomers_DISREGARDED():
+    assert _close_label_for("vendor pitching marketing agency services") == "DISREGARDED"
+    assert _close_label_for("spam / wrong number") == "DISREGARDED"
+
+
+def test_close_label_unclear_defaults_to_LOST():
+    # Never brand a real customer 'not a customer' on ambiguous reasoning.
+    assert _close_label_for("") == "LOST"
+    assert _close_label_for("customer went quiet, unclear next step") == "LOST"
 
 
 def test_completed_booking_is_not_lost_or_noncustomer():
