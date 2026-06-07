@@ -2072,6 +2072,33 @@ def get_customer_facts(customer_id):
         return None
 
 
+def _upsert_facts_sql(customer_id, name, facts):
+    """Build the customer_facts UPSERT SQL. Pure (no DB) so it is unit-tested
+    (test_name_lock.py).
+
+    name-lock (migration 009): a row whose name_locked is TRUE keeps its
+    existing name — an operator's manual rename must NOT be clobbered by the
+    per-message fact-extraction. 2026-06-06: customer 971509767187 ('Zayn')
+    kept reverting to a mis-extracted name because ON CONFLICT did an
+    unconditional `name = EXCLUDED.name`. Every OTHER field still takes the
+    latest extracted value, and an UNLOCKED row still adopts the freshly-
+    extracted name (so auto-extraction can still fill/refine unlocked names)."""
+    facts = facts or {}
+    return (
+        "INSERT INTO customer_facts (customer_id, name, dates, yachts, "
+        "party_size, message_count, updated_at) VALUES ("
+        + ", ".join([_lit(customer_id), _lit(name), _lit(facts.get("dates")),
+                     _lit(facts.get("yachts")), _lit(facts.get("party_size"))])
+        + ", 1, now()) ON CONFLICT (customer_id) DO UPDATE SET "
+        "name = CASE WHEN customer_facts.name_locked "
+        "THEN customer_facts.name ELSE EXCLUDED.name END, "
+        "dates = EXCLUDED.dates, "
+        "yachts = EXCLUDED.yachts, party_size = EXCLUDED.party_size, "
+        "message_count = customer_facts.message_count + 1, updated_at = now() "
+        "RETURNING message_count"
+    )
+
+
 def upsert_customer_facts(customer_id, name, facts):
     """UPSERT a customer_facts row. INSERT -> message_count 1; ON CONFLICT ->
     message_count = existing + 1 (atomic in SQL — no read-modify-write race).
@@ -2079,19 +2106,10 @@ def upsert_customer_facts(customer_id, name, facts):
 
     Resolves through merged_into so writes always land on the canonical
     row — the duplicate's data path automatically heals when the next
-    message arrives under its old cid."""
+    message arrives under its old cid. A name_locked row keeps its name
+    (see _upsert_facts_sql)."""
     customer_id = canonicalize_cid(customer_id)
-    sql = (
-        "INSERT INTO customer_facts (customer_id, name, dates, yachts, "
-        "party_size, message_count, updated_at) VALUES ("
-        + ", ".join([_lit(customer_id), _lit(name), _lit(facts.get("dates")),
-                     _lit(facts.get("yachts")), _lit(facts.get("party_size"))])
-        + ", 1, now()) ON CONFLICT (customer_id) DO UPDATE SET "
-        "name = EXCLUDED.name, dates = EXCLUDED.dates, "
-        "yachts = EXCLUDED.yachts, party_size = EXCLUDED.party_size, "
-        "message_count = customer_facts.message_count + 1, updated_at = now() "
-        "RETURNING message_count"
-    )
+    sql = _upsert_facts_sql(customer_id, name, facts)
     try:
         out, err = _psql(sql)
         if err:
