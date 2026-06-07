@@ -1170,6 +1170,12 @@ def _reconcile_paid_unconfirmed():
             + str(CONFIRM_PROMOTION_MIN_AED) + ") a "
             "JOIN customer_facts cf ON cf.customer_id=a.customer_id "
             "WHERE cf.label <> 'CONFIRMED' AND cf.merged_into IS NULL "
+            # Respect an operator lock (audit #10a, 2026-06-07): the hourly
+            # auto-classifier honors label_locked_until, but reconcile didn't —
+            # so an operator could not durably pin a paid lead OFF CONFIRMED
+            # (it flipped back within 2 min). (Blocking promotion on a
+            # pay_mismatch is a separate supervised-daytime change, #10b.)
+            "AND (cf.label_locked_until IS NULL OR cf.label_locked_until < now()) "
             "AND NOT EXISTS (SELECT 1 FROM autonomous_sends r "
             "  WHERE r.customer_id=a.customer_id "
             "  AND r.kind IN ('refund','chargeback','payment_refunded'))")
@@ -1343,6 +1349,24 @@ def handle_label_eval(payload, send):
             })
             return
 
+        # LOST / DISREGARDED are terminal too (labels.py _LABEL_RANK 8/7) —
+        # operator/Hermes CLOSED them. Never auto-reopen on a stray inbound:
+        # the sticky-upward guard below is gated on confidence<0.4, but a fresh
+        # money_mentioned/lets_do_it signal scores 1.0, so any 4-digit run
+        # (phone/order-id/price) would otherwise re-classify a closed lead to
+        # HOT. Operator must /label to reopen. Audit #3, 2026-06-07.
+        if previous_label in ("LOST", "DISREGARDED"):
+            send(200, {
+                "ok": True, "customer_id": cid,
+                "label": previous_label,
+                "previous_label": previous_label,
+                "changed": False, "signal": "terminal_closed",
+                "confidence": 1.0,
+                "evidence": "terminal label; auto-eval suppressed (/label to reopen)",
+                "interrupt_required": False, "alert_text": None,
+            })
+            return
+
         # If locked (PAUSED via /label or /snooze), short-circuit.
         if skip_if_locked and row.get("label_locked_until"):
             cid_esc = cid.replace("'", "''")
@@ -1493,7 +1517,8 @@ def handle_name(payload, send):
     revert it (root-caused 2026-06-06: 'Zayn' kept reverting). Lookup via
     resolve_target (customer_id or current name); the new value is in
     payload['new_name']."""
-    from server import _name_update_sql, get_current_label_row
+    from server import (_name_update_sql, get_current_label_row,
+                        canonicalize_cid)
     new_name = (payload.get("new_name") or "").strip()
     if not new_name:
         send(200, {"ok": False, "error": "new_name required",
@@ -1503,6 +1528,12 @@ def handle_name(payload, send):
     if not cid:
         send(200, {"ok": False, "error": err, "telegram_text": err})
         return
+    # Canonicalize: every other facts write resolves merged_into, but
+    # resolve_target returns the operator-supplied cid verbatim. Without this a
+    # /name <raw merged cid> writes name_locked onto an orphaned dup the
+    # canonical reads never see — the exact 009 revert it was built to stop
+    # (audit #13, 2026-06-07).
+    cid = canonicalize_cid(cid)
     try:
         row = get_current_label_row(cid)
         if row is None:
@@ -2659,16 +2690,28 @@ def handle_dormancy_sweep(payload, send):
                        "count": 0, "leads": []})
             return
     try:
+        # Audit #6 (2026-06-07): count ACTUAL proactive-followup SENDS (the
+        # reset-immune autonomous_sends rows), NOT cs.reengage_attempts — which
+        # is reset to 0 on every operator_reply (incl. nudge sends), so it both
+        # (a) never reaches the min for leads we DID re-engage (linger forever)
+        # and (b) hits the min from drafts alone for leads we NEVER contacted
+        # (false auto-DISREGARD). The sent-count only rises on a real send →
+        # conservative, honoring the "never silent-disregard" rule. Also moots
+        # the FOLLOWUP_CAP==DORMANCY_MIN_ATTEMPTS equality fragility (#22): the
+        # send-count is not bounded by FOLLOWUP_CAP.
+        _sent_ct = ("(SELECT count(*) FROM autonomous_sends a "
+                    "WHERE a.customer_id = cf.customer_id "
+                    "AND a.kind = 'proactive_followup_sent')")
         sql = (
             "SELECT cf.customer_id, COALESCE(cf.name,''), cf.label, "
-            "COALESCE(cs.reengage_attempts,0), "
+            + _sent_ct + ", "
             "FLOOR(EXTRACT(epoch FROM "
             "  (now()-cs.last_customer_message_at))/86400)::int "
             "FROM customer_facts cf "
             "JOIN conversation_state cs ON cs.customer_id = cf.customer_id "
             "WHERE cf.merged_into IS NULL "
             "  AND cs.last_analysis_signal = 'date_passed' "
-            "  AND COALESCE(cs.reengage_attempts,0) >= " + str(min_attempts) + " "
+            "  AND " + _sent_ct + " >= " + str(min_attempts) + " "
             "  AND cs.last_customer_message_at IS NOT NULL "
             "  AND cs.last_customer_message_at < now() - interval '"
             + str(min_silent) + " days' "
@@ -2840,7 +2883,8 @@ def handle_draft_followup(payload, send):
     try:
         from hermes_exclusion_guards import is_excluded, category_of
         from waha import phone_for_cid
-        if is_excluded(cid, lid_resolver=phone_for_cid):
+        if is_excluded(cid, lid_resolver=phone_for_cid,
+                       block_if_unresolved=True):  # proactive: fail-closed (#14)
             _xcat = category_of(cid, lid_resolver=phone_for_cid) \
                 or "exclusion list"
             log(f"/draft-followup BLOCKED proactive outreach -> {cid} "
@@ -3377,6 +3421,18 @@ def handle_reconcile_identities(payload, send):
             f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
             f"updated_at = now() WHERE customer_id = {_lit(dup)} "
             "AND merged_into IS NULL")
+        # Audit #12 (2026-06-07): if the DUP carried an operator name-lock,
+        # propagate it to canon — else the merge buries the locked name and the
+        # next inbound re-extracts a fresh one (the 009 Zayn-revert class).
+        # Only when canon isn't already locked.
+        _psql(
+            f"UPDATE customer_facts c SET name = d.name, name_locked = true, "
+            f"name_lock_reason = COALESCE(d.name_lock_reason, "
+            f"'merge:propagated-lock'), updated_at = now() "
+            f"FROM customer_facts d "
+            f"WHERE c.customer_id = {_lit(canon)} "
+            f"AND d.customer_id = {_lit(dup)} AND d.name_locked = true "
+            f"AND COALESCE(c.name_locked, false) = false")
         _psql(
             "INSERT INTO customer_label_history (customer_id, from_label, "
             "to_label, signal, evidence, message_count, created_at, "
@@ -4085,6 +4141,25 @@ def handle_autosend_check(payload, send):
     except Exception as _se:
         log(f"autosend-check FLOOR score error customer={cid}: {_se!r}")
         _score = 0
+    # Audit #5 (2026-06-07): the autosend FLOOR is the last gate before an
+    # autonomous send, yet it was the ONLY scoring path that skipped the
+    # deterministic price validator (the Anthropic scorer, per its own comment,
+    # "doesn't catch fabricated prices"). Block a catalog price mismatch
+    # outright — never auto-send a wrong price with no human in the loop.
+    try:
+        from server import validate_draft_prices
+        _dt = ("\n\n".join(_draft) if isinstance(_draft, (list, tuple))
+               else str(_draft or ""))
+        _pm = validate_draft_prices(_dt)
+        if _pm:
+            log(f"autosend-check PRICE-BLOCK customer={cid} {_pm} -> approval")
+            send(200, {"ok": True, "mode": mode, "auto_send": False,
+                       "score": _score,
+                       "reason": ("price mismatch vs catalog ("
+                                  + "; ".join(_pm) + ") — routed for approval")})
+            return
+    except Exception as _pe:
+        log(f"autosend-check price-validate non-fatal: {_pe!r}")
     if not _quality_floor_ok(_score, AUTOSEND_MIN_SCORE):
         log(f"autosend-check FLOOR-BLOCK customer={cid} score={_score} "
             f"< {AUTOSEND_MIN_SCORE} -> approval")
@@ -4350,11 +4425,13 @@ def handle_hourly_sweep(payload, send):
                     update_last_analysis(cid, "no_facts_row", 1.0)
                     continue
                 prev = row.get("label")
-                # CONFIRMED is terminal — skip the hourly sweep entirely,
-                # no transitions, no follow-up nudges. Operator can still
-                # downgrade via /label.
-                if prev == "CONFIRMED":
-                    update_last_analysis(cid, "confirmed_terminal", 1.0)
+                # CONFIRMED / LOST / DISREGARDED are terminal — skip the hourly
+                # sweep entirely (no transitions, no cold_decay, no nudges).
+                # Operator can still reopen via /label. Audit #3, 2026-06-07.
+                if prev in ("CONFIRMED", "LOST", "DISREGARDED"):
+                    update_last_analysis(
+                        cid, "confirmed_terminal" if prev == "CONFIRMED"
+                        else "terminal_closed", 1.0)
                     continue
                 # Honor manual lock window.
                 cid_esc = cid.replace("'", "''")
@@ -5378,6 +5455,14 @@ def handle_draft_gated(payload, send):
                 "system_prompt": sp, "customer_name": name, "history": hist,
                 "incoming_message": umsg, "current_draft": orig,
                 "customer_id": cid}))
+            # _anthropic_score returns 0 (not None) on failure/out-of-range.
+            # Map that to None so n8n's swap uses `: score` (the local-Hermes
+            # badge) instead of flooring baseScore to 1 — which would make the
+            # >= guard "always swap" and let a worse regen replace a good
+            # original (audit #20, 2026-06-07).
+            if not (isinstance(original_score, int)
+                    and 1 <= original_score <= 10):
+                original_score = None
         except Exception:
             original_score = None
     log(f"draft-gated cid={cid} score={best['score']} attempts={attempts} "

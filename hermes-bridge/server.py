@@ -2664,13 +2664,17 @@ _CANON_YACHT_RATES = {
     "sunseeker satoshi 70": {3000, 1500},   # 3,000; morning floor 1,500
 }
 _CANON_CATERING = {                          # term -> valid AED amount(s) (for 2/min)
-    "fine dining": {2500},
-    "premium bbq": {1500},
-    "premium barbecue": {1500},
+    "fine dining": {2500},                   # AED 2,500 incl. chef (catalog §9/§10)
+    # Premium BBQ = AED 2,500 incl. chef; 1,500 is the MIN-SPEND floor, NOT the
+    # price. The validator previously had only {1500} → it flagged the faithful
+    # 2,500 quote and the regen hint steered the drafter to UNDER-quote by 1,000
+    # (audit #2, 2026-06-07). Allow both the price and the min-spend mention.
+    "premium bbq": {2500, 1500},
+    "premium barbecue": {2500, 1500},
 }
 _CANON_ADDONS = {                            # add-on term -> valid AED amount(s)
-    "balloon": {300},                        # romantic balloon decor — from AED 300
-    "birthday cake": {300},                  # birthday cake — from AED 300
+    "balloon": {300},                        # basic balloon decor — AED 300
+    "birthday cake": {300, 500},             # 1kg AED 300, 2kg AED 500 (catalog §10)
 }
 _RATE_HR_RE = re.compile(
     r"(?:AED\s*)?([\d][\d,]*)\s*(?:AED)?\s*(?:/\s*hr\b|/\s*hour\b|per\s*hour\b)",
@@ -2730,7 +2734,9 @@ def validate_draft_prices(text):
     #    Skip per-HOUR figures (yacht rates, not catering) to avoid false-positives
     #    when a catering term sits near a yacht rate.
     for term, valid in list(_CANON_CATERING.items()) + list(_CANON_ADDONS.items()):
-        for tm in re.finditer(re.escape(term), low):
+        # Word-boundary anchor (audit #2): un-anchored "balloon" matched inside
+        # "Balloons + cake" (the 600-800 package, a different item) → false flag.
+        for tm in re.finditer(r"\b" + re.escape(term) + r"\b", low):
             window = text[tm.start():tm.start() + 90]
             for am in _AED_AMT_RE.finditer(window):
                 amt = _price_num(am.group(1) or am.group(2))
@@ -3383,6 +3389,11 @@ def _followup_candidate_sql():
         # followup_count) lives on the canonical row because nudge_drafted
         # canonicalizes the cid, so reading the merged row re-nudges forever.
         "  AND cf.merged_into IS NULL "
+        # Don't ghost-recovery a lead the analyzer judged dead/not-convertible
+        # (auto:analyzer_close / auto:analyzer_score0 demote to COLD, which is
+        # otherwise reengage-eligible — re-nudges a declined lead). Audit #7.
+        "  AND (cs.last_analysis_signal IS NULL "
+        "       OR cs.last_analysis_signal NOT LIKE 'auto:analyzer%') "
         # Timing band — silence since our reply: 24h .. 14d.
         "  AND now() - cs.last_operator_reply_at > interval '24 hours' "
         "  AND now() - cs.last_operator_reply_at < interval '14 days' "
@@ -3566,11 +3577,17 @@ def read_lead_summary(filter_label=None):
         # autonomous_sends.notes (JSON) so the CONFIRMED card shows HOW MUCH was
         # paid. String-only (no numeric cast) → a malformed row can never break
         # /review. e.g. 'AED 3534.3'.
+        # Show the FIRST (deposit) payment, not the LATEST charge (audit #8,
+        # 2026-06-07): a 1-AED test sent later via a forwarded Nomod link used to
+        # override the real deposit and render "💰 AED 1 paid" on a CONFIRMED
+        # card. ASC surfaces the deposit; the later test no longer masks it.
+        # (A SUM-of-real-payments total is a follow-up for the supervised
+        # financial session — needs a malformed-safe numeric cast on this hot path.)
         "COALESCE((SELECT COALESCE(a3.notes->>'currency','AED') || ' ' || "
         "  COALESCE(a3.notes->>'total', a3.notes->>'amount','') "
         "  FROM autonomous_sends a3 WHERE a3.customer_id = "
         "  v_lead_summary.customer_id AND a3.kind = 'payment_received' "
-        "  ORDER BY a3.sent_at DESC LIMIT 1),'')) "
+        "  ORDER BY a3.sent_at ASC LIMIT 1),'')) "
         f"FROM v_lead_summary {where}"
     )
     out, err = _psql(sql, timeout=20)
@@ -3955,10 +3972,32 @@ class Handler(BaseHTTPRequestHandler):
             handle_draft(payload, self._send)
 
     # (moved to routes.py — handle_<name>(payload, self._send))
+def _ensure_schema():
+    """Startup schema CHECK (audit #15, 2026-06-07): _upsert_facts_sql references
+    name_locked (migration 009) on EVERY inbound; on an un-migrated env the whole
+    facts UPSERT fails and message_count/facts freeze system-wide, silently. The
+    bridge DB user (hermes_rw) is NOT the table owner, so it can't auto-ADD the
+    column — instead do a READ-ONLY existence check and LOUDLY warn if it's
+    missing, so a DR rebuild / fresh clone surfaces it immediately (the fix:
+    apply db/migrations/009_name_lock.sql as the table owner). Best-effort;
+    never blocks startup."""
+    try:
+        out, err = _psql(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='customer_facts' AND column_name='name_locked'")
+        if not err and not (out or "").strip():
+            log("⚠️ SCHEMA WARNING: customer_facts.name_locked MISSING — apply "
+                "migration 009 as the table owner, or EVERY inbound facts UPSERT "
+                "will fail and freeze message_count system-wide.")
+    except Exception as e:  # noqa: BLE001
+        log("ensure_schema check non-fatal:", repr(e))
+
+
 def main():
     if not TOKEN:
         log("FATAL: BRIDGE_TOKEN not set — refusing to start")
         sys.exit(1)
+    _ensure_schema()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     log(f"hermes-bridge listening on 0.0.0.0:{PORT} "
         f"(hermes timeout {HERMES_TIMEOUT}s)")

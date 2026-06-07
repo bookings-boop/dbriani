@@ -1097,7 +1097,8 @@ def _should_cold_decay(silent_seconds, prev_label, cmsg_is_null,
     if cmsg_is_null:
         return False
     p = (prev_label or "")
-    if p in ("COLD", "WAITING_FOR_PAYMENT") or p.startswith("PAUSED_"):
+    if (p in ("COLD", "WAITING_FOR_PAYMENT", "LOST", "DISREGARDED")
+            or p.startswith("PAUSED_")):
         return False
     return silent_seconds > threshold_days * 86400
 

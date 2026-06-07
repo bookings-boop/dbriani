@@ -121,6 +121,14 @@ def test_sql_keeps_followup_cap():
     assert "followup_count" in sql
 
 
+def test_sql_excludes_analyzer_killed_leads():
+    # Audit #7 (2026-06-07): analyzer_close/score0 demote dead leads to COLD,
+    # which is reengage-eligible — don't ghost-recovery a declined/vendor lead.
+    sql = _followup_candidate_sql()
+    assert "auto:analyzer%" in sql
+    assert "last_analysis_signal" in sql
+
+
 def test_sql_excludes_merged_duplicate_rows():
     # Identity-merge guard (2026-06-07 Yogi spam): the engine must NOT nudge a
     # merged (non-canonical) conversation_state row. Its cooldown/cap state lives

@@ -76,7 +76,11 @@ def prune_local_backups():
     targets = [
         (ROOT / "workflows", "phase-1b-telegram.PRE-DEPLOY-*.json"),
         (ROOT / "workflows", "phase-1b-telegram.LIVE-backup-*.json"),
-        (ROOT / "workflows", "phase-1b-telegram.PRE-*.json"),
+        # NOTE (audit #17, 2026-06-07): do NOT add a broad
+        # "phase-1b-telegram.PRE-*.json" glob here — it would also prune
+        # n8n_deploy.safe_put's PRE-{tag}-* snapshots, which are the only
+        # on-disk record of live-only workflow edits (e.g. PRE-APPLY_IMPROVEMENT
+        # before this same run can re-import over that fix). Keep them.
         (BRIDGE_DIR, "server.PRE-*.py"),
         (BRIDGE_DIR, "system-prompt.PRE-*.md"),
     ]
@@ -346,13 +350,24 @@ def main():
               "in-flight Debounce Wait nodes preserved")
     else:
         ssh_upload(tmp_local.read_bytes(), "/tmp/wf.json", "upload-wf")
-        ssh_run(f"docker cp /tmp/wf.json {N8N_CONTAINER}:/tmp/wf.json && "
+        _imp_out, _imp_err, _ = ssh_run(
+                f"docker cp /tmp/wf.json {N8N_CONTAINER}:/tmp/wf.json && "
                 f"docker exec {N8N_CONTAINER} n8n import:workflow "
                 f"--input=/tmp/wf.json && "
                 f"docker exec {N8N_CONTAINER} n8n update:workflow "
                 f"--id={WORKFLOW_ID} --active=true && echo IMPORTED",
                 "n8n-import", timeout=180)
-        print("8. workflow imported into n8n")
+        # Audit #16a/#1 (2026-06-07): ASSERT the import succeeded (mirror the
+        # COMPILE_OK gate at the bridge step). Previously this printed success
+        # unconditionally, so a silent import failure left the live drafter on a
+        # stale workflow while the always-uploaded box-file judges advanced —
+        # and, worse, this same full re-import can silently REVERT any live-only
+        # node edit. Reminder: keep ALL live n8n edits committed to this repo
+        # (the repo is the source deploy_bridge imports from).
+        if "IMPORTED" not in (_imp_out or ""):
+            die("n8n import did NOT confirm IMPORTED — live workflow may now be "
+                f"stale; inspect before retrying:\n{(_imp_err or _imp_out or '')[:400]}")
+        print("8. workflow imported into n8n (IMPORTED confirmed)")
 
         ssh_run(f"docker restart {N8N_CONTAINER} && echo RESTARTED",
                 "n8n-restart", timeout=120)

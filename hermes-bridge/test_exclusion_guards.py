@@ -121,6 +121,16 @@ def test_recycled_lid_now_a_different_number_is_allowed():
                          lid_resolver=lambda c: "+971500000000") is False
 
 
+def test_unresolvable_lid_blocks_on_proactive_path():
+    # Audit #14 (2026-06-07): on the PROACTIVE path (block_if_unresolved=True)
+    # an unresolvable @lid must fail CLOSED — a block-listed staff/crew @lid in
+    # a WAHA-degraded window must NOT get a nudge. Default (inbound) still allows.
+    g = _guard()
+    assert g.is_excluded("88812345@lid", lid_resolver=lambda c: "") is False
+    assert g.is_excluded("88812345@lid", lid_resolver=lambda c: "",
+                         block_if_unresolved=True) is True
+
+
 # ── FAIL-CLOSED: errors / unloaded data must BLOCK ───────────────────
 
 def test_resolver_exception_blocks():

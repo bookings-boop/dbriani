@@ -117,7 +117,8 @@ class ExclusionGuard:
         return s
 
     def is_excluded(self, identity: str,
-                    lid_resolver: Optional[Callable[[str], str]] = None) -> bool:
+                    lid_resolver: Optional[Callable[[str], str]] = None,
+                    block_if_unresolved: bool = False) -> bool:
         """True if proactive outreach to `identity` must be BLOCKED.
 
         identity may be a phone string or a WhatsApp customer_id
@@ -133,7 +134,11 @@ class ExclusionGuard:
                 return True  # data not loaded -> block (safe direction)
             phone = self._identity_to_phone(identity, lid_resolver)
             if not phone:
-                return False  # can't confirm; allow (not an error)
+                # Can't derive a phone (an unresolvable @lid). On the PROACTIVE
+                # path (block_if_unresolved=True) fail CLOSED: a block-listed
+                # staff/crew @lid during a WAHA-degraded window must not get a
+                # nudge (audit #14, 2026-06-07). Inbound replies stay allowed.
+                return block_if_unresolved
             return normalize_phone(phone) in self.normset
         except Exception:  # noqa: BLE001 — any failure must block, not send
             return True
@@ -187,9 +192,12 @@ _GUARD: ExclusionGuard = _load()
 
 
 def is_excluded(identity: str,
-                lid_resolver: Optional[Callable[[str], str]] = None) -> bool:
-    """Module-level convenience over the singleton (fail-closed)."""
-    return _GUARD.is_excluded(identity, lid_resolver)
+                lid_resolver: Optional[Callable[[str], str]] = None,
+                block_if_unresolved: bool = False) -> bool:
+    """Module-level convenience over the singleton (fail-closed). Pass
+    block_if_unresolved=True on proactive-outreach paths so an unresolvable
+    @lid is suppressed rather than allowed (audit #14)."""
+    return _GUARD.is_excluded(identity, lid_resolver, block_if_unresolved)
 
 
 def category_of(identity: str,

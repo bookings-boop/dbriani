@@ -541,13 +541,17 @@ def _yacht_display(row, label_key):
     (✅ for CONFIRMED/won) over the discussed-yachts accumulator. For a CONFIRMED
     card with multiple discussed yachts and NO booked_yacht resolved yet, flags
     it so the operator knows which-was-booked is unresolved. Pure."""
+    # Gate on the REAL label, not the SECTION key (audit #18, 2026-06-07): a
+    # CONFIRMED+owed booking is routed into AWAITING_REPLY (label_key !=
+    # CONFIRMED) but must still show the ✅ / multi-yacht ⚠️ flag.
+    _confirmed = (row.get("label") or "").strip().upper() == "CONFIRMED"
     booked = (row.get("booked_yacht") or "").strip()
     if booked:
-        return ("✅ " + booked) if label_key == "CONFIRMED" else booked
+        return ("✅ " + booked) if _confirmed else booked
     yachts = (row.get("yachts") or "").strip()
     if not yachts:
         return "no yacht set"
-    if label_key == "CONFIRMED" and "," in yachts:
+    if _confirmed and "," in yachts:
         return yachts + " ⚠️ confirm booked yacht"
     return yachts
 

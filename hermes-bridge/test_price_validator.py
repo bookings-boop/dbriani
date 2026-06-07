@@ -72,10 +72,15 @@ def test_fine_dining_2500_clean():
     assert validate_draft_prices("fine dining for 2 — from AED 2,500 (chef included)") == []
 
 
-def test_bbq_1500_clean_2500_flagged():
-    assert validate_draft_prices("premium bbq for 2 — AED 1,500") == []
-    m = validate_draft_prices("premium bbq menu for 2 — AED 2,500")
-    assert any("2,500" in x for x in m), m
+def test_bbq_2500_price_and_1500_min_clean_wrong_flagged():
+    # Audit #2 (2026-06-07): Premium BBQ = AED 2,500 incl. chef; 1,500 is the
+    # MIN-SPEND floor. BOTH are valid catalog numbers; a fabricated value is
+    # flagged. (Previously the test wrongly expected 2,500 — the real price — to
+    # be flagged, steering regen to under-quote by 1,000.)
+    assert validate_draft_prices("premium bbq for 2 — AED 2,500 (chef incl.)") == []
+    assert validate_draft_prices("premium bbq — min spend AED 1,500") == []
+    m = validate_draft_prices("premium bbq menu for 2 — AED 600")
+    assert any("600" in x for x in m), m
 
 
 def test_catering_term_near_yacht_hourly_rate_no_false_positive():
@@ -102,6 +107,12 @@ def test_addon_birthday_cake_wrong_flagged():
 
 def test_addon_birthday_cake_300_clean():
     assert validate_draft_prices("birthday cake — from AED 300") == []
+
+
+def test_addon_birthday_cake_500_2kg_clean():
+    # Audit #2: 2kg cake = AED 500 is a real catalog value — must NOT be flagged
+    # (the old {300}-only set steered the regen to under-quote a faithful 2kg cake).
+    assert validate_draft_prices("2kg birthday cake — AED 500") == []
 
 
 def test_addon_term_near_yacht_rate_no_false_positive():

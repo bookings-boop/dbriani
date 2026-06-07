@@ -74,11 +74,22 @@ def main():
         out("quiet hours (Dubai) — skipping; pending triggers keep till morning")
         return
 
+    # Audit #9/#21 (2026-06-07): join customer_facts so we (a) SUPPRESS
+    # reminders for leads now terminal (LOST/DISREGARDED/CONFIRMED), paused, or
+    # merged away — a trigger saved while a lead was active must not fire after
+    # it's closed/merged (or, worse, ping a Layer-3 block-listed contact) — and
+    # (b) show the CURRENT canonical name (post-/name), not the frozen snapshot.
     rows_out, rc, err = psql(
-        "SELECT id, customer_name, customer_id, trigger_type, "
-        "COALESCE(trigger_context,'') FROM customer_triggers "
-        "WHERE status='pending' AND reminder_date <= now() "
-        "ORDER BY reminder_date LIMIT 20")
+        "SELECT t.id, COALESCE(NULLIF(cf.name,''), t.customer_name), "
+        "t.customer_id, t.trigger_type, COALESCE(t.trigger_context,'') "
+        "FROM customer_triggers t "
+        "LEFT JOIN customer_facts cf ON cf.customer_id = t.customer_id "
+        "WHERE t.status='pending' AND t.reminder_date <= now() "
+        "  AND COALESCE(cf.merged_into,'') = '' "
+        "  AND (cf.label IS NULL OR (cf.label NOT IN "
+        "       ('LOST','DISREGARDED','CONFIRMED') "
+        "       AND cf.label NOT LIKE 'PAUSED_%')) "
+        "ORDER BY t.reminder_date LIMIT 20")
     if rc != 0:
         out("trigger query failed:", err.strip()[:200])
         sys.exit(1)
