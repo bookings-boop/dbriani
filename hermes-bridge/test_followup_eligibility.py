@@ -121,6 +121,15 @@ def test_sql_keeps_followup_cap():
     assert "followup_count" in sql
 
 
+def test_sql_excludes_merged_duplicate_rows():
+    # Identity-merge guard (2026-06-07 Yogi spam): the engine must NOT nudge a
+    # merged (non-canonical) conversation_state row. Its cooldown/cap state lives
+    # on the CANONICAL row (upsert_conversation_state canonicalizes), so reading
+    # the merged row (blank last_nudge/followup_count) re-nudges it forever.
+    sql = _followup_candidate_sql()
+    assert "cf.merged_into IS NULL" in sql
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

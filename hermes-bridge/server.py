@@ -3366,6 +3366,11 @@ def _followup_candidate_sql():
         "WHERE cs.last_operator_reply_at IS NOT NULL "
         "  AND (cs.last_customer_message_at IS NULL "
         "       OR cs.last_operator_reply_at > cs.last_customer_message_at) "
+        # Canonical identities ONLY (2026-06-07 Yogi spam): never nudge a merged
+        # duplicate row — its cooldown/cap state (last_nudge_drafted_at,
+        # followup_count) lives on the canonical row because nudge_drafted
+        # canonicalizes the cid, so reading the merged row re-nudges forever.
+        "  AND cf.merged_into IS NULL "
         # Timing band — silence since our reply: 24h .. 14d.
         "  AND now() - cs.last_operator_reply_at > interval '24 hours' "
         "  AND now() - cs.last_operator_reply_at < interval '14 days' "
