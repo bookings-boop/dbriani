@@ -2739,6 +2739,39 @@ def validate_draft_prices(text):
     return out
 
 
+def _price_correction_hint(mismatches):
+    """Turn validate_draft_prices() mismatch strings (which already carry the
+    CORRECT catalog value) into a regen directive that hands the drafter the
+    ground-truth price to use — not just a flag name (3A, 2026-06-06). Empty
+    string when there's nothing to correct. Pure."""
+    ms = [str(m).strip() for m in (mismatches or []) if str(m).strip()]
+    if not ms:
+        return ""
+    return ("CRITICAL — the previous draft quoted WRONG prices. Use the CORRECT "
+            "catalog prices shown here and do NOT invent figures: "
+            + "; ".join(ms) + ".")
+
+
+def _format_draft_to_score(current_draft):
+    """Render the draft for the SCORER. A LIST of bubbles is shown with explicit
+    per-bubble markers so the scorer judges the real WhatsApp message structure
+    (each bubble is a separate send) instead of a flattened blob — the
+    wall_of_text rule depends on seeing the real boundaries (2A, 2026-06-06). A
+    plain string (legacy callers) is shown as-is. Pure; None-safe."""
+    if isinstance(current_draft, (list, tuple)):
+        bubbles = [str(m).strip() for m in current_draft if str(m).strip()]
+        n = len(bubbles)
+        if n == 0:
+            return "\n--- DRAFT TO SCORE ---\n"
+        body = "\n".join(f"[bubble {i + 1}/{n}] {b}"
+                         for i, b in enumerate(bubbles))
+        plural = "s" if n != 1 else ""
+        return (f"\n--- DRAFT TO SCORE ({n} WhatsApp message bubble{plural}; "
+                f"each [bubble N/{n}] is sent as a SEPARATE message) ---\n"
+                + body)
+    return "\n--- DRAFT TO SCORE ---\n" + str(current_draft or "").strip()
+
+
 def build_quality_query(p):
     """Compose the -q query for a FAST quality SCORE of an existing draft.
     Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
@@ -2815,23 +2848,21 @@ def build_quality_query(p):
             _pdn = _passed_date_note(dts_, irea_)
             if _pdn:
                 parts.append(_pdn)
-    cur = p.get("current_draft")
-    if isinstance(cur, list):
-        cur = "\n\n".join(str(m) for m in cur)
-    parts.append("\n--- DRAFT TO SCORE ---\n" + str(cur or "").strip())
+    parts.append(_format_draft_to_score(p.get("current_draft")))
     # FORMATTING IS SCORED (2026-06-04): without this the scorer had no spacing
     # flag and its `too_verbose` flag actively penalised vertical lists — so a
     # cramped multi-option reply scored fine and a well-spaced one got compressed
     # back. This is the enforcement leg that makes the layout rule STICK.
     parts.append(
         "\n--- FORMATTING (SCORED) ---\n"
-        "If the draft offers MORE THAN 2 options/links/yachts/add-ons crammed "
-        "inline, comma-separated, or glued into one paragraph instead of each "
-        "on its OWN line or its OWN message bubble, that is a hard "
-        "rule_violation: score it 5 or LOWER and add the flag wall_of_text. "
-        "Putting each option on its own line/bubble is CORRECT and must NEVER "
-        "be penalised as too_verbose. Do NOT reward a crammed reply for being "
-        "short.")
+        "The draft above is shown as its real WhatsApp message bubbles (each "
+        "[bubble N] is a SEPARATE message). Splitting options/links/yachts/"
+        "add-ons across separate bubbles OR onto their OWN line is CORRECT and "
+        "must NEVER be penalised as too_verbose or flagged wall_of_text. ONLY "
+        "flag wall_of_text (a hard rule_violation: score it 5 or LOWER) when "
+        "MORE THAN 2 options are crammed inline, comma-separated, or glued "
+        "together WITHIN a single bubble/paragraph. Do NOT reward a crammed "
+        "reply for being short.")
     parts.append(
         "\n--- RESPOND NOW ---\n"
         "Output ONLY one JSON object — no markdown fences, no commentary:\n"

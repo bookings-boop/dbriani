@@ -5046,6 +5046,12 @@ def handle_quality_check(payload, send):
     if not payload.get("current_draft"):
         send(400, {"ok": False, "error": "current_draft is required"})
         return
+    # current_draft may arrive as a bubble LIST (2A) or a legacy string.
+    # build_quality_query handles the list (per-bubble markers); the price
+    # guard + telemetry hash/text below need a plain string.
+    _cd = payload.get("current_draft")
+    _draft_text = ("\n\n".join(str(m) for m in _cd)
+                   if isinstance(_cd, (list, tuple)) else str(_cd or ""))
     try:
         # interactive, NOT background: the operator is actively waiting for the
         # draft/refine/regen card this badge goes on. Background waits for the
@@ -5085,7 +5091,7 @@ def handle_quality_check(payload, send):
     # yachts/items are checked, so a legit quote is never blocked.
     try:
         from server import validate_draft_prices
-        _pm = validate_draft_prices(payload.get("current_draft") or "")
+        _pm = validate_draft_prices(_draft_text)
         if _pm:
             score = min(score, 3)
             flags = (["price mismatch: " + _pm[0]] + flags)[:3]
@@ -5126,15 +5132,13 @@ def handle_quality_check(payload, send):
             _sh_did = (payload.get("draft_id") or "").strip()
             if not _sh_did:
                 import hashlib as _hl
-                _dh = _hl.md5(
-                    (payload.get("current_draft") or "").encode()
-                ).hexdigest()[:10]
+                _dh = _hl.md5(_draft_text.encode()).hexdigest()[:10]
                 _sh_did = "score:" + _sh_cid + ":" + _dh
             _draft_log_write(_sh_did, customer_id=_sh_cid, mode=_mode,
                              score=score, score_flags=", ".join(flags),
                              score_summary=summary, outcome=_wd,
                              is_shadow=_is_shadow,
-                             draft_text=payload.get("current_draft"))
+                             draft_text=_draft_text)
             log(f"score-log {_sh_cid} score={score} mode={_mode} "
                 + ("SHADOW would=" + _wd + " (NOT sent)" if _is_shadow
                    else "(badge telemetry)"))
@@ -5234,18 +5238,34 @@ def _gate_loop(full_system, history, name, phone, user_message, cid,
                 continue
             break
         try:
+            # 2A: pass the bubble LIST (not a joined blob) so the scorer judges
+            # real WhatsApp message structure (wall_of_text).
             score, flags, summary = _anthropic_score(build_quality_query({
                 "system_prompt": score_system, "customer_name": name,
                 "history": history, "incoming_message": user_message,
-                "current_draft": "\n\n".join(msgs), "customer_id": cid}))
+                "current_draft": msgs, "customer_id": cid}))
         except Exception:
             score, flags, summary = 0, [], ""
+        # 3A: deterministic price guard inside the gate (the Anthropic scorer
+        # doesn't catch fabricated prices). Cap below threshold AND feed the
+        # CORRECT catalog price into the next regen hint.
+        price_hint = ""
+        try:
+            from server import validate_draft_prices, _price_correction_hint
+            _pm = validate_draft_prices("\n\n".join(msgs))
+            if _pm:
+                score = min(score, 3)
+                flags = (["price mismatch"] + list(flags))[:3]
+                price_hint = _price_correction_hint(_pm)
+        except Exception:
+            pass
         if best is None or score > best["score"]:
             best = {"messages": msgs, "notes": notes, "score": score,
                     "flags": flags, "summary": summary}
         if override or score >= threshold:
             break
-        hint = (f"Your previous draft scored {score}/10. Produce a clearly "
+        hint = ((price_hint + " ") if price_hint else "") + (
+                f"Your previous draft scored {score}/10. Produce a clearly "
                 f"BETTER draft that fixes: "
                 f"{', '.join(str(f) for f in flags) or summary}. Professional, "
                 "no emoji unless the customer used emoji, no hype opener, answer "
@@ -5305,18 +5325,32 @@ def handle_draft_gated(payload, send):
             # NOT the slow local Hermes CLI: 3 sequential ~30-60s CLI scores on
             # a 2-vCPU box made regen crawl and hit the n8n 150s timeout. Same
             # (score, flags, summary) contract. (Bug 2 slow-regen, 2026-06-02.)
+            # 2A: pass the bubble LIST so the scorer judges real message
+            # structure, not a flattened blob.
             score, flags, summary = _anthropic_score(build_quality_query({
                 "system_prompt": sp, "customer_name": name, "history": hist,
-                "incoming_message": umsg, "current_draft": "\n\n".join(msgs),
+                "incoming_message": umsg, "current_draft": msgs,
                 "customer_id": cid}))
         except Exception:
             score, flags, summary = 0, [], ""
+        # 3A: deterministic price guard + ground-truth correction into regen.
+        price_hint = ""
+        try:
+            from server import validate_draft_prices, _price_correction_hint
+            _pm = validate_draft_prices("\n\n".join(msgs))
+            if _pm:
+                score = min(score, 3)
+                flags = (["price mismatch"] + list(flags))[:3]
+                price_hint = _price_correction_hint(_pm)
+        except Exception:
+            pass
         if best is None or score > best["score"]:
             best = {"messages": msgs, "notes": notes, "score": score,
                     "flags": flags, "summary": summary}
         if override or score >= threshold:
             break
-        hint = (f"Your previous draft scored {score}/10. Produce a clearly "
+        hint = ((price_hint + " ") if price_hint else "") + (
+                f"Your previous draft scored {score}/10. Produce a clearly "
                 f"BETTER draft that fixes these problems: "
                 f"{', '.join(str(f) for f in flags) or summary}. Professional, "
                 "no emoji unless the customer used emoji, no hype opener, answer "
@@ -5331,12 +5365,28 @@ def handle_draft_gated(payload, send):
         best["messages"], _ = sanitize_draft_messages(best["messages"])
     except Exception:
         pass
+    # 1B (2026-06-06): score the ORIGINAL draft with the SAME Anthropic scorer
+    # so n8n's swap guard compares like-for-like (Anthropic-vs-Anthropic) rather
+    # than this gated score vs the local-Hermes /quality-check badge. Backward-
+    # compatible: original_score is None (n8n then falls back to the old score)
+    # when no original draft was passed. Accepts a bubble list or a string.
+    original_score = None
+    orig = payload.get("original_messages") or payload.get("original_draft")
+    if orig:
+        try:
+            original_score, _of, _osum = _anthropic_score(build_quality_query({
+                "system_prompt": sp, "customer_name": name, "history": hist,
+                "incoming_message": umsg, "current_draft": orig,
+                "customer_id": cid}))
+        except Exception:
+            original_score = None
     log(f"draft-gated cid={cid} score={best['score']} attempts={attempts} "
-        f"capped={best['score'] < threshold}")
+        f"capped={best['score'] < threshold} original_score={original_score}")
     send(200, {"ok": True, "messages": best["messages"],
                "notes_for_zayn": best["notes"], "score": best["score"],
                "flags": best["flags"], "summary": best["summary"],
                "attempts": attempts, "capped": best["score"] < threshold,
+               "original_score": original_score,
                "override": bool(override)})
 
 
