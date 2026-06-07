@@ -1394,7 +1394,7 @@ def handle_label_eval(payload, send):
         # 'thanks' / emoji) still must NOT reopen a closed lead.
         if previous_label in ("LOST", "DISREGARDED"):
             from labels import _is_reengage_enquiry
-            reopen = (_LABEL_RANK.get(applied, 0) < _LABEL_RANK[previous_label]
+            reopen = (_LABEL_RANK.get(target, 0) < _LABEL_RANK[previous_label]
                       and _is_reengage_enquiry(msg))
             if not reopen:
                 send(200, {
@@ -1407,8 +1407,24 @@ def handle_label_eval(payload, send):
                     "interrupt_required": False, "alert_text": None,
                 })
                 return
-            # genuine re-engagement → fall through; the transition reopens to
-            # `applied` (sticky guard won't block — confidence is 1.0).
+            # Genuine re-engagement: FORCE the reopen to the (un-dampened)
+            # target, bypassing the sticky-upward guard below — a returning
+            # customer's fresh enquiry must resurface even when the triggering
+            # signal's confidence was dampened by past operator corrections
+            # (e.g. money_mentioned off a date number kept Kevin LOST). 2026-06-07.
+            apply_label_transition(
+                cid, previous_label, target, signal="reengage_reopen",
+                evidence=(ev or msg[:120]),
+                message_count=int(row.get("message_count") or 0),
+                created_by="system:reengage")
+            send(200, {
+                "ok": True, "customer_id": cid,
+                "label": target, "previous_label": previous_label,
+                "changed": True, "signal": "reengage_reopen", "confidence": 1.0,
+                "evidence": "returning customer — fresh enquiry reopened terminal lead",
+                "interrupt_required": False, "alert_text": None,
+            })
+            return
 
         # STICKY-UPWARD guard. Prevents a single weak/dampened signal
         # from demoting a customer who was previously HOT (or higher)
