@@ -106,6 +106,7 @@ from routes import (  # noqa: F401
     handle_lead_analyze_disregard,
     handle_learn,
     handle_list_files,
+    handle_name,
     handle_nomod_webhook,
     handle_payment_link,
     handle_pipeline_analyze,
@@ -2099,6 +2100,21 @@ def _upsert_facts_sql(customer_id, name, facts):
     )
 
 
+def _name_update_sql(customer_id, new_name, reason="manual:/name"):
+    """Build the SQL for an operator manual rename that LOCKS the name
+    (name-lock, migration 009) so the per-message fact-extraction can't revert
+    it (root-caused 2026-06-06: customer 'Zayn' kept reverting). Pure (no DB)
+    so it is unit-tested (test_name_command.py)."""
+    return (
+        "UPDATE customer_facts SET "
+        "name = " + _lit(new_name) + ", "
+        "name_locked = true, "
+        "name_lock_reason = " + _lit(reason) + ", "
+        "updated_at = now() "
+        "WHERE customer_id = " + _lit(customer_id)
+    )
+
+
 def upsert_customer_facts(customer_id, name, facts):
     """UPSERT a customer_facts row. INSERT -> message_count 1; ON CONFLICT ->
     message_count = existing + 1 (atomic in SQL — no read-modify-write race).
@@ -3744,6 +3760,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/hourly-sweep",
                              "/review", "/draft-followup",
                              "/info", "/assist", "/label", "/snooze",
+                             "/name",
                              "/queue", "/reconcile-identities",
                              "/followup-action",
                              "/refresh-facts",
@@ -3850,6 +3867,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_label(payload, self._send)
         elif self.path == "/snooze":
             handle_snooze(payload, self._send)
+        elif self.path == "/name":
+            handle_name(payload, self._send)
         elif self.path == "/queue":
             handle_queue(payload, self._send)
         elif self.path == "/followup-action":

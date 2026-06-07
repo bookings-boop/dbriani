@@ -1487,6 +1487,46 @@ def handle_snooze(payload, send):
 
 # (moved to routes.py — handle_<name>(payload, self._send))
 
+def handle_name(payload, send):
+    """POST /name — operator manual rename. Sets the customer's name AND LOCKS
+    it (name-lock, migration 009) so the per-message fact-extraction can't
+    revert it (root-caused 2026-06-06: 'Zayn' kept reverting). Lookup via
+    resolve_target (customer_id or current name); the new value is in
+    payload['new_name']."""
+    from server import _name_update_sql, get_current_label_row
+    new_name = (payload.get("new_name") or "").strip()
+    if not new_name:
+        send(200, {"ok": False, "error": "new_name required",
+                         "telegram_text": "⚠️ Usage: /name <customer> <new name>"})
+        return
+    cid, err = resolve_target(payload)
+    if not cid:
+        send(200, {"ok": False, "error": err, "telegram_text": err})
+        return
+    try:
+        row = get_current_label_row(cid)
+        if row is None:
+            send(200, {"ok": False, "error": "customer not found",
+                             "telegram_text": "⚠️ Customer not found."})
+            return
+        old = row.get("name") or cid
+        _o, e2 = _psql(_name_update_sql(cid, new_name))
+        if e2:
+            log("name update err:", e2)
+            send(200, {"ok": False, "degraded": True, "error": str(e2),
+                             "telegram_text": "⚠️ Rename failed."})
+            return
+        send(200, {
+            "ok": True, "customer_id": cid,
+            "previous_name": old, "name": new_name,
+            "telegram_text": f"✏️ {old} → *{new_name}* (name locked 🔒)",
+        })
+    except Exception as e:
+        log("name ERROR:", repr(e))
+        send(200, {"ok": False, "degraded": True, "error": str(e),
+                         "telegram_text": "⚠️ Rename failed."})
+
+
 def handle_conversation_state(payload, send):
     """POST /conversation-state — silent timestamp updater."""
     from server import upsert_conversation_state
