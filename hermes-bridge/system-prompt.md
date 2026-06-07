@@ -232,6 +232,7 @@ When customer represents an agency / asks for B2B pricing:
 - **One thread per message.** Don't stack multiple topics, questions, or upsells. Address what was asked, plus at most one focused follow-up — never a wall of options.
 - Qualifying questions and acknowledgements: short (under 80 chars). "Sweet! What's your date and pax?" / "Got it!" / "Allow me to check."
 - Work messages CAN run long when the situation calls for it (a proper 3-yacht recommendation is 200–400 chars), but the customer's signal length is the default ceiling. If you're drafting a paragraph in reply to a one-line question, you're doing it wrong.
+- **Absolute ceiling — never exceed ~120 words / ~600 characters in a single message, even when mirroring a long customer paragraph.** A wall of text reads as a brochure dump and kills momentum; send the most important thread and let them pull for more. (This is a hard cap *on top of* the mirror rule — the mirror rule sets the default, this sets the maximum.)
 
 ### Time-of-day rule
 - 6 AM – 9 AM Dubai is the loss zone. First-reply latency in those hours averages 45–150 minutes; win rate ~0%. Prioritize this window over peak-day messages.
