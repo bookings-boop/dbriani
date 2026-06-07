@@ -162,6 +162,88 @@ def test_confirmed_future_event_owed_stays_awaiting():
     assert _awaiting_section_for(row, 5000) == "AWAITING_REPLY"
 
 
+# --- H1: stale RELATIVE-date CONFIRMED must not sit at the top of /review -----
+# Émilie 2026-06-07: dates='tomorrow 4–7 PM' frozen ~10 days ago never parses to
+# a calendar date, so event_passed() can't see it and the old guard let her win
+# the AWAITING_REPLY top slot at score 0. The broadened guard (stale-relative OR
+# score-0 'no open sale') keeps her in the CONFIRMED tier, while a FRESH relative
+# date (Antonio's 'tomorrow', set an hour ago) stays in AWAITING.
+def test_confirmed_stale_relative_date_leaves_awaiting():
+    row = _r("CONFIRMED", importance_score=0, dates="tomorrow 4–7 PM",
+             last_customer_message_at_seconds=10 * 86400,  # frozen ~10d ago
+             last_operator_reply_at_seconds=11 * 86400,     # owed
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=5 * 86400)
+    assert _awaiting_section_for(row, 5000) == ""
+
+
+def test_confirmed_fresh_relative_date_stays_awaiting():
+    # Antonio: fresh relative date (<1 day old), high score, owed → AWAITING.
+    row = _r("CONFIRMED", importance_score=90, dates="tomorrow",
+             last_customer_message_at_seconds=3600,     # fresh (<1 day)
+             last_operator_reply_at_seconds=7200,        # owed
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=1800)
+    assert _awaiting_section_for(row, 5000) == "AWAITING_REPLY"
+
+
+def test_confirmed_score_zero_leaves_awaiting():
+    # 'no open sale' (score 0) CONFIRMED with NO concrete future date → not a
+    # live AWAITING lead even when owed (won/closed booking). A concrete FUTURE
+    # date still overrides this (see test_confirmed_future_event_owed_stays_awaiting).
+    row = _r("CONFIRMED", importance_score=0, dates="",
+             last_customer_message_at_seconds=3600,
+             last_operator_reply_at_seconds=7200,
+             last_analysis_signal="confirmed_terminal",
+             last_analyzed_at_seconds=1800)
+    assert _awaiting_section_for(row, 5000) == ""
+
+
+# --- H4: LOST is a VISIBLE terminal label, never "not a customer" -------------
+def test_lost_label_renders_own_section():
+    # A LOST lead (legit prospect we didn't win — price/competitor/timing/ghost)
+    # has importance_score 0 and usually a passed date, which previously routed
+    # it into the 💤 NO ACTIVE SALE / "not a customer" bucket (for vendor/spam).
+    # It must render in its OWN 💔 LOST section → return '' (own label section).
+    row = _r("LOST", importance_score=0, dates="Jan 1 2020",
+             last_customer_message_at_seconds=900000,
+             last_operator_reply_at_seconds=3600)
+    assert _awaiting_section_for(row, 1) == ""
+
+
+def test_scam_label_renders_own_section():
+    # H5: a SCAM lead (crypto/fraud) is terminal-VISIBLE — it renders in its OWN
+    # 🚫 SCAM section, never diverted into the 💤 NO ACTIVE SALE / "not a
+    # customer" bucket (its score-0 + passed date would otherwise route it
+    # there). Returning '' falls through to sections['SCAM'] in render_review.
+    row = _r("SCAM", importance_score=0, dates="Jan 1 2020",
+             last_customer_message_at_seconds=900000,
+             last_operator_reply_at_seconds=None)
+    assert _awaiting_section_for(row, 1) == ""
+
+
+def test_unreliable_zero_score_not_routed_to_no_active_sale():
+    # H8: a lead with REAL history (157 msgs) that the analyzer scored 0 while
+    # claiming "first contact / no prior messages" ran on incomplete history —
+    # the 0-score must NOT bury it in NO ACTIVE SALE. The unreliable verdict is
+    # not trusted for routing → render in its own (HOT) tier ('').
+    row = _r("HOT", importance_score=0, message_count=157,
+             importance_reasoning="First contact, no prior messages — date passed",
+             last_customer_message_at_seconds=1000,
+             last_operator_reply_at_seconds=None)
+    assert _awaiting_section_for(row, 800) == ""
+
+
+def test_reliable_zero_score_still_routes_to_no_active_sale():
+    # Guard: a genuine score-0 supplier (reasoning does NOT claim empty history)
+    # is STILL routed to NO ACTIVE SALE — the unreliable carve-out is narrow.
+    row = _r("NEW", importance_score=0, message_count=20,
+             importance_reasoning="Alma is a supplier (Fruitful Day), no booking intent",
+             last_customer_message_at_seconds=1000,
+             last_operator_reply_at_seconds=None)
+    assert _awaiting_section_for(row, 300) == "NOT_A_CUSTOMER"
+
+
 def test_non_owe_terminal_lead_is_untouched():
     # not owed (we replied more recently than the customer) + terminal -> stays
     # in its own tier; the fix only diverts OWED leads (scope guard).

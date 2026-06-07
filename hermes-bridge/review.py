@@ -129,6 +129,19 @@ def _awaiting_section_for(row, score):
                        terminal verdict is re-engaging and stays owed.
     """
     label = row.get("label") or "NEW"
+    # Terminal-VISIBLE labels render in their OWN section, never diverted into
+    # the 💤 NO ACTIVE SALE / "not a customer" bucket. LOST is a legit prospect
+    # we lost (price / competitor / timing / ghost) — distinct from DISREGARDED
+    # vendor/spam — and has its own 💔 LOST section (operator 2026-06-06: LOST
+    # leads were mis-rendered as "not a customer" because their score-0 + passed
+    # date routed them to NOT_A_CUSTOMER). Returning '' falls to sections[LOST].
+    if label == "LOST":
+        return ""
+    # SCAM is terminal-VISIBLE — render in its OWN 🚫 SCAM section (operator
+    # audit), never diverted into the 💤 NO ACTIVE SALE bucket (its score-0 +
+    # passed date would otherwise route it there). H5, 2026-06-07.
+    if label == "SCAM":
+        return ""
     if label == "CONFIRMED":
         # A paid/won booking normally renders in CONFIRMED. BUT a CONFIRMED
         # customer with an UNANSWERED new message has an ACTIVE post-booking
@@ -136,13 +149,26 @@ def _awaiting_section_for(row, score):
         # sit buried at the bottom CONFIRMED tier — surface it in AWAITING_REPLY
         # (Antonio 2026-06-06: a paid Jun-20 lead arranging a Saturday viewing
         # was invisible). A CONFIRMED lead we've already replied to stays put.
-        # BUT a CONFIRMED booking whose event date has PASSED is a WON, completed
-        # deal — a stale pre-trip message must not resurrect it to the top
-        # AWAITING section (Emilie 2026-06-06: May-28 event, score 0, kept #1 by
-        # a May-27 message). Passed-event CONFIRMED stays in its CONFIRMED tier.
-        return ("AWAITING_REPLY"
-                if (_owes_reply(row) and not _booking_date_passed(row))
-                else "")
+        # BUT a CONFIRMED booking whose event has PASSED — including a STALE
+        # RELATIVE date ('tomorrow 4–7 PM' frozen ~10d ago) that event_passed()
+        # can't see — or whose score is 0 ('no open sale') is a WON / closed
+        # deal; a stale pre-trip message must not resurrect it to the top
+        # AWAITING section (Émilie 2026-06-07: 'tomorrow', score 0, kept #1).
+        if not _owes_reply(row):
+            return ""
+        # A concrete FUTURE booking date is always an active thread — never
+        # suppress it (guards an Antonio-style lead whose convertibility score
+        # was wrongly clobbered to 0 by the analyzer).
+        if _booking_date_is_future(row.get("dates")):
+            return "AWAITING_REPLY"
+        _imp = row.get("importance_score")
+        try:
+            _no_open_sale = (_imp is not None and int(_imp) == 0)
+        except (TypeError, ValueError):
+            _no_open_sale = False
+        if _booking_likely_passed(row) or _no_open_sale:
+            return ""
+        return "AWAITING_REPLY"
     _cs = row.get("last_customer_message_at_seconds")
     _rs = row.get("last_operator_reply_at_seconds")
     _ns = row.get("last_nudge_drafted_at_seconds")
@@ -153,6 +179,12 @@ def _awaiting_section_for(row, score):
     try:
         _imp_zero = (_imp is not None and int(_imp) == 0)
     except (TypeError, ValueError):
+        _imp_zero = False
+    # H8: don't let an UNRELIABLE 0-score (analyzer ran on missing history —
+    # "first contact" on a 157-msg lead) bury a real lead in NO ACTIVE SALE.
+    # The 0 isn't trusted for routing; the lead stays in its own tier (flagged
+    # "analysis unreliable" in the card render).
+    if _imp_zero and _analysis_unreliable_for_render(row):
         _imp_zero = False
     _sig = (row.get("last_analysis_signal") or "").strip()
     _anz = row.get("last_analyzed_at_seconds")
@@ -194,8 +226,9 @@ def _no_sale_reason(row):
     score-0 fallback. Pure."""
     sig = (row.get("last_analysis_signal") or "").strip()
     # Detect a passed date from the analyzer signal OR (more reliably) the
-    # actual parsed booking date — the signal goes stale on these leads.
-    if sig == "date_passed" or _booking_date_passed(row):
+    # actual parsed booking date / a stale relative date — the signal goes
+    # stale on these leads and a relative date never parses.
+    if sig == "date_passed" or _booking_likely_passed(row):
         # #5 graceful close (operator 2026-06-01): once we've SENT a re-engage
         # check-in — i.e. we replied at/after the customer's last message and
         # they haven't come back — show the graceful-exit state so the operator
@@ -378,6 +411,39 @@ def _booking_urgency_bonus(dates_str):
 from labels import (  # noqa: E402
     _parse_booking_date, _safe_display_date, _followup_note, _close_bucket,
     _booking_date_is_future)
+# First live consumer of the deterministic analysis guardrail: a stored RELATIVE
+# date ('tomorrow' / 'this weekend' / 'Friday') frozen days ago never resolves to
+# a calendar date, so event_passed() can't see it — is_stale_relative_date does.
+from analysis_guard import (  # noqa: E402
+    is_analysis_unreliable, is_stale_relative_date,
+)
+
+
+def _analysis_unreliable_for_render(row):
+    """is_analysis_unreliable at RENDER time. The raw WAHA history string the
+    analyzer used isn't available here, so pass a non-triggering history length
+    (sentinel) and gate purely on branch 1 — the analyzer claims 'first contact
+    / no prior messages' yet the lead has real message_count (>=4). Émilie: 157
+    msgs but 'first contact', scored a paid booking 0/100. Pure; None-safe."""
+    return is_analysis_unreliable(
+        row.get("message_count"), 9999, row.get("importance_reasoning"))
+
+
+def _booking_likely_passed(row):
+    """True when the lead's booking is effectively in the PAST — either the
+    stored date PARSES to a past date (event_passed), OR it's a STALE RELATIVE
+    date ('tomorrow 4–7 PM') captured >=1 day ago that never anchored to a
+    calendar date (Émilie 2026-06-07: 'tomorrow' frozen ~10d ago read by the
+    analyzer as 'opportunity gone'). The age proxy is when the customer last
+    messaged (last_customer_message_at_seconds/86400). Pure; None-safe."""
+    if _booking_date_passed(row):
+        return True
+    _cs = row.get("last_customer_message_at_seconds")
+    try:
+        _age_days = float(_cs) / 86400.0 if isinstance(_cs, (int, float)) else 0.0
+    except (TypeError, ValueError):
+        _age_days = 0.0
+    return is_stale_relative_date(row.get("dates"), _age_days)
 
 
 def score_lead(row, now_dt):
@@ -404,6 +470,10 @@ def score_lead(row, now_dt):
     # LOST is terminal but VISIBLE (its own 💔 section) — small positive so it
     # never falls into the negative pause_tail, and sorts last among the shown.
     if label == "LOST":
+        return 1
+    # SCAM is terminal but VISIBLE (its own 🚫 section for operator audit) —
+    # small positive so it stays out of the negative pause_tail. H5.
+    if label == "SCAM":
         return 1
     # CONFIRMED is a terminal/success state — short-circuit before any urgency
     # or damping math can take the score negative and dump them into the
@@ -605,6 +675,29 @@ def _expected_value(score, row):
     return base * like
 
 
+# Engagement/readiness thresholds for the visibility co-weight (H2 Zayn).
+_NEAR_READY_MSG_COUNT = int(os.environ.get("REVIEW_NEAR_READY_MSGS", "20"))
+_NEAR_READY_IMPORTANCE = int(os.environ.get("REVIEW_NEAR_READY_IMP", "40"))
+
+
+def _is_near_ready(row):
+    """True for an ENGAGED, near-ready lead — a high message volume, a concrete
+    FUTURE booking date, or a strong analyzer importance. Such a lead must
+    co-weight ABOVE raw yacht hourly-rate so it isn't buried below a capped tier
+    by low-intent 'whale' leads the customer only browsed (Zayn 2026-06-07: 43
+    messages, Jun-20, importance 48, sat ~15th of 21 because his headline yacht
+    wasn't in the rate table — invisible in the default /review). Pure."""
+    try:
+        mc = int(row.get("message_count") or 0)
+    except (TypeError, ValueError):
+        mc = 0
+    imp = row.get("importance_score")
+    imp_ok = (isinstance(imp, int) and not isinstance(imp, bool)
+              and imp >= _NEAR_READY_IMPORTANCE)
+    return (mc >= _NEAR_READY_MSG_COUNT or imp_ok
+            or bool(_booking_date_is_future(row.get("dates"))))
+
+
 def render_review(scored, totals, mode="ondemand", uncap=False):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -658,6 +751,13 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
         "LOST":            {"items": [], "cap": 15,
                             "header": "💔 LOST — legit prospect not won · investigate / win-back",
                             "emoji": "💔"},
+        # SCAM — crypto / fraud / phishing. Its OWN visible bucket so the
+        # operator can audit them, distinct from DISREGARDED (hidden) and from
+        # LOST/NOT_A_CUSTOMER. Info-only card (no draft/snooze) so a scammer is
+        # never accidentally engaged. H5, 2026-06-07.
+        "SCAM":            {"items": [], "cap": 15,
+                            "header": "🚫 SCAM — fraud / crypto · do not engage",
+                            "emoji": "🚫"},
     }
     pause_tail = []
     seen_ids = []
@@ -745,9 +845,16 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
     # Owed-reply leads (customer waiting on US) still float to the TOP of their
     # tier so an unanswered customer is NEVER buried in a capped tier's overflow
     # (2026-06-02). Then expected-value desc, then score (urgency tiebreak).
+    # Ranking layers (highest first): (1) owed-reply leads float to the top of
+    # their tier (an unanswered customer is the most expensive to ignore);
+    # (2) ENGAGED/near-ready leads co-weight ABOVE raw yacht-rate so a 43-msg,
+    # future-dated, high-importance lead on a mid-rate yacht is never buried
+    # below the cap by low-intent whales (H2 Zayn 2026-06-07); (3) expected
+    # value desc; (4) score (urgency tiebreak).
     def _value_key(item):
         r = item[1]
         return (1 if _owes_reply(r) else 0,
+                1 if _is_near_ready(r) else 0,
                 _expected_value(item[0], r), item[0])
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
                 "WARM", "COLD", "CONFIRMED", "NEW"):
@@ -769,9 +876,9 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                   ("HOT", "🔥 hot"), ("NEEDS_ATTENTION", "⚠️ need-attn"),
                   ("WARM", "♨️ warm"), ("NEW", "🌱 new"), ("COLD", "❄️ cold"),
                   ("CONFIRMED", "✅ confirmed"), ("NOT_A_CUSTOMER", "💤 no-sale"),
-                  ("LOST", "💔 lost")]
+                  ("LOST", "💔 lost"), ("SCAM", "🚫 scam")]
     _active_total = sum(len(sections[_k]["items"]) for _k, _ in _hdr_tiers
-                        if _k not in ("NOT_A_CUSTOMER", "LOST"))
+                        if _k not in ("NOT_A_CUSTOMER", "LOST", "SCAM"))
     _breakdown = " · ".join(f"{len(sections[_k]['items'])} {_lbl}"
                             for _k, _lbl in _hdr_tiers if sections[_k]["items"])
     _disregarded_n = sum(1 for _s, _r in scored
@@ -815,7 +922,7 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
 
     for label_key in ("AWAITING_REPLY", "WAITING_FOR_PAYMENT", "HOT",
                       "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED",
-                      "NOT_A_CUSTOMER", "LOST"):
+                      "NOT_A_CUSTOMER", "LOST", "SCAM"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -861,12 +968,24 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                     # Booked & paid. A PAST event (Émilie/Saif, 2026-06-02)
                     # must NOT show the open-sale score or 'confirm logistics/
                     # upsell' guidance — render a won/post-event nurture line.
-                    # Upcoming bookings keep the logistics/upsell guidance.
+                    # _booking_likely_passed also catches a STALE RELATIVE date
+                    # ('tomorrow' frozen days ago) that event_passed() misses
+                    # (Émilie 2026-06-07). Upcoming bookings keep the logistics/
+                    # upsell guidance.
                     from labels import event_passed as _event_passed
-                    if _event_passed(row.get("dates")):
-                        imp_bits = ("\n🏆 *won* — _event complete · thank / ask "
-                                    "for review · nurture for repeat or "
-                                    "referral (no upsell)_")
+                    if _booking_likely_passed(row):
+                        if _event_passed(row.get("dates")):
+                            imp_bits = ("\n🏆 *won* — _event complete · thank / "
+                                        "ask for review · nurture for repeat or "
+                                        "referral (no upsell)_")
+                        else:
+                            # Stale relative date — the trip most likely already
+                            # happened but the date never resolved; don't push an
+                            # upsell, reconfirm the actual date instead.
+                            imp_bits = ("\n🏆 *won* — _booked & paid · stored date "
+                                        "is relative & stale — reconfirm the "
+                                        "actual date with the guest (likely "
+                                        "already sailed; no active upsell)_")
                     else:
                         # Show the booking at a glance (operator 2026-06-06:
                         # "confirmed but timing / what he paid for / how much
@@ -892,6 +1011,14 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                             + _scope_change_hint(row))
                 else:
                     imp_bits = f"\n🧠 Hermes: *{imp}/100*"
+                    # H8: the analysis ran on missing/empty history (analyzer
+                    # claims 'first contact' on a lead with real msgs) — FLAG it
+                    # instead of trusting a 0/LOST verdict. Suppress the (stale,
+                    # likely-wrong) suggestion below so the operator verifies.
+                    _unreliable = _analysis_unreliable_for_render(row)
+                    if _unreliable:
+                        imp_bits += (" — _⚠️ analysis unreliable — verify "
+                                     "(history incomplete)_")
                     # STALENESS GUARD (2026-05-29): the cached
                     # suggested_action/reasoning comes from the last
                     # hermes_analyze_lead run. If the customer has
@@ -926,7 +1053,11 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                     sug = (row.get("suggested_action") or "").strip()
                     rea = (row.get("importance_reasoning") or "").strip()
                     why_used_sug = (sug and why == sug)
-                    if _we_last and _out_s is not None:
+                    if _unreliable:
+                        # Already flagged unreliable above — don't also surface
+                        # a (likely-wrong) suggestion off the bad analysis.
+                        pass
+                    elif _we_last and _out_s is not None:
                         # We ALREADY followed up and they haven't replied —
                         # never recommend another nudge (Shanebabu was
                         # told 'send nudge' 8 min after we messaged him,
@@ -972,14 +1103,20 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
             # ADDITIONAL to the temperature label. "needs your reply" = the
             # CUSTOMER messaged last (we owe them); "awaiting reply" = WE replied
             # last and are waiting on the customer's response.
-            _cs2 = row.get("last_customer_message_at_seconds")
+            # Single-source the "needs your reply" predicate through _owes_reply
+            # (H7): the badge must fire ONLY when the CUSTOMER messaged last (we
+            # owe a reply), never when WE replied last. seconds-ago fields are
+            # smaller = more recent, so "customer last" == customer_seconds <
+            # min(operator_reply, nudge) — exactly _owes_reply. When we replied
+            # last (an outbound exists but we don't owe) the badge reads
+            # "📨 awaiting reply"; otherwise no badge.
             _out2c = [s for s in (row.get("last_operator_reply_at_seconds"),
                                   row.get("last_nudge_drafted_at_seconds"))
                       if isinstance(s, (int, float))]
             _out2 = min(_out2c) if _out2c else None
-            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER", "LOST"):
+            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER", "LOST", "SCAM"):
                 _reply_badge = ""
-            elif isinstance(_cs2, (int, float)) and (_out2 is None or _cs2 < _out2):
+            elif _owes_reply(row):
                 _reply_badge = "🔴 needs your reply"
             elif _out2 is not None:
                 _reply_badge = "📨 awaiting reply"
@@ -1030,6 +1167,11 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                          "callback_data": f"disregard:{sid}"},
                     ],
                 ]
+            elif label_key == "SCAM":
+                # Info-only — a scammer must never be one tap from a drafted
+                # reply / snooze / disregard-close. Operator reopens via /label
+                # if it was mislabeled. H5, 2026-06-07.
+                kb = [[{"text": "ℹ️ Info", "callback_data": f"inf:{sid}"}]]
             else:
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is
                 # the destructive action, parked alone on row 2 next to Info
@@ -1109,6 +1251,12 @@ def _why_line(row, label_key, today=None):
         if event_passed(row.get("dates"), today=today):
             return ("event complete — thank the guest, ask for a review, "
                     "nurture for a repeat booking or referral")
+        # Stale RELATIVE date ('tomorrow' frozen days ago) — event_passed can't
+        # see it, but the trip has most likely already sailed (Émilie). Don't
+        # offer active-sale guidance; reconfirm the real date.
+        if _booking_likely_passed(row):
+            return ("booked & paid — stored date is relative & stale; "
+                    "reconfirm the actual date with the guest")
     # For CONFIRMED/WAITING customers, suggested_action from Hermes is
     # more accurate than the generic guidance (it knows what's already
     # been said in the chat). Skip generic notes if we have it.
@@ -1146,6 +1294,8 @@ def _why_line(row, label_key, today=None):
             notes.append("new conversation")
         elif label_key == "NOT_A_CUSTOMER":
             notes.append("no active sale")
+        elif label_key == "SCAM":
+            notes.append("fraud / crypto — do not engage")
         else:
             notes.append(label_key.lower().replace("_", " "))
     return " · ".join(notes)

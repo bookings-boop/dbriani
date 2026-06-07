@@ -58,6 +58,19 @@ def test_disregarded_above_confirmed():
     assert _LABEL_RANK["DISREGARDED"] > _LABEL_RANK["CONFIRMED"]
 
 
+def test_scam_in_labels_and_terminal_rank():
+    # SCAM (crypto/fraud — Mike) is a terminal state the analysis_guard
+    # close-router can produce, so it MUST be in LABELS (the /label endpoint
+    # rejects anything not in this set).
+    assert "SCAM" in LABELS
+    # SCAM is the STICKIEST terminal state — ranked ABOVE LOST (the previous
+    # top) so the sticky-upward guard can never bounce a scam lead back into
+    # the active queue on a stray HOT/WARM signal. Rank must stay collision-
+    # free (test_no_rank_collisions guards the whole map).
+    assert _LABEL_RANK["SCAM"] > _LABEL_RANK["LOST"]
+    assert _LABEL_RANK["SCAM"] > _LABEL_RANK["DISREGARDED"]
+
+
 def test_paused_not_in_rank():
     # PAUSED_* labels are handled by score_lead (-10000) — they don't
     # participate in the rank-based promotion ladder. Verify they're

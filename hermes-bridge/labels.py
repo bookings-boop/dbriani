@@ -35,6 +35,12 @@ LABELS = frozenset({
     # spam). Operator-set via `/label <name> LOST`; queryable for win-back /
     # post-mortem. Terminal: not auto-nudged; renders in its own 💔 LOST section.
     "LOST",
+    # SCAM — crypto / fraud / phishing / advance-fee (Mike: a "USDT refund scam"
+    # was scored LOST and surfaced as a 'legit prospect to win back'). The
+    # STICKIEST terminal state: never auto-nudged, never re-engaged, NEVER
+    # reopens (a returning scammer must not bounce back). Set by the disregard
+    # close-router (analysis_guard.reclassify_close_label) or `/label <name> SCAM`.
+    "SCAM",
 })
 
 # Label-priority ranking — higher = higher operator priority. Used by
@@ -53,9 +59,12 @@ _LABEL_RANK = {
     # LOST is terminal like DISREGARDED — the sticky-upward guard treats it as
     # terminal so a stray HOT/WARM signal won't bounce a lost lead back. Rank 8
     # (unique, above DISREGARDED): ranks must be collision-free
-    # (test_label_transition.test_no_rank_collisions) and LOST is the stickiest
-    # terminal state.
+    # (test_label_transition.test_no_rank_collisions).
     "LOST": 8,
+    # SCAM is the STICKIEST terminal rank (9, unique, above LOST=8) so the
+    # sticky-upward guard can NEVER bounce a fraud lead back into the active
+    # queue on a stray HOT/WARM signal — a returning scammer stays closed.
+    "SCAM": 9,
 }
 
 # Signals strong enough to demote regardless of confidence dampening.
@@ -457,31 +466,113 @@ def _close_label_for(reasoning):
     return "DISREGARDED" if bkt in ("NOT_A_CUSTOMER", "COMPLETED") else "LOST"
 
 
+# Forward-looking booking-intent tokens that on their OWN justify reopening a
+# closed lead. fix-group 2 (2026-06-07): 'pay'/'interest'/'party'/'birthday'/
+# 'anniversary'/'rate' were REMOVED as STANDALONE triggers (a post-event
+# 'happy birthday', a vendor pitch 'great rates', 'send payment via paypal'
+# were reopening DELIBERATELY-closed leads) — they now only count via
+# _REENGAGE_SOFT_RE, adjacent to a real booking term. ADDED (c) under-match
+# fixes: bare weekday names ('are you free Saturday?'), returning-customer
+# idioms ('come back', 'again', 'last time', 'are you free'), 'next month'.
 _REENGAGE_INTENT_RE = re.compile(
-    r"\b(?:avail|book|charter|yacht|rent|hire|cruise|sail|date|guest|pax|"
-    r"hour|pric|cost|quote|rate|budget|interest|enquir|inquir|how\s+much|"
+    r"\b(?:avail|book|charter|yacht|boat|rent|hire|cruise|sail|date|guest|pax|"
+    r"hour|pric|cost|quote|budget|enquir|inquir|how\s+much|"
     r"looking\s+for|do\s+you\s+have|can\s+(?:i|we|you)|tomorrow|"
-    r"this\s+(?:week|weekend|fri|sat|sun|mon|tue|wed|thu)|next\s+(?:week|weekend)|"
-    r"weekend|birthday|anniversary|party|deposit|pay|still\s+available|"
-    r"any\s+availability)", re.IGNORECASE)
+    r"this\s+(?:week|weekend|fri|sat|sun|mon|tue|wed|thu)|"
+    r"next\s+(?:week|weekend|month)|weekend|deposit|still\s+available|"
+    r"any\s+availability|come\s+back|again|last\s+time|"
+    r"(?:are\s+you|you|u)\s+free|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+    re.IGNORECASE)
+
+# Soft tokens — only re-engage when ALSO adjacent to a genuine booking/
+# availability term (a 'birthday party ON A YACHT' reopens; a bare 'happy
+# birthday', a vendor 'great rates', 'pay via paypal' do NOT). 'pay' is
+# word-bounded so 'paypal'/'payment' never trip it. fix-group 2 (b).
+_REENGAGE_SOFT_RE = re.compile(
+    r"\b(?:party|birthday|anniversary|interest\w*|rates?|pay)\b", re.IGNORECASE)
+_REENGAGE_BOOKING_TERM_RE = re.compile(
+    r"\b(?:avail|book|charter|yacht|boat|rent|hire|cruise|sail|deposit|"
+    r"trip|tour|guest|pax|water|tomorrow|weekend|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE)
+
+# Clear decline / booked-elsewhere — a message that DECLINES must NEVER reopen a
+# closed lead, even when it carries a booking word ('we already BOOKED
+# elsewhere'). Mirrors server._DECLINE_RE's intent but kept self-contained
+# (labels stays import-free of server). The trailing negative lookahead avoids
+# blocking an ENGAGED 'not interested IN the big one but book the small'.
+# fix-group 2 (b), 2026-06-07.
+_REENGAGE_DECLINE_RE = re.compile(
+    r"\b(?:no\s+thanks?|no\s+thank\s+you|not\s+interested|"
+    r"no\s+longer\s+(?:interested|needed?)|"
+    r"i'?ll\s+pass|we'?ll\s+pass|not\s+for\s+(?:us|me)|"
+    r"booked\s+(?:elsewhere|already)|already\s+booked|"
+    r"found\s+(?:another|someone(?:\s+else)?|one)|changed\s+my\s+mind)"
+    r"(?!\w)(?!\s+(?:but|in|about)\b)", re.IGNORECASE)
 
 
 def _is_reengage_enquiry(msg):
     """True when a message from a previously-CLOSED (LOST/DISREGARDED) customer
     is a GENUINE fresh booking enquiry that should REOPEN the lead — vs a stray
-    inbound (a bare phone/order number, 'thanks', 'ok', an emoji) that must NOT
-    reopen a terminal lead (audit #3's stray-reopen concern). Heuristic over
-    forward-looking booking-intent language. Errs toward reopening (a wrongly
-    reopened lead is operator-reversible; a buried returning customer is lost
-    revenue). Pure. 2026-06-07."""
+    inbound (a bare phone/order number, 'thanks', 'ok', an emoji), a post-event
+    thank-you, a vendor/payment pitch, or a DECLINE, none of which may reopen a
+    terminal lead (audit #3's stray-reopen concern; fix-group 2). Heuristic over
+    forward-looking booking-intent language. Pure. 2026-06-07."""
     m = (msg or "").strip()
     if len(m) < 6:          # 'ok', 'thanks', a bare token / emoji — not an enquiry
         return False
-    return bool(_REENGAGE_INTENT_RE.search(m))
+    # (b) A clear decline / booked-elsewhere NEVER reopens — even if it carries a
+    # booking word; don't rely on the label-rank coincidence to suppress it.
+    if _REENGAGE_DECLINE_RE.search(m):
+        return False
+    if _REENGAGE_INTENT_RE.search(m):
+        return True
+    # (b) A soft token (party/birthday/anniversary/interest/rate/pay) reopens
+    # ONLY when a real booking/availability term is also present.
+    if _REENGAGE_SOFT_RE.search(m) and _REENGAGE_BOOKING_TERM_RE.search(m):
+        return True
+    return False
+
+
+def _is_operator_close(created_by):
+    """fix-group 2 (a), 2026-06-07. True when a terminal LOST/DISREGARDED was set
+    by an OPERATOR (manual /label or a disregard button: created_by 'operator*')
+    rather than the auto-classifier/analyzer/cron. An operator's deliberate close
+    must STICK — a stray inbound matching the re-engage intent must NOT auto-
+    reopen it (the spammer-pitch-reopens-DISREGARDED hole). Pure; None/blank or a
+    system/auto/cron source → False (auto closes stay auto-reopenable; fail-OPEN
+    toward not burying a returning customer)."""
+    return (created_by or "").strip().lower().startswith("operator")
+
+
+# Signals strong/high-confidence enough to force a terminal reopen to the FULL
+# (un-dampened) target. Any OTHER reopen signal (e.g. a single dampened
+# money_mentioned) is capped at WARM so a previously-terminal lead isn't forced
+# straight to HOT off one weak/corrected signal. fix-group 2 (d), 2026-06-07.
+_HARD_REOPEN_SIGNALS = frozenset({"payment_confirmed_chat", "lets_do_it"})
+
+
+def reengage_reopen_target(target, signal, label_rank, cap="WARM"):
+    """fix-group 2 (d): given the raw compute_label target + signal, return the
+    label a forced terminal-reopen should actually land on. Hard/high-confidence
+    signals (payment_confirmed_chat, lets_do_it) reopen to the full target;
+    everything else is capped at `cap` (WARM) so a dampened money_mentioned can't
+    force DISREGARDED→HOT. Pure; ranks come from caller's _LABEL_RANK."""
+    if signal in _HARD_REOPEN_SIGNALS:
+        return target
+    if label_rank.get(target, 0) > label_rank.get(cap, 0):
+        return cap
+    return target
 
 
 _MERGE_STALE = ("LOST", "DISREGARDED", "COLD")
-_MERGE_ACTIVE = ("NEW", "WARM", "HOT", "NEEDS_ATTENTION")
+# fix-group 2 (review): NEW dropped — it is the DEFAULT label of any freshly
+# created row (compute_label 'new_window'), NOT evidence of a genuine enquiry.
+# Re-activating a closed/stale canonical merely because a default-NEW duplicate
+# exists reopened spam/closed leads on merge. Require a real accumulated signal
+# (WARM+) on the dup before a merge re-activates the canonical.
+_MERGE_ACTIVE = ("WARM", "HOT", "NEEDS_ATTENTION")
 
 
 def _merged_label(canon_label, dup_label):
@@ -1149,7 +1240,7 @@ def _should_cold_decay(silent_seconds, prev_label, cmsg_is_null,
     if cmsg_is_null:
         return False
     p = (prev_label or "")
-    if (p in ("COLD", "WAITING_FOR_PAYMENT", "LOST", "DISREGARDED")
+    if (p in ("COLD", "WAITING_FOR_PAYMENT", "LOST", "DISREGARDED", "SCAM")
             or p.startswith("PAUSED_")):
         return False
     return silent_seconds > threshold_days * 86400

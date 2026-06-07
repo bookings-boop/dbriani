@@ -15,6 +15,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from labels import _close_bucket, _close_label_for  # noqa: E402
+# reclassify_close_label is the function wired into handle_lead_analyze_disregard's
+# verdict=='close' branch (FIX-GROUP 3 / H5): a strict SUPERSET of _close_label_for
+# that adds the SCAM route on top of the existing DISREGARDED/LOST logic.
+from analysis_guard import reclassify_close_label  # noqa: E402
 
 
 def test_close_label_routes_real_losses_to_LOST():
@@ -87,6 +91,32 @@ def test_unclear_returns_none():
 def test_empty():
     assert _close_bucket("") == ("", "")
     assert _close_bucket(None) == ("", "")
+
+
+# --- H5: disregard close-routing now goes through reclassify_close_label -----
+def test_disregard_close_routes_crypto_scam_to_SCAM():
+    # Mike (244221151858858@lid): "Classic crypto refund scam ... requested USDT
+    # address ... textbook fraud." The OLD path (labels._close_label_for) had no
+    # scam route → it fell to LOST and Mike was shown as a 'legit prospect to win
+    # back'. The disregard close branch now uses reclassify_close_label → SCAM.
+    assert reclassify_close_label("Classic crypto USDT refund scam") == "SCAM"
+    assert reclassify_close_label(
+        "requested wallet address — textbook advance-fee fraud") == "SCAM"
+
+
+def test_reclassify_is_strict_superset_of_close_label_for():
+    # No regression: for every NON-scam reasoning the wired router must return
+    # the SAME terminal label as the previously-shipped _close_label_for
+    # (DISREGARDED for vendor/spam/completed, LOST for real-but-lost + unclear).
+    for r in ("vendor pitching marketing agency services",
+              "spam / wrong number",
+              "Rule 4: too expensive / out of budget",
+              "customer found another one, booked elsewhere",
+              "ghosted 14+ days after the quote, no reply",
+              "booking fully executed 8 days ago",
+              "",
+              "customer went quiet, unclear next step"):
+        assert reclassify_close_label(r) == _close_label_for(r), r
 
 
 if __name__ == "__main__":

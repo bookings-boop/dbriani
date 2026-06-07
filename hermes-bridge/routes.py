@@ -1230,7 +1230,7 @@ def handle_label(payload, send):
                          "telegram_text": f"⚠️ Bad label: {new_label!r}.\n"
                          "Allowed: NEW, WARM, HOT, NEEDS_ATTENTION, COLD, "
                          "WAITING_FOR_PAYMENT, CONFIRMED, DISREGARDED, LOST, "
-                         "PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
+                         "SCAM, PAUSED_SPAM, PAUSED_B2B, PAUSED_PERSONAL"})
         return
     cid, err = resolve_target(payload)
     if not cid:
@@ -1357,6 +1357,22 @@ def handle_label_eval(payload, send):
             })
             return
 
+        # SCAM is the stickiest terminal state — a returning scammer must NEVER
+        # auto-reopen (unlike LOST/DISREGARDED, which legitimately reopen on a
+        # genuine fresh enquiry below). Only an explicit operator /label can
+        # bring a SCAM lead back. H5, 2026-06-07.
+        if previous_label == "SCAM":
+            send(200, {
+                "ok": True, "customer_id": cid,
+                "label": "SCAM", "previous_label": "SCAM",
+                "changed": False, "signal": "terminal_scam",
+                "confidence": 1.0,
+                "evidence": "scam/fraud — terminal, never auto-reopens "
+                            "(/label to reopen)",
+                "interrupt_required": False, "alert_text": None,
+            })
+            return
+
         # (LOST/DISREGARDED terminal handling moved BELOW compute_label — they
         # now reopen on a genuine fresh enquiry, audit #3 refined 2026-06-07.)
 
@@ -1393,8 +1409,33 @@ def handle_label_eval(payload, send):
         # check availability" stayed invisible. A stray inbound (bare number /
         # 'thanks' / emoji) still must NOT reopen a closed lead.
         if previous_label in ("LOST", "DISREGARDED"):
-            from labels import _is_reengage_enquiry
-            reopen = (_LABEL_RANK.get(target, 0) < _LABEL_RANK[previous_label]
+            from labels import (
+                _is_operator_close,
+                _is_reengage_enquiry,
+                reengage_reopen_target,
+            )
+            # (a) An OPERATOR-set close (manual /label or a disregard button)
+            # must STICK — only an auto/analyzer/cron close is auto-reopenable.
+            # Read the most-recent history row that set this terminal label and
+            # check its source (fix-group 2 (a), 2026-06-07). Fail-OPEN: a
+            # missing/unknown source is treated as system (reopenable) so a
+            # returning customer isn't buried by a bookkeeping gap.
+            cid_h = cid.replace("'", "''")
+            prev_h = (previous_label or "").replace("'", "''")
+            hist_out, _herr = _psql(
+                "SELECT COALESCE(created_by,'system') "
+                "FROM customer_label_history "
+                f"WHERE customer_id = '{cid_h}' AND to_label = '{prev_h}' "
+                "ORDER BY id DESC LIMIT 1")
+            close_lines = (hist_out or "").strip().splitlines()
+            close_by = close_lines[0].strip() if close_lines else ""
+            operator_closed = _is_operator_close(close_by)
+            # (b) A message compute_label reads as a decline/service-mismatch must
+            # NEVER reopen — don't rely on the LABEL_RANK coincidence.
+            decline_sig = sig in ("declined", "service_mismatch")
+            reopen = (not operator_closed
+                      and not decline_sig
+                      and _LABEL_RANK.get(target, 0) < _LABEL_RANK[previous_label]
                       and _is_reengage_enquiry(msg))
             if not reopen:
                 send(200, {
@@ -1402,24 +1443,31 @@ def handle_label_eval(payload, send):
                     "label": previous_label, "previous_label": previous_label,
                     "changed": False, "signal": "terminal_closed",
                     "confidence": 1.0,
-                    "evidence": ("terminal label; no fresh-enquiry signal "
-                                 "(/label to reopen)"),
+                    "evidence": (
+                        "operator close — stays closed (/label to reopen)"
+                        if operator_closed
+                        else "terminal label; no fresh-enquiry signal "
+                             "(/label to reopen)"),
                     "interrupt_required": False, "alert_text": None,
                 })
                 return
-            # Genuine re-engagement: FORCE the reopen to the (un-dampened)
-            # target, bypassing the sticky-upward guard below — a returning
-            # customer's fresh enquiry must resurface even when the triggering
-            # signal's confidence was dampened by past operator corrections
-            # (e.g. money_mentioned off a date number kept Kevin LOST). 2026-06-07.
+            # Genuine re-engagement: FORCE the reopen past the sticky-upward
+            # guard below — a returning customer's fresh enquiry must resurface
+            # even when the triggering signal's confidence was dampened by past
+            # operator corrections (e.g. money_mentioned off a date number kept
+            # Kevin LOST). (d) But CAP the forced target at WARM unless the
+            # signal is a hard/high-confidence one (payment_confirmed_chat,
+            # lets_do_it) — a single dampened money_mentioned must NOT force
+            # DISREGARDED→HOT, ignoring every prior operator correction. 2026-06-07.
+            reopen_to = reengage_reopen_target(target, sig, _LABEL_RANK)
             apply_label_transition(
-                cid, previous_label, target, signal="reengage_reopen",
+                cid, previous_label, reopen_to, signal="reengage_reopen",
                 evidence=(ev or msg[:120]),
                 message_count=int(row.get("message_count") or 0),
                 created_by="system:reengage")
             send(200, {
                 "ok": True, "customer_id": cid,
-                "label": target, "previous_label": previous_label,
+                "label": reopen_to, "previous_label": previous_label,
                 "changed": True, "signal": "reengage_reopen", "confidence": 1.0,
                 "evidence": "returning customer — fresh enquiry reopened terminal lead",
                 "interrupt_required": False, "alert_text": None,
@@ -1830,7 +1878,7 @@ def handle_info(payload, send):
             "NEW": "🌱", "COLD": "❄️", "PAUSED_SPAM": "🚫",
             "PAUSED_B2B": "💼", "PAUSED_PERSONAL": "👤",
             "WAITING_FOR_PAYMENT": "⏳", "CONFIRMED": "✅",
-            "DISREGARDED": "🛑",
+            "DISREGARDED": "🛑", "LOST": "💔", "SCAM": "🚫",
         }.get(label, "•")
         # Use the last-4-digits fallback ("…4557") for unnamed customers
         # instead of "Unknown" — the operator can match the digits to the
@@ -3490,12 +3538,26 @@ def handle_reconcile_identities(payload, send):
         # enquiry (classified active) merged into their old @lid canonical must
         # not stay buried under its LOST/DISREGARDED/COLD label. Won/in-flight
         # canon (CONFIRMED/WAITING/PAUSED) is never downgraded.
-        from labels import _merged_label
+        from labels import _is_operator_close, _merged_label
         from server import apply_label_transition
         _cl = (facts.get(canon) or ("", ""))[0]
         _dl = (facts.get(dup) or ("", ""))[0]
         _bumped = _merged_label(_cl, _dl)
-        if _bumped and _bumped != _cl:
+        # fix-group 2 (review, 2026-06-07): an OPERATOR-set close on the canon
+        # (manual /label or a disregard button) must STICK — a merge must not
+        # silently re-activate a deliberately-closed canonical (mirrors the
+        # handle_label_eval reopen guard). Auto/analyzer closes stay reopenable.
+        _op_closed = False
+        if _bumped != _cl and _cl in ("LOST", "DISREGARDED"):
+            _ch_out, _cherr = _psql(
+                "SELECT COALESCE(created_by,'system') "
+                "FROM customer_label_history "
+                f"WHERE customer_id = {_lit(canon)} AND to_label = {_lit(_cl)} "
+                "ORDER BY id DESC LIMIT 1")
+            _ch_lines = (_ch_out or "").strip().splitlines()
+            _op_closed = _is_operator_close(
+                _ch_lines[0].strip() if _ch_lines else "")
+        if _bumped and _bumped != _cl and not _op_closed:
             apply_label_transition(
                 canon, _cl, _bumped, signal="merge_reactivate",
                 evidence=(f"returning customer — active dup {dup} ({_dl}) "
@@ -3707,7 +3769,17 @@ def handle_pipeline_analyze(payload, send):
                                     mo_age = float(_pp[1].strip())
                                 except ValueError:
                                     mo_age = None
-                        if _manual_override_protects(mo_sig, mo_age):
+                        # H8 (2026-06-07): an UNRELIABLE analysis (ran on
+                        # missing/empty WAHA history — e.g. analyzer says "first
+                        # contact" on a 157-msg lead, or fetched ~0 history for a
+                        # substantial lead) must NOT drive the label. Don't let a
+                        # 0-score off incomplete history auto-COLD a real lead.
+                        from analysis_guard import is_analysis_unreliable
+                        if is_analysis_unreliable(mc_, len(history_), reasoning_):
+                            log("pipeline-analyze demote BLOCKED "
+                                f"cid={cid} (analysis unreliable — incomplete "
+                                f"history; mc={mc_} hist_len={len(history_)})")
+                        elif _manual_override_protects(mo_sig, mo_age):
                             log("pipeline-analyze demote BLOCKED "
                                 f"cid={cid} (recent manual override "
                                 f"{mo_sig!r})")
@@ -3996,9 +4068,13 @@ def handle_lead_analyze_disregard(payload, send):
             # DISREGARDED — only a genuine non-customer (vendor/spam/wrong-number)
             # is DISREGARDED. Previously EVERY close → DISREGARDED, burying real
             # lost sales under the "not a customer" bucket (95 leads).
-            from labels import _close_label_for
-            _clabel = _close_label_for(reasoning)
-            _emoji = "🛑" if _clabel == "DISREGARDED" else "💔"
+            # H5 (2026-06-07): use analysis_guard.reclassify_close_label — a
+            # strict SUPERSET of labels._close_label_for that ALSO routes
+            # crypto/fraud reasoning to SCAM (Mike's "USDT refund scam" was
+            # scored LOST and shown as a 'legit prospect to win back').
+            from analysis_guard import reclassify_close_label
+            _clabel = reclassify_close_label(reasoning)
+            _emoji = {"DISREGARDED": "🛑", "SCAM": "🚫"}.get(_clabel, "💔")
             apply_label_transition(
                 cid, cur_label, _clabel,
                 signal="hermes_disregard",
@@ -4492,10 +4568,11 @@ def handle_hourly_sweep(payload, send):
                     update_last_analysis(cid, "no_facts_row", 1.0)
                     continue
                 prev = row.get("label")
-                # CONFIRMED / LOST / DISREGARDED are terminal — skip the hourly
-                # sweep entirely (no transitions, no cold_decay, no nudges).
-                # Operator can still reopen via /label. Audit #3, 2026-06-07.
-                if prev in ("CONFIRMED", "LOST", "DISREGARDED"):
+                # CONFIRMED / LOST / DISREGARDED / SCAM are terminal — skip the
+                # hourly sweep entirely (no transitions, no cold_decay, no
+                # nudges). Operator can still reopen via /label. Audit #3 +
+                # H5 SCAM, 2026-06-07.
+                if prev in ("CONFIRMED", "LOST", "DISREGARDED", "SCAM"):
                     update_last_analysis(
                         cid, "confirmed_terminal" if prev == "CONFIRMED"
                         else "terminal_closed", 1.0)

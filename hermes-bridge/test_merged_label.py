@@ -15,8 +15,17 @@ from labels import _merged_label  # noqa: E402
 
 def test_stale_canon_reactivates_to_active_dup():
     assert _merged_label("LOST", "HOT") == "HOT"
-    assert _merged_label("DISREGARDED", "NEW") == "NEW"
+    assert _merged_label("DISREGARDED", "NEEDS_ATTENTION") == "NEEDS_ATTENTION"
     assert _merged_label("COLD", "WARM") == "WARM"
+
+
+def test_default_new_dup_does_not_reactivate_closed_canon():
+    # fix-group 2 (review, 2026-06-07): NEW is the DEFAULT label of any fresh
+    # row, NOT evidence of a genuine enquiry — a default-NEW dup must NOT
+    # re-activate a deliberately-closed/stale canonical (reopened spam on merge).
+    assert _merged_label("DISREGARDED", "NEW") == "DISREGARDED"
+    assert _merged_label("LOST", "NEW") == "LOST"
+    assert _merged_label("COLD", "NEW") == "COLD"
 
 
 def test_won_or_inflight_canon_never_downgraded():

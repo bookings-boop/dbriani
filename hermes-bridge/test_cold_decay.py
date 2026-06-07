@@ -52,10 +52,12 @@ def test_already_cold_no_op():
 
 
 def test_terminal_labels_never_decay():
-    # Audit #3/#11 (2026-06-07): LOST/DISREGARDED are terminal — cold_decay must
-    # NOT reopen a closed lead to COLD (COLD is reengage-eligible).
+    # Audit #3/#11 (2026-06-07): LOST/DISREGARDED/SCAM are terminal — cold_decay
+    # must NOT reopen a closed lead to COLD (COLD is reengage-eligible).
     assert _should_cold_decay(30 * 86400, "LOST", False) is False
     assert _should_cold_decay(365 * 86400, "DISREGARDED", False) is False
+    # SCAM is the stickiest terminal — never decays back into the active queue.
+    assert _should_cold_decay(365 * 86400, "SCAM", False) is False
 
 
 def test_none_label_safe():

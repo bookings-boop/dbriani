@@ -3423,7 +3423,7 @@ def _followup_candidate_sql():
         "  AND (cf.label IS NULL OR cf.label NOT IN ("
         "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
         "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
-        "       'DISREGARDED', 'LOST')) "
+        "       'DISREGARDED', 'LOST', 'SCAM')) "
         # Active-negotiation suppression — paylink in last 24h.
         "  AND NOT EXISTS ("
         "       SELECT 1 FROM autonomous_sends a "
