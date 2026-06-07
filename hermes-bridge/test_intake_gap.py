@@ -52,6 +52,18 @@ def test_group_chat_excluded():
     assert intake_gaps([_chat("status@broadcast", 1.0)], set(), NOW) == []
 
 
+def test_junk_nonphone_cid_excluded():
+    # 2026-06-07: the never-miss net auto-ingested a synthetic 'cid=0' chat as a
+    # junk lead. A real lead cid is a phone/lid (all digits, plausible length);
+    # '0' / all-zeros / non-numeric must never be flagged or auto-ingested.
+    assert intake_gaps([_chat("0@c.us", 1.0)], set(), NOW) == []
+    assert intake_gaps([_chat("0", 1.0)], set(), NOW) == []
+    assert intake_gaps([_chat("000000@c.us", 1.0)], set(), NOW) == []
+    # a real phone / lid is still flagged
+    assert len(intake_gaps([_chat("971544855029@c.us", 1.0)], set(), NOW)) == 1
+    assert len(intake_gaps([_chat("137813169274972@lid", 1.0)], set(), NOW)) == 1
+
+
 def test_old_chat_not_flagged():
     assert intake_gaps([_chat("971000@c.us", 30.0)], set(), NOW) == []
 

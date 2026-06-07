@@ -82,6 +82,16 @@ def canon_phone(cid, lid_map=None):
     return d or low
 
 
+def _is_real_lead_cid(cid):
+    """A genuine lead cid is '<digits>@c.us' or '<digits>@lid' whose local part
+    is a real phone / lid — all digits, plausible length, not the synthetic '0'
+    chat. Filters junk (e.g. '0@c.us', all-zeros, non-numeric) that slips past
+    the group/status/broadcast guard, so the never-miss net never auto-ingests a
+    non-lead (2026-06-07: 'cid=0' was auto-ingested as a junk lead)."""
+    local = str(cid or "").strip().lower().split("@", 1)[0]
+    return local.isdigit() and len(local) >= 5 and set(local) != {"0"}
+
+
 def intake_gaps(chats, cf_ids, now_ts, max_age_days=7, canon=None):
     """Return unanswered inbound 1:1 chats absent from customer_facts.
 
@@ -116,6 +126,8 @@ def intake_gaps(chats, cf_ids, now_ts, max_age_days=7, canon=None):
             continue
         low = cid.lower()
         if "@g.us" in low or "status@" in low or "broadcast" in low:
+            continue
+        if not _is_real_lead_cid(cid):
             continue
         try:
             key = canon(cid)
