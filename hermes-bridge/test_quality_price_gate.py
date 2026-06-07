@@ -21,19 +21,21 @@ def _run(draft):
         captured["status"] = status
         captured["body"] = body
 
-    def fake_run_hermes(query, priority=None):
-        # LLM scorer says 7/10, clean — the deterministic gate must override.
-        return (0, '{"score": 7, "flags": ["weak opener"], "summary": "ok"}', "", 50)
+    def fake_anthropic_score(query):
+        # LLM scorer says 7/10, clean — the deterministic price gate must
+        # override. (2026-06-07: /quality-check now scores via _anthropic_score,
+        # not the slow local run_hermes — see the incident saturation fix.)
+        return (7, ["weak opener"], "ok")
 
-    orig = server.run_hermes
+    orig = routes._anthropic_score
     try:
-        server.run_hermes = fake_run_hermes
+        routes._anthropic_score = fake_anthropic_score
         # customer_id empty -> the score-telemetry/DB block is skipped (no DB).
         routes.handle_quality_check(
             {"current_draft": draft, "customer_name": "Test", "customer_id": ""},
             fake_send)
     finally:
-        server.run_hermes = orig
+        routes._anthropic_score = orig
     return captured.get("body") or {}
 
 

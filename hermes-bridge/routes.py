@@ -1117,6 +1117,14 @@ def handle_poll_payments(payload, send):
                         f"BELOW deposit threshold "
                         f"AED {total_f:.2f} — logged only, "
                         f"label unchanged ({prev_label})")
+                elif pay_mismatch:
+                    # Audit #10b (2026-06-07): a real-deposit charge whose PAYER
+                    # doesn't match the customer must NOT auto-CONFIRM — it could
+                    # be a wrong-person / forwarded-link payment. The nomod-webhook
+                    # path already guards on `not pay_mismatch`; mirror it here on
+                    # the poll path. Logged for the operator to confirm manually.
+                    log(f"poll-payments cid={customer_id!r} PAYER-MISMATCH on "
+                        f"AED {total_f:.2f} — NOT auto-confirming; operator review")
                 elif prev_label != "CONFIRMED":
                     apply_label_transition(
                         customer_id, prev_label, "CONFIRMED",
@@ -5129,37 +5137,30 @@ def handle_quality_check(payload, send):
     _cd = payload.get("current_draft")
     _draft_text = ("\n\n".join(str(m) for m in _cd)
                    if isinstance(_cd, (list, tuple)) else str(_cd or ""))
+    # INCIDENT 2026-06-07: score via the FAST Anthropic scorer, NOT the local
+    # Hermes CLI. /quality-check is INTERACTIVE (fires on every draft/regen/
+    # refine) and each run_hermes call took ~17s on the box, holding the cap=3
+    # slots and STARVING the background lead-analysis sweep — measured waits of
+    # 50-74s → "Hermes analysis not processing", stale/garbage lead verdicts
+    # (a CONFIRMED booking scored 'likely LOST'), autonomous floor unable to get
+    # a slot. _anthropic_score is ~2s HTTP and frees the local slots for the
+    # analysis. Also unifies the badge with the gate (already Anthropic-scored).
+    # Fail-safe preserved: a 0/None score → ok:false → n8n shows no badge.
+    import time as _t
+    _t0 = _t.time()
     try:
-        # interactive, NOT background: the operator is actively waiting for the
-        # draft/refine/regen card this badge goes on. Background waits for the
-        # single BG slot, which the hourly lead-analysis sweep holds for ~25s+
-        # → the refine/regen quality-check timed out (35s) and the scorecard
-        # silently vanished during sweep windows (operator 2026-06-01).
-        rc, out, err, elapsed = run_hermes(
-            build_quality_query(payload), priority="interactive")
-    except subprocess.TimeoutExpired:
-        log("quality-check TIMEOUT")
-        send(200, {"ok": False, "error": "hermes timeout"})
-        return
+        score, flags, summary = _anthropic_score(build_quality_query(payload))
     except Exception as e:
         log("quality-check EXEC ERROR", repr(e))
-        send(200, {"ok": False, "error": f"hermes exec error: {e}"})
+        send(200, {"ok": False, "error": f"score error: {e}"})
         return
-    parsed, blob = extract_json(out)
-    score = None
-    if isinstance(parsed, dict):
-        try:
-            score = int(parsed.get("score"))
-        except (TypeError, ValueError):
-            score = None
-    if rc != 0 or score is None or not (1 <= score <= 10):
-        log(f"quality-check FAIL rc={rc} parsed={parsed is not None}")
-        send(200, {"ok": False, "error": "no parseable score",
-                         "rc": rc, "raw": (blob or out)[:1000]})
+    elapsed = int((_t.time() - _t0) * 1000)
+    if not (isinstance(score, int) and 1 <= score <= 10):
+        log(f"quality-check FAIL score={score!r} (anthropic)")
+        send(200, {"ok": False, "error": "no parseable score"})
         return
-    flags = parsed.get("flags")
-    flags = [str(f) for f in flags][:3] if isinstance(flags, list) else []
-    summary = str(parsed.get("summary") or "")
+    flags = [str(f) for f in (flags or [])][:3] if isinstance(flags, list) else []
+    summary = str(summary or "")
     # Deterministic price guard (operator 2026-06-06: HARD block + regenerate on
     # a catalog price mismatch). validate_draft_prices flags any quoted price not
     # in the canonical catalog; cap the score below the regen threshold (8) so the
