@@ -313,13 +313,13 @@ DRAFTS_ACTIVE = "drafts:active"
 # proactive follow-up engine. Legacy callers (the [Draft nudge] button)
 # don't pass silence_window and fall back to the label-aware directive.
 GHOST_RECOVERY_PHRASES = {
-    "hot_30m_2h":    "Have you given up on booking a private yacht?",
-    "hot_2h_24h":    "[Name], are you still there? "
-                     "OR: Hi! May I know the hourly rate you are considering?",
-    "warm_24h_72h":  ("Just checking in if you have any update for us, "
-                     "are you still considering to book a yacht or has "
-                     "there been any change in the plan perhaps?"),
-    "cold_lastshot": "Have you given up on booking a private yacht?",
+    # Nudge #1 — soft check-in: 24-72h since OUR reply, HOT/NEEDS_ATTENTION/WARM.
+    "soft_checkin":  ("Just checking in if you have any update for us, "
+                      "are you still considering to book a yacht or has "
+                      "there been any change in the plan perhaps?"),
+    # Nudge #2 — last shot: 3-14d since OUR reply, any active label incl COLD,
+    # ≥48h after the soft check-in (BUG G fix 2026-06-06).
+    "last_shot":     "Have you given up on booking a private yacht?",
 }
 GHOST_RECOVERY_WINDOWS = frozenset(GHOST_RECOVERY_PHRASES.keys())
 
@@ -3275,50 +3275,51 @@ def upsert_conversation_state(customer_id, event):
 
 
 def _silence_window_for(label, silent_hrs):
-    """Map (label, silence-hours) to a ghost-recovery window key, or None.
-    Mirrors the trigger table in the proactive-follow-up engine spec."""
-    if label in ("HOT", "NEEDS_ATTENTION"):
-        if 0.5 <= silent_hrs <= 2.0:
-            return "hot_30m_2h"
-        if 2.0 < silent_hrs <= 24.0:
-            return "hot_2h_24h"
-    if label == "WARM":
+    """Map (label, hours-since-OUR-last-reply) to a ghost-recovery window, or
+    None. The customer has gone silent on US — we replied, they didn't come
+    back (BUG G fix 2026-06-06; silence is measured from our reply, not the
+    customer's last message). Cadence:
+      - soft check-in : 24-72h, HOT/NEEDS_ATTENTION/WARM
+      - last shot     : 3-14d (72-336h), HOT/NEEDS_ATTENTION/WARM/COLD
+    NEW is pre-qualification (never nudged); terminal/paused labels are
+    filtered upstream in SQL. The ≥48h cooldown between the two nudges is
+    enforced in the candidate SQL, not here."""
+    if label in ("HOT", "NEEDS_ATTENTION", "WARM"):
         if 24.0 <= silent_hrs <= 72.0:
-            return "warm_24h_72h"
-    if label == "COLD":
-        if 72.0 <= silent_hrs <= 168.0:  # 3-7 days
-            return "cold_lastshot"
+            return "soft_checkin"
+    if label in ("HOT", "NEEDS_ATTENTION", "WARM", "COLD"):
+        if 72.0 < silent_hrs <= 336.0:  # 3-14 days
+            return "last_shot"
     return None
 
 
-def scan_followup_eligibility():
-    """Return up to FOLLOWUP_BATCH_LIMIT customers eligible for a proactive
-    follow-up this sweep. Each item: {customer_id, name, label,
-    silence_hours, silence_window}. Skip-gates checked in SQL where possible,
-    in Python where atomicity matters (Redis draft:posted)."""
-    if not FOLLOWUP_ENGINE_ENABLED:
-        return []
-    # Single SELECT pulls everything we need; LATERAL pick of latest mode.
-    #
-    # Active-negotiation suppression — production bug 2026-05-26
-    # (Qurbani 15:23): the engine fired a generic morning-slot pitch
-    # 1h47m into an active payment-link negotiation, derailing the
-    # deal and confusing the customer. Two new gates:
-    #   1. Skip labels where conversation is post-quote, paused, or
-    #      terminal — WAITING_FOR_PAYMENT, CONFIRMED, PAUSED_*,
-    #      DISREGARDED. Operator handles these manually.
-    #   2. Skip if we sent a payment_link in the last 24h. Paylink
-    #      means the customer is processing a specific offer — a
-    #      generic ghost-recovery is off-topic.
-    sql = (
+def _followup_candidate_sql():
+    """Build the candidate SELECT for the proactive ghost-recovery engine.
+    Pure (no DB) so the targeting predicates are unit-testable.
+
+    Population (BUG G fix 2026-06-06): leads where WE replied last and the
+    customer went SILENT (ghosted us) — `last_operator_reply_at >
+    last_customer_message_at`. The pre-fix query had this inverted (it
+    selected leads where the customer spoke last and we owed a reply), so
+    every operator reply permanently excluded the real reengage population.
+
+    Silence/timing is measured from `last_operator_reply_at`. Anti-spam:
+    24h-14d band, ≥48h cooldown between nudges (was a hard one-shot),
+    FOLLOWUP_CAP per silence cycle, terminal/paused-label suppression, and
+    no nudge within 24h of a payment link. Column order is contractual —
+    scan_followup_eligibility() parses by position."""
+    return (
         "SELECT cs.customer_id, "
         "COALESCE(cf.name, ''), "
         "cf.label, "
-        "EXTRACT(EPOCH FROM (now() - cs.last_customer_message_at))/3600, "
+        # silence measured since OUR reply (customer went silent on us)
+        "EXTRACT(EPOCH FROM (now() - cs.last_operator_reply_at))/3600, "
         "(cs.last_operator_reply_at > cs.last_customer_message_at) AS we_replied, "
         "(cf.label_locked_until > now()) AS locked, "
         "COALESCE(cm.mode, 'approval'), "
-        "(cs.last_nudge_drafted_at > cs.last_customer_message_at) AS already_drafted, "
+        # parts[7]: nudged within the cooldown window (defensive duplicate of
+        # the SQL cooldown gate below) — kept at this index by the parser.
+        "(cs.last_nudge_drafted_at > now() - interval '48 hours') AS recently_nudged, "
         # Cap counter — proactive engine bounds itself to FOLLOWUP_CAP
         # unsolicited follow-ups before exhausting; resets on customer
         # message (see upsert_conversation_state).
@@ -3330,19 +3331,18 @@ def scan_followup_eligibility():
         "  WHERE customer_id = cs.customer_id "
         "  ORDER BY id DESC LIMIT 1"
         ") cm ON TRUE "
-        "WHERE cs.last_customer_message_at IS NOT NULL "
-        "  AND (cs.last_operator_reply_at IS NULL "
-        "       OR cs.last_operator_reply_at < cs.last_customer_message_at) "
-        "  AND now() - cs.last_customer_message_at > interval '30 minutes' "
-        "  AND now() - cs.last_customer_message_at < interval '7 days' "
-        # Anti-pushiness (2026-05-29): do NOT re-nudge a customer we have
-        # ALREADY followed up since their last message. One nudge per
-        # customer-silence cycle — if they don't reply, back off. The
-        # cycle resets when they message again (last_customer_message_at
-        # moves past last_nudge_drafted_at). Operator hit 4 near-identical
-        # nudges to silent leads (Lamia/Sid) → came across pushy.
-        "  AND NOT (cs.last_nudge_drafted_at IS NOT NULL "
-        "           AND cs.last_nudge_drafted_at > cs.last_customer_message_at) "
+        # Population: we replied last AND the customer hasn't come back.
+        "WHERE cs.last_operator_reply_at IS NOT NULL "
+        "  AND (cs.last_customer_message_at IS NULL "
+        "       OR cs.last_operator_reply_at > cs.last_customer_message_at) "
+        # Timing band — silence since our reply: 24h .. 14d.
+        "  AND now() - cs.last_operator_reply_at > interval '24 hours' "
+        "  AND now() - cs.last_operator_reply_at < interval '14 days' "
+        # Anti-pushiness (2026-05-29, reworked 2026-06-06): ≥48h cooldown
+        # between nudges (was a hard one-shot per silence cycle, which made
+        # FOLLOWUP_CAP=2 unreachable). The cap below still bounds the total.
+        "  AND (cs.last_nudge_drafted_at IS NULL "
+        "       OR now() - cs.last_nudge_drafted_at > interval '48 hours') "
         "  AND COALESCE(cs.followup_count, 0) < " + str(FOLLOWUP_CAP) + " "
         # Active-negotiation suppression — labels operator handles.
         "  AND (cf.label IS NULL OR cf.label NOT IN ("
@@ -3355,9 +3355,23 @@ def scan_followup_eligibility():
         "       WHERE a.customer_id = cs.customer_id "
         "         AND a.kind = 'payment_link_sent' "
         "         AND a.sent_at > now() - interval '24 hours') "
-        "ORDER BY cs.last_customer_message_at ASC "
+        # Longest-ghosted first (oldest operator reply).
+        "ORDER BY cs.last_operator_reply_at ASC "
         "LIMIT 80"
     )
+
+
+def scan_followup_eligibility():
+    """Return up to FOLLOWUP_BATCH_LIMIT customers eligible for a proactive
+    follow-up this sweep. Each item: {customer_id, name, label,
+    silence_hours, silence_window}. Skip-gates checked in SQL where possible,
+    in Python where atomicity matters (Redis draft:posted)."""
+    if not FOLLOWUP_ENGINE_ENABLED:
+        return []
+    # Candidate SELECT (pure builder — see _followup_candidate_sql for the
+    # targeting predicates and the anti-spam / active-negotiation suppression
+    # gates, incl. the 2026-05-26 Qurbani paylink + terminal-label guards).
+    sql = _followup_candidate_sql()
     out, err = _psql(sql, timeout=15)
     if err:
         log("followup_scan err:", err)
@@ -3377,7 +3391,7 @@ def scan_followup_eligibility():
         label = parts[2].strip() or "NEW"
         locked = parts[5].strip().lower() == "t"
         mode = parts[6].strip()
-        already_drafted = parts[7].strip().lower() == "t"
+        recently_nudged = parts[7].strip().lower() == "t"  # within 48h cooldown
         try:
             followup_count = int(parts[8].strip() or "0")
         except (ValueError, IndexError):
@@ -3387,7 +3401,7 @@ def scan_followup_eligibility():
             continue
         if mode == "autonomous":
             continue
-        if already_drafted:
+        if recently_nudged:
             continue
         # Defensive Python-side gate — SQL already filters, but keep this
         # for any future code path that bypasses scan_followup_eligibility.
