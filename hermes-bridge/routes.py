@@ -2295,6 +2295,17 @@ def handle_assist(payload, send):
             df_payload["operator_hint"] = detail
         handle_draft_followup(df_payload, _cap)
         body = captured.get("body", {}) or {}
+        if body.get("excluded"):
+            # Exclusion guard blocked the nudge — surface the reason; do NOT
+            # persist a sendable draft card for a staff/crew/agent contact.
+            send(200, {
+                "ok": False, "intent": "draft_nudge", "excluded": True,
+                "customer_id": cid, "category": body.get("category"),
+                "telegram_text": (body.get("telegram_text")
+                                  or "🚫 Proactive outreach to this contact "
+                                  "is blocked (exclusion list)."),
+                "action_taken": "Blocked by exclusion guard."})
+            return
         drafted = body.get("draft_text") \
             or body.get("telegram_text") or "(empty)"
         # Persist the nudge as a real pending draft + return a card with
@@ -2818,6 +2829,38 @@ def handle_draft_followup(payload, send):
     history = payload.get("history") or ""
     if not cid:
         send(200, {"ok": False, "error": "customer_id required"})
+        return
+    # ── Layer-3 exclusion guard (safety-only, 2026-06-06). Never DRAFT
+    # proactive/marketing outreach (nudge, follow-up, re-engage) to internal
+    # staff / crew / agents. This is the single proactive-outreach chokepoint:
+    # the sweeps' [Draft nudge] / nudge:<cid> callback, /review, and the
+    # /assist draft_nudge intent all funnel through here. Inbound replies use
+    # /draft (NOT this path), so a staff member who messages still gets a
+    # normal reply. FAIL-CLOSED: any guard error blocks the nudge, never sends.
+    try:
+        from hermes_exclusion_guards import is_excluded, category_of
+        from waha import phone_for_cid
+        if is_excluded(cid, lid_resolver=phone_for_cid):
+            _xcat = category_of(cid, lid_resolver=phone_for_cid) \
+                or "exclusion list"
+            log(f"/draft-followup BLOCKED proactive outreach -> {cid} "
+                f"({_xcat})")
+            send(200, {"ok": False, "excluded": True, "category": _xcat,
+                       "customer_id": cid,
+                       "telegram_text": (
+                           f"🚫 Skipped — this contact is on the *{_xcat}* "
+                           "exclusion list (staff / crew / agent). Proactive "
+                           "outreach is blocked; they still get normal "
+                           "replies if they message us.")})
+            return
+    except Exception as _xexc:  # noqa: BLE001 — fail-closed: block, never send
+        log("/draft-followup exclusion-guard EXC -> fail-closed block:",
+            repr(_xexc))
+        send(200, {"ok": False, "excluded": True, "category": "guard_error",
+                   "customer_id": cid,
+                   "telegram_text": ("🚫 Skipped — exclusion-guard error; "
+                                     "blocking proactive outreach to be "
+                                     "safe.")})
         return
     row = None
     name = ""
