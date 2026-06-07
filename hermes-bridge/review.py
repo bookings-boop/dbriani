@@ -565,6 +565,23 @@ def _owes_reply(row):
     return isinstance(cs, (int, float)) and (out is None or cs < out)
 
 
+def _scope_change_hint(row):
+    """Interim reminder (2026-06-07, customer D extended to a 4th hour but the
+    card kept showing the original 3hrs/paid with no balance). On a CONFIRMED
+    booking with an OPEN thread (customer messaged after our last reply), the
+    rendered booking detail is the ORIGINAL snapshot — an in-progress extension
+    or add-on is NOT reflected and any top-up isn't tracked yet (structured
+    balance tracking is a separate, financial feature). Pure; '' when not
+    applicable; NON-financial (computes no amounts)."""
+    if (row.get("label") or "").strip().upper() != "CONFIRMED":
+        return ""
+    if not _owes_reply(row):
+        return ""
+    return ("\n⚠️ *open thread on a confirmed booking* — the detail above is the "
+            "ORIGINAL booking. If they're changing it (extra hour / add-on), "
+            "confirm the new duration & collect any top-up before the date.")
+
+
 def _expected_value(score, row):
     """Rough expected booking VALUE for the 'top by value' digest (operator
     2026-06-06: 'sort from high revenue to down'). booking_value (the top yacht's
@@ -867,7 +884,8 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                             "\n✅ *booked & paid*"
                             + (" — " + " · ".join(_det) if _det else "")
                             + f"\n🧠 Hermes: *{imp}/100* · _confirm logistics or "
-                            "upsell (extra hour / add-ons)_")
+                            "upsell (extra hour / add-ons)_"
+                            + _scope_change_hint(row))
                 else:
                     imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                     # STALENESS GUARD (2026-05-29): the cached
