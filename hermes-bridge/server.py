@@ -1547,6 +1547,21 @@ def behavioral_context(customer_id):
                  + ASK_BEFORE_GUESS_DIRECTIVE + "\n\n" + HANDOFF_DIRECTIVE
                  + "\n\n" + STYLE_DIRECTIVE + "\n\n" + TONE_DIRECTIVE
                  + ("\n\n" + formatted if formatted else ""))
+    # --- Returning-customer context from HubSpot CRM (read-side, Layer-1) ---
+    # Gated by HUBSPOT_LOOKUP_ENABLED (default OFF -> `formatted` byte-for-byte
+    # unchanged). Fail-open: any miss/timeout/error -> no block, draft proceeds.
+    # Single returning-customer block — profile_lookup / known_customer stay OFF
+    # so blocks never stack. This one point reaches the live n8n drafter (which
+    # consumes only `formatted`) AND the build_query fallback (server.py:3107).
+    try:
+        import hubspot_lookup
+        if hubspot_lookup.enabled():
+            from waha import phone_for_cid
+            _hs = hubspot_lookup.context_block(customer_id, phone_resolver=phone_for_cid)
+            if _hs:
+                formatted = (formatted + "\n\n" + _hs) if formatted else _hs
+    except Exception:  # noqa: BLE001 — must never break the draft path
+        pass
     return {"global": glb, "scenario": sc, "customer_notes": notes,
             "formatted": formatted}
 
