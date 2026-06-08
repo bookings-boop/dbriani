@@ -317,10 +317,17 @@ def build_customer_header(facts):
 def _merge_facts(cached, extracted):
     """Merge rule: a non-empty extracted field overwrites; an empty extracted
     field keeps the cached value — a failed/partial extraction never erases a
-    known fact."""
+    known fact.
+
+    The migration-011 booking-detail fields (booking_date_abs / booking_time /
+    addons) are carried through with the SAME no-clobber rule (P2-2 fix,
+    2026-06-07): they were previously omitted from this loop, so every upsert
+    received them as absent → written NULL (0/222 rows populated), which is the
+    common root behind missing dates/times on confirmed bookings."""
     cached = cached or {}
     out = {}
-    for k in ("name", "dates", "yachts", "party_size"):
+    for k in ("name", "dates", "yachts", "party_size",
+              "booking_date_abs", "booking_time", "addons"):
         ev = str((extracted or {}).get(k, "") or "").strip()
         out[k] = ev or str(cached.get(k) or "")
     return out
