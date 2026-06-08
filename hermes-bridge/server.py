@@ -480,6 +480,44 @@ def record_message(customer_id, direction, body, msg_id=None, ts=None):
         return False
 
 
+def _persist_inbound_durable(raw_cid, text, msg_id):
+    """Root B Step 3: make a live inbound durably visible the instant it arrives, instead of
+    invisible-until-the-intake-gap-cron. Persists under the canonical-via-merged_into id (NOT
+    @lid->@c.us folded — the hourly reconcile cron owns that fold + its recycled-LID guards).
+    ONE batched psql, fail-open, never raises. No WAHA, no lid_phone_map write. Mirrors
+    record_message's fail-safe discipline (swallow + return False; no-op pre-migration)."""
+    try:
+        raw = (str(raw_cid).strip() if raw_cid is not None else "")
+        if not raw:
+            return False
+        cid = canonicalize_cid(raw)
+        if not cid:
+            return False
+        b = "" if text is None else str(text)
+        mid = (str(msg_id).strip() if msg_id is not None else "") or None
+        c = _lit(cid)
+        parts = [
+            f"INSERT INTO customer_facts (customer_id) VALUES ({c}) "
+            "ON CONFLICT (customer_id) DO NOTHING",
+            _record_message_sql(cid, "in", b, mid),
+            "INSERT INTO conversation_state "
+            "(customer_id, last_customer_message_at, followup_count, updated_at) "
+            f"VALUES ({c}, now(), 0, now()) ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_customer_message_at = now(), followup_count = 0, updated_at = now()",
+        ]
+        _out, err = _psql("; ".join(parts), timeout=6)
+        if err:
+            log("persist_inbound non-fatal cid=" + repr(cid) + ": " + str(err)[:200])
+            return False
+        return True
+    except Exception as e:
+        try:
+            log("persist_inbound EXC:", repr(e))
+        except Exception:
+            pass
+        return False
+
+
 _CARD_LABEL_MARKERS = (
     "tap skip", "no reply - likely spam", "no reply – likely spam",
     "no auto-reply", "no auto reply",

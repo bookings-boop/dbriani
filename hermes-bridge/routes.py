@@ -206,6 +206,19 @@ def handle_debounce(payload, send):
             log("debounce buffer failed:", err)
         log(f"debounce BUFFER {phone} token={token}")
         send(200, {"ok": True, "phone": phone, "token": token})
+        # Root B (Step 3): durable persist AFTER the ack — never blocks the buffer.
+        # Flag-gated (ROOT_B_PERSIST_ENABLED), fail-open, never raises. Persists under the
+        # canonical-via-merged_into id; the hourly reconcile cron owns the @lid<->@c.us fold.
+        if os.environ.get("ROOT_B_PERSIST_ENABLED") == "1":
+            try:
+                from server import _persist_inbound_durable
+                _persist_inbound_durable(phone, payload.get("text"),
+                                         payload.get("message_id"))
+            except Exception as e:
+                try:
+                    log("root-b persist EXC:", repr(e))
+                except Exception:
+                    pass
         return
     if action == "flush":
         token = (payload.get("token") or "").strip()
