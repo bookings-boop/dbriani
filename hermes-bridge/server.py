@@ -403,7 +403,7 @@ def _draft_log_write(draft_id, **fields):
             pass
 
 
-def _record_message_sql(customer_id, direction, body, msg_id=None):
+def _record_message_sql(customer_id, direction, body, msg_id=None, ts=None):
     """Pure builder for the idempotent conversation_messages INSERT
     (migration 010). Extracted so the exact INSERT ... ON CONFLICT shape is
     unit-testable without a DB.
@@ -416,13 +416,25 @@ def _record_message_sql(customer_id, direction, body, msg_id=None):
     delivery, some events carry no stable id) are always appended."""
     cols = ["customer_id", "direction", "body", "msg_id"]
     vals = [_lit(customer_id), _lit(direction), _lit(body), _lit(msg_id)]
+    # Real message time (WAHA epoch) when known so 'Xm/Xh ago' age math is
+    # correct; ts=None omits the column -> ts DEFAULT now() (unchanged behaviour).
+    if ts is not None:
+        try:
+            _e = float(ts)
+            if _e > 1e12:            # milliseconds -> seconds
+                _e = _e / 1000.0
+            if _e > 0:
+                cols.append("ts")
+                vals.append("to_timestamp(%r)" % _e)
+        except (TypeError, ValueError):
+            pass
     return ("INSERT INTO conversation_messages (" + ", ".join(cols)
             + ") VALUES (" + ", ".join(vals)
             + ") ON CONFLICT (customer_id, msg_id) WHERE msg_id IS NOT NULL "
             + "DO NOTHING")
 
 
-def record_message(customer_id, direction, body, msg_id=None):
+def record_message(customer_id, direction, body, msg_id=None, ts=None):
     """FAIL-SAFE append to the durable conversation store (migration 010).
 
     Runs on EVERY inbound + outbound, so — exactly like _draft_log_write — it
@@ -452,7 +464,7 @@ def record_message(customer_id, direction, body, msg_id=None):
             return False
         b = "" if body is None else str(body)
         mid = (str(msg_id).strip() if msg_id is not None else "") or None
-        sql = _record_message_sql(cid, d, b, mid)
+        sql = _record_message_sql(cid, d, b, mid, ts=ts)
         _out, err = _psql(sql, timeout=6)
         if err:
             log("record_message non-fatal cid=" + repr(cid)
@@ -466,6 +478,22 @@ def record_message(customer_id, direction, body, msg_id=None):
         except Exception:
             pass
         return False
+
+
+_CARD_LABEL_MARKERS = (
+    "tap skip", "no reply - likely spam", "no reply – likely spam",
+    "no auto-reply", "no auto reply",
+)
+
+
+def _is_operator_card_text(body):
+    """True when `body` is OPERATOR-CARD placeholder/chrome (e.g. 'NO REPLY -
+    likely spam/B2B (see notes). Tap Skip.'), NOT a customer-facing message — so
+    record_outbound_draft never persists card labels as transcript (2026-06-08:
+    23 such rows polluted conversation_messages). Conservative — matches only
+    unambiguous card markers a customer would never send. Pure; None-safe."""
+    b = str(body or "").lower()
+    return any(m in b for m in _CARD_LABEL_MARKERS)
 
 
 def record_outbound_draft(draft):
@@ -499,6 +527,10 @@ def record_outbound_draft(draft):
         if not parts:
             return False
         body = "\n\n".join(parts)
+        # Never persist operator-card chrome (e.g. 'NO REPLY - likely spam...
+        # Tap Skip.') as a customer transcript line (#14, 2026-06-08).
+        if _is_operator_card_text(body):
+            return False
         did = (str(draft.get("id")).strip()
                if draft.get("id") is not None else "") or None
         return record_message(cid, "out", body, did)
@@ -665,7 +697,8 @@ def build_analyzer_history(customer_id, waha_limit=100):
     for _tr in topup:
         try:
             record_message(customer_id, _tr.get("direction"),
-                           _tr.get("body"), msg_id=_tr.get("msg_id"))
+                           _tr.get("body"), msg_id=_tr.get("msg_id"),
+                           ts=_tr.get("ts"))
         except Exception:  # noqa: BLE001 — never break the read on a persist err
             pass
     body_rows = [r for r in combined if (r.get("body") or "").strip()]
