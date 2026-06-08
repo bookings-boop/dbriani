@@ -553,6 +553,32 @@ def _is_operator_close(created_by):
 _HARD_REOPEN_SIGNALS = frozenset({"payment_confirmed_chat", "lets_do_it"})
 
 
+def _ghost_recovery_service(yachts, history):
+    """Service noun for a proactive ghost-recovery nudge, so it names what the
+    lead ACTUALLY asked about instead of always saying 'a private yacht'
+    (operator 2026-06-08: a wakeboarding-lesson lead was nudged about a yacht).
+    Pure; None-safe. Order: a named/charter YACHT wins; else a clearly-stated
+    watersport; else a GENERIC 'with us' that is never wrong — we NEVER name a
+    service the lead didn't raise."""
+    y = (yachts or "").strip().lower()
+    h = (history or "").lower()
+    if y or re.search(r"\b(yacht|charter|catamaran|superyacht)\b", h):
+        return "a private yacht"
+    if re.search(r"wake[\s-]?board", h):
+        return "wakeboarding"
+    if re.search(r"wake[\s-]?surf", h):
+        return "wakesurfing"
+    if re.search(r"\b(jet[\s-]?ski|sea[\s-]?doo)\b", h):
+        return "a jet ski session"
+    if re.search(r"\b(e[\s-]?foil|hydrofoil|foiling)\b", h):
+        return "an e-foil session"
+    if re.search(r"fly[\s-]?board", h):
+        return "a flyboard session"
+    if re.search(r"water[\s-]?sport", h):
+        return "a watersports session"
+    return "with us"
+
+
 def reengage_reopen_target(target, signal, label_rank, cap="WARM"):
     """fix-group 2 (d): given the raw compute_label target + signal, return the
     label a forced terminal-reopen should actually land on. Hard/high-confidence

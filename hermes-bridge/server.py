@@ -315,14 +315,19 @@ DRAFTS_ACTIVE = "drafts:active"
 # Used by _draft_followup when called with a silence_window field by the
 # proactive follow-up engine. Legacy callers (the [Draft nudge] button)
 # don't pass silence_window and fall back to the label-aware directive.
+# {service} is filled per-lead by labels._ghost_recovery_service so the nudge
+# names what the lead ACTUALLY asked about — "a private yacht" for a charter,
+# the watersport (wakeboarding / a jet ski session / …) when clearly stated,
+# else a generic "with us" (operator 2026-06-08: a wakeboarding lead was nudged
+# about "a private yacht"). NEVER names a service the lead didn't raise.
 GHOST_RECOVERY_PHRASES = {
     # Nudge #1 — soft check-in: 24-72h since OUR reply, HOT/NEEDS_ATTENTION/WARM.
     "soft_checkin":  ("Just checking in if you have any update for us, "
-                      "are you still considering to book a yacht or has "
+                      "are you still considering to book {service} or has "
                       "there been any change in the plan perhaps?"),
     # Nudge #2 — last shot: 3-14d since OUR reply, any active label incl COLD,
     # ≥48h after the soft check-in (BUG G fix 2026-06-06).
-    "last_shot":     "Have you given up on booking a private yacht?",
+    "last_shot":     "Have you given up on booking {service}?",
 }
 GHOST_RECOVERY_WINDOWS = frozenset(GHOST_RECOVERY_PHRASES.keys())
 

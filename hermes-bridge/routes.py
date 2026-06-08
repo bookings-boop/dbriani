@@ -3312,21 +3312,29 @@ def handle_draft_followup(payload, send):
             # the prior soft directive was getting ignored: production bug
             # 2026-05-25 showed Hermes returning balloon decor tips +
             # jetski offers + Zenith 64 specs as "ghost-recovery" drafts.
-            phrase = GHOST_RECOVERY_PHRASES[silence_window]
+            # Fill {service} with what THIS lead actually asked about so a
+            # watersports/wakeboarding lead is never nudged about "a private
+            # yacht" (operator 2026-06-08). Charter leads keep "a private
+            # yacht"; unknown falls back to a generic "with us".
+            from labels import _ghost_recovery_service
+            service = _ghost_recovery_service((row or {}).get("yachts", ""),
+                                              history)
+            phrase = GHOST_RECOVERY_PHRASES[silence_window].format(
+                service=service)
             shrs = (f"{silence_hours:.1f}"
                     if isinstance(silence_hours, (int, float)) else "a while")
             directive = (
                 f"This is a ghost-recovery message only. The customer has "
                 f"been silent for {shrs} hours (window: {silence_window}). "
-                f"Use ONLY the verified ghost-recovery phrase for this "
-                f"silence window from your system prompt — specifically: "
+                f"Use ONLY this exact ghost-recovery phrase (its service noun "
+                f"is already set to what THIS lead asked about) — specifically: "
                 f"\"{phrase}\". You MAY light-touch personalize the phrase "
-                f"itself (e.g. use their name if known) but the structure "
-                f"and intent must stay intact.\n\n"
+                f"itself (e.g. use their name if known) but the structure, "
+                f"intent, and the named service must stay intact.\n\n"
                 f"HARD RULES — VIOLATING ANY MAKES THE DRAFT UNUSABLE:\n"
-                f"- Do NOT mention add-ons, features, upsells, perks, "
-                f"yacht specs, capacity, decor, jetski, balloon, or any "
-                f"new information about the product.\n"
+                f"- Do NOT mention any add-on, feature, upsell, perk, spec, "
+                f"capacity, decor, or any service the customer did NOT already "
+                f"ask about, and no new product information.\n"
                 f"- Do NOT apologize for the silence.\n"
                 f"- Do NOT pitch alternatives, dates, or pricing.\n"
                 f"- Do NOT ask multiple questions.\n"
