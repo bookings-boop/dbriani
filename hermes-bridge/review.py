@@ -698,6 +698,51 @@ def _owes_reply(row):
     return isinstance(cs, (int, float)) and (out is None or cs < out)
 
 
+_OWE_SKIP_LABELS = frozenset({"DISREGARDED", "LOST", "SCAM", "COMPLETED"})
+
+
+def _owe_reply_candidates(rows):
+    """Owed-reply leads for the proactive UNANSWERED-customer sweep (operator
+    2026-06-08: "too many customers get lost waiting on a response and we don't
+    even see it"). Keeps rows where WE owe a reply (_owes_reply True) and the
+    label is not a terminal/closed or operator-paused state, sorted longest-
+    unanswered first (largest last_customer_message_at_seconds = oldest waiting).
+    Pure; the caller applies the Layer-3 exclusion guard + the per-run cap. Uses
+    the SAME _owes_reply predicate as the AWAITING_REPLY badge, so detection is
+    reliable by construction."""
+    out = []
+    for r in (rows or []):
+        lbl = str((r or {}).get("label") or "").strip().upper()
+        if lbl in _OWE_SKIP_LABELS or lbl.startswith("PAUSED"):
+            continue
+        if not _owes_reply(r):
+            continue
+        out.append(r)
+    out.sort(key=lambda r: (r.get("last_customer_message_at_seconds") or 0),
+             reverse=True)
+    return out
+
+
+def _last_msg_is_inbound(raw_msgs):
+    """Anti-stale-owe guard for the owe-reply sweep, over waha_fetch_raw output
+    (list of {ts, direction:'in'|'out', body}). Returns:
+      True  — the MOST RECENT message is inbound (customer); we genuinely still
+              owe a reply -> card it.
+      False — our side sent the most recent message; the thread was already
+              answered (e.g. a staff reply from another phone that
+              conversation_state never captured — the Xeno staff-bypass case),
+              so the owe verdict is STALE -> skip, don't nag.
+      None  — no WAHA evidence (empty/error); the caller FALLS BACK to
+              conversation_state's _owes_reply so a WAHA outage never drops a
+              genuinely-owed lead (fail-open: never miss).
+    Pure; None-safe."""
+    msgs = [m for m in (raw_msgs or []) if isinstance(m, dict)]
+    if not msgs:
+        return None
+    last = max(msgs, key=lambda m: m.get("ts") or 0)
+    return (last.get("direction") or "") == "in"
+
+
 def _scope_change_hint(row):
     """Interim reminder (2026-06-07, customer D extended to a 4th hour but the
     card kept showing the original 3hrs/paid with no balance). On a CONFIRMED

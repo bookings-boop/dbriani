@@ -99,6 +99,7 @@ from routes import (  # noqa: F401
     handle_feedback,
     handle_followup_action,
     handle_followup_sweep,
+    handle_owe_reply_sweep,
     handle_hourly_sweep,
     handle_improve,
     handle_quality_check,
@@ -4544,6 +4545,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/name",
                              "/queue", "/reconcile-identities",
                              "/followup-action", "/followup-sweep",
+                             "/owe-reply-sweep",
                              "/refresh-facts",
                              "/draft-freshness",
                              "/autonomous-log",
@@ -4657,6 +4659,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_followup_action(payload, self._send)
         elif self.path == "/followup-sweep":
             handle_followup_sweep(payload, self._send)
+        elif self.path == "/owe-reply-sweep":
+            handle_owe_reply_sweep(payload, self._send)
         elif self.path == "/refresh-facts":
             handle_refresh_facts(payload, self._send)
         elif self.path == "/draft-freshness":

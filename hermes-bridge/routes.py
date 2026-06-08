@@ -6196,6 +6196,258 @@ def handle_followup_sweep(payload, send):
             _redis(["DEL", lock])
 
 
+def handle_owe_reply_sweep(payload, send):
+    """POST /owe-reply-sweep — proactive UNANSWERED-customer reminder (operator
+    2026-06-08: "too many customers get lost waiting on a response and we don't
+    even see it"). For EVERY lead where WE owe a reply (customer messaged after
+    our last outbound), post ONE operator card: recipient + waha-resolved phone
+    (so @lid leads are identifiable by number), how long they've waited, the
+    situation, and a one-tap DIRECT-REPLY draft (handle_draft_followup with NO
+    silence_window hits its owe-reply override → a real reply, not a nudge).
+    Approval-first: nothing reaches the customer until the operator taps ✅ Send.
+
+    Replaces the 2x/day batch /review push for surfacing owed leads. Reuses the
+    proven /followup-sweep machinery; differs in: (a) candidate source =
+    read_lead_summary + review._owe_reply_candidates (not the silent-ghost scan);
+    (b) NO nudge_drafted state bump — we only DRAFTED, not replied; bumping would
+    hide the still-owed lead. The operator's actual ✅ send bumps
+    last_operator_reply and drops it from "owed" naturally; (c) dedup/re-card via
+    an owe-claim TTL so a still-unanswered lead re-surfaces every OWE_RECARD_TTL
+    (default 4h), not every run.
+
+    payload {dry_run?: bool, limit?: int}. dry_run = side-effect-free list of
+    owed candidates + wait time (NO draft, NO post)."""
+    from server import (read_lead_summary, _draft_save, _tg_post,
+                        DEFAULT_ADMIN_CHAT)
+    from review import _owe_reply_candidates, _last_msg_is_inbound
+    from reengage_quote import build_followup_card
+    import time as _t
+    import random as _r
+    import string as _s
+    try:
+        from hermes_exclusion_guards import is_excluded as _is_excluded
+    except Exception:  # noqa: BLE001
+        _is_excluded = None
+    try:
+        from waha import phone_for_cid as _phone_for_cid
+    except Exception:  # noqa: BLE001
+        _phone_for_cid = None
+    try:
+        from waha import waha_fetch_raw as _waha_fetch_raw
+    except Exception:  # noqa: BLE001
+        _waha_fetch_raw = None
+    dry = bool(payload.get("dry_run"))
+    try:
+        limit = int(payload.get("limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    try:
+        CAP = int(os.environ.get("OWE_SWEEP_CAP", "8"))
+    except (TypeError, ValueError):
+        CAP = 8
+    try:
+        RECARD_TTL = int(os.environ.get("OWE_RECARD_TTL", "14400"))  # 4h
+    except (TypeError, ValueError):
+        RECARD_TTL = 14400
+    try:
+        HOURLY_CAP = int(os.environ.get("OWE_HOURLY_CAP", "20"))
+    except (TypeError, ValueError):
+        HOURLY_CAP = 20
+    lock = "lock:owe_reply_sweep"
+    if not dry:
+        _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "1800"])
+        if (_lk or "").strip() != "OK":
+            send(200, {"ok": True, "skipped": True,
+                       "skipped_reason": "previous_sweep_running",
+                       "posted": 0, "candidates": []})
+            return
+    posted = skipped_excluded = skipped_error = skipped_answered = 0
+    report = []
+    try:
+        try:
+            rows = read_lead_summary(None)
+        except Exception as e:  # noqa: BLE001
+            log("owe-reply-sweep read_lead_summary err:", repr(e))
+            send(200, {"ok": False, "error": "read failed",
+                       "posted": 0, "candidates": []})
+            return
+        cands = _owe_reply_candidates(rows)
+        # Layer-3 exclusion guard: never proactively card staff/crew/suppliers.
+        if _is_excluded is not None:
+            cands = [c for c in cands
+                     if not _is_excluded((c.get("customer_id") or ""))]
+        eligible = len(cands)
+        if limit > 0:
+            cands = cands[:limit]
+        for c in cands:
+            cid = (c.get("customer_id") or "").strip()
+            if not cid:
+                continue
+            name = c.get("name") or ""
+            label = c.get("label") or ""
+            secs = c.get("last_customer_message_at_seconds")
+            owe_hours = (float(secs) / 3600.0
+                         if isinstance(secs, (int, float)) else None)
+            if dry:
+                # Side-effect-free preview: resolve the real phone (so @lid
+                # leads show their number) and the last-direction guard verdict,
+                # so the operator sees EXACTLY what would be carded vs skipped.
+                _ph = ""
+                if _phone_for_cid is not None:
+                    try:
+                        _ph = _phone_for_cid(cid) or ""
+                    except Exception:  # noqa: BLE001
+                        _ph = ""
+                _wc, _skip = True, ""
+                if _waha_fetch_raw is not None:
+                    try:
+                        _ld = _last_msg_is_inbound(_waha_fetch_raw(cid, limit=20))
+                    except Exception:  # noqa: BLE001
+                        _ld = None
+                    if _ld is False:
+                        _wc, _skip = False, "answered (last WAHA msg outbound)"
+                report.append({"customer_id": cid, "name": name, "label": label,
+                               "owe_hours": (round(owe_hours, 1)
+                                             if owe_hours is not None else None),
+                               "phone": _ph, "would_card": _wc,
+                               "skip_reason": _skip})
+                if len(report) >= CAP:
+                    break
+                continue
+            # ANTI-STALE-OWE guard: conversation_state can be stale-TRUE when a
+            # staff reply went out from another phone and was never captured
+            # (the Xeno bypass). Re-check WAHA's actual last-message direction;
+            # skip ONLY when WAHA positively shows our side replied last. Fail-
+            # open (None/error -> proceed) so a WAHA outage never drops a
+            # genuinely-owed lead.
+            if _waha_fetch_raw is not None:
+                try:
+                    _ld = _last_msg_is_inbound(_waha_fetch_raw(cid, limit=20))
+                except Exception:  # noqa: BLE001
+                    _ld = None
+                if _ld is False:
+                    skipped_answered += 1
+                    continue
+            # Re-card dedup: one card per owed lead per OWE_RECARD_TTL. NOT a
+            # state bump (we only drafted, not replied) — the operator's ✅ send
+            # bumps last_operator_reply and drops the lead from "owed" naturally.
+            _ck = "owe:claim:" + cid
+            _got, _ = _redis(["SET", _ck, "1", "NX", "EX", str(RECARD_TTL)])
+            if (_got or "").strip() != "OK":
+                continue
+            # Per-hour global cap (anti-flood across the */15 runs). Counts leads
+            # about to be carded this rolling hour; over cap -> stop and pick up
+            # next hour (logged, never a silent truncation).
+            _hc, _ = _redis(["INCR", "owe:hourcap"])
+            try:
+                _hcn = int(_hc)
+            except (TypeError, ValueError):
+                _hcn = 0
+            if _hcn == 1:
+                _redis(["EXPIRE", "owe:hourcap", "3600"])
+            if _hcn > HOURLY_CAP:
+                log(f"owe-reply-sweep hourly cap ({HOURLY_CAP}) reached — "
+                    "deferring remaining owed leads to next hour")
+                _redis(["DEL", _ck])
+                break
+            cap = {}
+
+            def _cap(_status, body, _c=cap):
+                _c["body"] = body
+
+            try:
+                # NO silence_window -> handle_draft_followup's owe-reply override
+                # drafts a DIRECT REPLY to the unanswered message (not a nudge).
+                handle_draft_followup({
+                    "customer_id": cid, "customer_name": name,
+                    "no_state_bump": True,
+                }, _cap)
+            except Exception as e:  # noqa: BLE001
+                log("owe-reply-sweep draft err:", cid, repr(e))
+                _redis(["DEL", _ck])
+                skipped_error += 1
+                continue
+            body = cap.get("body", {}) or {}
+            if body.get("excluded"):
+                _redis(["DEL", _ck])
+                skipped_excluded += 1
+                continue
+            draft_text = (body.get("draft_text") or "").strip()
+            if not body.get("ok") or not draft_text:
+                _redis(["DEL", _ck])
+                skipped_error += 1
+                continue
+            name = body.get("customer_name") or name
+            label = body.get("label") or label
+            header = "🔴 UNANSWERED — needs your reply"
+            badge = body.get("quality_badge") or ""
+            draft_id = (str(int(_t.time() * 1000)) + "_"
+                        + "".join(_r.choices(_s.ascii_lowercase + _s.digits,
+                                             k=5)))
+            draft_obj = {
+                "id": draft_id, "customer_phone": cid, "customer_name": name,
+                "customer_message": "", "conversation_history": "",
+                "messages": [draft_text], "draft_text": draft_text,
+                "messages_sent_count": 0,
+                "notes": "Owe-reply proactive reminder (unanswered-customer sweep)",
+                "status": "pending", "telegram_chat_id": DEFAULT_ADMIN_CHAT,
+                "telegram_message_id": None, "is_followup": True,
+                "is_lead": False, "is_payment": False,
+                "break_condition": {"hit": False},
+            }
+            try:
+                _draft_save(draft_obj)
+            except Exception as e:  # noqa: BLE001
+                log("owe-reply-sweep _draft_save err:", cid, repr(e))
+                _redis(["DEL", _ck])
+                skipped_error += 1
+                continue
+            # Resolve the real phone so an @lid lead is identifiable by number.
+            phone = ""
+            if _phone_for_cid is not None:
+                try:
+                    phone = _phone_for_cid(cid) or ""
+                except Exception:  # noqa: BLE001
+                    phone = ""
+            card = build_followup_card(header, name, cid, label, owe_hours,
+                                       badge, draft_text, draft_id, phone=phone)
+            _sit = (body.get("situation_summary") or "").strip()
+            if _sit:
+                _marker = "⚠️ _confirm the recipient above before sending_"
+                if _marker in card["text"]:
+                    card["text"] = card["text"].replace(
+                        _marker, _marker + "\n" + _sit, 1)
+                else:
+                    card["text"] = card["text"].rstrip() + "\n\n" + _sit
+            _resp, _terr = _tg_post("sendMessage", {
+                "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                "parse_mode": "Markdown", "reply_markup": card["reply_markup"]})
+            if _terr:
+                _resp, _terr = _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                    "reply_markup": card["reply_markup"]})
+            if _terr:
+                log("owe-reply-sweep tg err (will retry next run):", cid, _terr)
+                _redis(["DEL", _ck])
+                skipped_error += 1
+                continue
+            posted += 1
+            report.append({"customer_id": cid, "name": name, "label": label,
+                           "owe_hours": (round(owe_hours, 1)
+                                         if owe_hours is not None else None),
+                           "draft_id": draft_id})
+            if posted >= CAP:
+                break
+        send(200, {"ok": True, "dry_run": dry, "eligible": eligible,
+                   "posted": posted, "skipped_excluded": skipped_excluded,
+                   "skipped_answered": skipped_answered,
+                   "skipped_error": skipped_error,
+                   "count": len(report), "candidates": report})
+    finally:
+        if not dry:
+            _redis(["DEL", lock])
+
+
 def handle_learn(payload, send):
     from server import (
         VALID_SCOPES,
