@@ -301,14 +301,15 @@ def test_no_sale_reason_date_passed_not_yet_reengaged():
 # --- parse-based passed-date routing (signal-independent, 2026-06-01) --------
 # The analyzer signal goes stale (sticky_hot/sticky_cold) so passed-date leads
 # vanish into the COLD overflow. Route off the PARSED booking date instead.
-def test_route_passed_date_not_owe_to_not_a_customer():
+def test_route_passed_date_not_owe_to_lost():
     # COLD passed-date lead we've already replied to (graceful exit sent) →
-    # NO ACTIVE SALE, despite the stale sticky_hot signal + nonzero score.
+    # 💔 LOST (a real prospect we didn't win), NOT "not a customer", despite the
+    # stale sticky_hot signal + nonzero score (operator 2026-06-08: P2-4).
     row = _r("COLD", importance_score=52, dates="Jan 1 2020",
              last_customer_message_at_seconds=900000,
              last_operator_reply_at_seconds=3600,
              last_analysis_signal="sticky_hot")
-    assert _awaiting_section_for(row, 800) == "NOT_A_CUSTOMER"
+    assert _awaiting_section_for(row, 800) == "LOST"
 
 
 def test_route_passed_date_but_owed_stays_awaiting():
@@ -337,6 +338,31 @@ def test_no_sale_reason_parsed_passed_date_reengaged():
              last_operator_reply_at_seconds=3600,
              last_analysis_signal="sticky_hot")
     assert "graceful" in _no_sale_reason(row).lower()
+
+
+# --- P2-4 (operator 2026-06-08): a real lead whose booking DATE PASSED is a
+# LOST prospect, NOT "not a customer" (vendor/spam). The passed-date route must
+# file it in the 💔 LOST section. The no-date supplier score-0 case
+# (test_reliable_zero_score_still_routes) is UNAFFECTED — it has no booking date,
+# so it stays in NOT_A_CUSTOMER. The discriminator is a real, passed booking date.
+def test_passed_date_not_owe_routes_to_lost():
+    # John Winter / Abdulla: booking date passed, graceful exit sent (we replied
+    # last -> not owed). A genuine prospect we didn't win -> 💔 LOST, never
+    # "not a customer". (Was wrongly routed to NOT_A_CUSTOMER.)
+    row = _r("COLD", importance_score=30, dates="Jan 1 2020",
+             last_customer_message_at_seconds=900000,   # customer ~10d silent
+             last_operator_reply_at_seconds=3600)        # we replied 1h ago -> not owe
+    assert _awaiting_section_for(row, 100) == "LOST"
+
+
+def test_no_date_supplier_score_zero_still_not_a_customer():
+    # Guard: a genuine no-booking-date supplier (score 0, no dates) must STILL
+    # route to NOT_A_CUSTOMER — the passed-date -> LOST change must not catch it.
+    row = _r("NEW", importance_score=0, dates="",
+             last_customer_message_at_seconds=1000,
+             last_operator_reply_at_seconds=None,
+             importance_reasoning="Alma is a supplier (Fruitful Day), no booking intent")
+    assert _awaiting_section_for(row, 300) == "NOT_A_CUSTOMER"
 
 
 if __name__ == "__main__":

@@ -119,8 +119,10 @@ def _booking_date_passed(row):
 def _awaiting_section_for(row, score):
     """Route a (non-paused, valid-label) lead to a /review section.
 
-    Returns 'AWAITING_REPLY', 'NOT_A_CUSTOMER', or '' (render in its own
+    Returns 'AWAITING_REPLY', 'LOST', 'NOT_A_CUSTOMER', or '' (render in its own
     label section). Pure: derives everything from row fields + score.
+    A real lead whose booking date PASSED routes to 💔 LOST (not "not a
+    customer"); only no-date suppliers/spam/score-0 go to NOT_A_CUSTOMER.
 
     Seconds fields are AGE-in-seconds (smaller = more recent), so:
       owe            = customer messaged after our last reply/nudge (_cs < _out)
@@ -191,12 +193,16 @@ def _awaiting_section_for(row, score):
     _sig_fresh = (isinstance(_anz, (int, float))
                   and isinstance(_cs, (int, float)) and _anz <= _cs)
     _terminal = (_sig in _TERMINAL_SIGNALS) and _sig_fresh
-    # Booking date PASSED + we're not actively owed a reply → graceful-exit
-    # bucket (NO ACTIVE SALE), regardless of a stale signal / not-yet-zeroed
-    # score. If they messaged after the date passed (owe) they're active —
-    # fall through to AWAITING so we draft them a graceful reply first.
+    # Booking date PASSED + we're not actively owed a reply → a real prospect we
+    # didn't win → 💔 LOST, NOT "not a customer" (that bucket is for vendor/spam).
+    # They HAD a real booking date, so they're a lost lead, not a non-customer
+    # (operator 2026-06-08: John Winter / Abdulla — date-passed graceful-exit
+    # leads — were wrongly shown under "not a customer"). The no-date supplier
+    # score-0 case still routes to NOT_A_CUSTOMER below (it has no booking date).
+    # If they messaged after the date passed (owe) they're active — fall through
+    # to AWAITING so we draft them a graceful reply first.
     if not _owe and _booking_date_passed(row):
-        return "NOT_A_CUSTOMER"
+        return "LOST"
     if _owe and not _imp_zero and not _terminal:
         # Operator 2026-06-02: do NOT pull owed leads into a separate top
         # section that hides their HOT/WARM/COLD label. Render them in their
@@ -1051,8 +1057,7 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                             "\n✅ *booked & paid*"
                             + (" — " + _det if _det else "")
                             + f"\n🧠 Hermes: *{imp}/100* · _confirm logistics or "
-                            "upsell (extra hour / add-ons)_"
-                            + _scope_change_hint(row))
+                            "upsell (extra hour / add-ons)_")
                 else:
                     imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                     # H8: the analysis ran on missing/empty history (analyzer
