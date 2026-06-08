@@ -495,6 +495,27 @@ def _get_lid_phone_map():
     return m
 
 
+def lids_for_phone(lid_map, phone):
+    """phone -> @lid cid(s) via WAHA's {'<lid>@lid': '<phone-digits>'} map. Match
+    is EXACT or a country-code-tolerant suffix (length diff <=4, one a suffix of
+    the other) so a number stored with/without its country code still resolves.
+    The @lid id is a hash (NOT the phone), so this map is the only reliable
+    phone->@lid path. Pure; None-safe. Returns a list (0/1 normally; >1 =
+    ambiguous, the caller decides)."""
+    d = "".join(c for c in str(phone or "") if c.isdigit())
+    if len(d) < 7:
+        return []
+    out = []
+    for lid, pn in (lid_map or {}).items():
+        p = "".join(c for c in str(pn or "") if c.isdigit())
+        if not p:
+            continue
+        if p == d or (abs(len(p) - len(d)) <= 4
+                      and (p.endswith(d) or d.endswith(p))):
+            out.append(lid)
+    return out
+
+
 def country_flag_for_cid(customer_id):
     """Flag emoji for a customer based on their phone country code.
     @c.us → digits are the phone; @lid → resolve via the cached lid map.

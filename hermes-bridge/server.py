@@ -1327,6 +1327,34 @@ def resolve_customer_by_phone(phone):
         return matches[0]["customer_id"], matches
     if matches:
         return None, matches
+    # @lid resolution — WhatsApp privacy ids (@lid) are hashes, NOT the phone,
+    # so they never match the @c.us DB lookup above (the reason @lid leads are
+    # phone-invisible). WAHA's lid->phone map (cached 10min, fail-soft) is the
+    # reliable phone->@lid path: invert it, then confirm the @lid has an
+    # (unmerged) customer_facts row. Fail-soft — an empty map (WAHA down) simply
+    # falls through to the chat-scan below, so behaviour never regresses.
+    try:
+        from waha import _get_lid_phone_map, lids_for_phone
+        cand_lids = lids_for_phone(_get_lid_phone_map(), digits)
+    except Exception:
+        cand_lids = []
+    for _lid in cand_lids[:5]:
+        _lid_e = _lid.replace("'", "''")
+        o2, e2 = _psql("SELECT customer_id || E'\\t' || COALESCE(name,'') "
+                       "FROM customer_facts "
+                       f"WHERE customer_id = '{_lid_e}' AND merged_into IS NULL")
+        if e2:
+            continue
+        for ln in (o2 or "").splitlines():
+            parts = ln.split("\t")
+            if parts and parts[0].strip():
+                matches.append({"customer_id": parts[0].strip(),
+                                "name": (parts[1].strip() if len(parts) > 1
+                                         else "")})
+    if len(matches) == 1:
+        return matches[0]["customer_id"], matches
+    if matches:
+        return None, matches
     # WAHA fallback — @lid customer_ids are hashes; the only way to map
     # phone -> @lid is via the chat list, where WAHA exposes either the
     # phone-formatted pushName or an internal id object with `user`.
