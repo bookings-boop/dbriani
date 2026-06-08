@@ -1117,6 +1117,30 @@ def _demote_to_cold_blocked(dates_str, reasoning, ever_booked=False,
     return False
 
 
+_BAD_MERIDIAN_HOUR_RE = re.compile(
+    r"(?<![:\d])(\d{1,2})\s*[ap]\.?\s?m\.?", re.IGNORECASE)
+
+
+def _valid_booking_time(s):
+    """Reject a malformed booking_time where a 12-hour meridian (am/pm) is
+    attached to an hour outside 1-12 — e.g. '30PM', '13PM', '0PM' (Antonio
+    2026-06-08: a '5:30PM' that lost its hour and stored as '30PM'). Conservative
+    — returns the input UNCHANGED for empty / valid / unparseable times (never
+    drops a good time, incl. ranges and ':MM' clocks; the minutes are excluded by
+    the lookbehind), and '' ONLY when a meridian hour is 0 or >12. Pure; None-safe."""
+    t = str(s or "").strip()
+    if not t:
+        return ""
+    for m in _BAD_MERIDIAN_HOUR_RE.finditer(t):
+        try:
+            h = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if h == 0 or h > 12:
+            return ""
+    return t
+
+
 def event_passed(dates_str, today=None):
     """True ONLY when the booking date deterministically parses to a date
     strictly BEFORE today (the event already happened). False for today /

@@ -651,6 +651,7 @@ def _booking_detail_line(row):
     simply omitted — and returns '' when nothing is known, so the caller can
     degrade gracefully. Pure; None-safe."""
     from util import _md_escape
+    from labels import _valid_booking_time
     row = row or {}
 
     def _s(*keys):
@@ -664,7 +665,7 @@ def _booking_detail_line(row):
 
     yacht = _s("booked_yacht", "yachts")
     date = _s("booking_date_abs", "dates")
-    time_ = _s("booking_time")
+    time_ = _valid_booking_time(_s("booking_time"))
     party = _s("party_size")
     addons = _s("addons")
     amount = _s("paid_amount")

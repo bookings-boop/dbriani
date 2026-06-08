@@ -62,7 +62,7 @@ from labels import (  # noqa: F401
     _passed_date_close_is_wrong, _PASSED_CLAIM_RE,
     _party_size_fit_line, _accumulate_feedback,
     _draft_log_columns, is_valid_mode,
-    slot_passed, _parse_booking_time, _dubai_now,
+    slot_passed, _parse_booking_time, _valid_booking_time, _dubai_now,
     _booked_yacht_from_accumulator,
 )
 from payments import (  # noqa: F401
@@ -2781,8 +2781,8 @@ def extract_customer_facts(incoming_message, history):
         abs_date = d.isoformat() if d is not None else ""
     facts["booking_date_abs"] = abs_date
     src = (incoming_message or "") + "\n" + (history or "")
-    facts["booking_time"] = _coalesce_capture(
-        str(parsed.get("booking_time") or ""), src, _extract_booking_time)
+    facts["booking_time"] = _valid_booking_time(_coalesce_capture(
+        str(parsed.get("booking_time") or ""), src, _extract_booking_time))
     facts["addons"] = _coalesce_capture(
         str(parsed.get("addons") or ""), src, _extract_addons)
     return facts
