@@ -1209,14 +1209,19 @@ def _reconcile_paid_unconfirmed():
             "  SELECT DISTINCT customer_id FROM autonomous_sends "
             "  WHERE kind='payment_received' "
             "  AND COALESCE((notes->>'total')::numeric,0) >= "
-            + str(CONFIRM_PROMOTION_MIN_AED) + ") a "
+            + str(CONFIRM_PROMOTION_MIN_AED)
+            # #10b (2026-06-08): a payer-mismatch deposit must NOT auto-confirm
+            # (mirror webhook/poll) — an unguarded reconcile re-promoted Émilie
+            # to CONFIRMED 3x after the operator force-disregarded her.
+            + " AND lower(COALESCE(notes->>'payer_mismatch','')) <> 'true'"
+            + ") a "
             "JOIN customer_facts cf ON cf.customer_id=a.customer_id "
             "WHERE cf.label <> 'CONFIRMED' AND cf.merged_into IS NULL "
             # Respect an operator lock (audit #10a, 2026-06-07): the hourly
             # auto-classifier honors label_locked_until, but reconcile didn't —
             # so an operator could not durably pin a paid lead OFF CONFIRMED
-            # (it flipped back within 2 min). (Blocking promotion on a
-            # pay_mismatch is a separate supervised-daytime change, #10b.)
+            # (it flipped back within 2 min). Payer-mismatch deposits are now
+            # excluded in the subquery above (#10b, 2026-06-08).
             "AND (cf.label_locked_until IS NULL OR cf.label_locked_until < now()) "
             "AND NOT EXISTS (SELECT 1 FROM autonomous_sends r "
             "  WHERE r.customer_id=a.customer_id "
@@ -7126,6 +7131,15 @@ def _process_nomod_charge_completed(raw_body, svix_id):
                         f"BELOW deposit threshold AED "
                         f"{total_f:.2f} — logged only, "
                         f"label unchanged ({prev_label})")
+                elif pay_mismatch:
+                    # Audit #10b (2026-06-08): a real-deposit charge whose PAYER
+                    # != the customer must NOT auto-CONFIRM (wrong-person /
+                    # forwarded link). The poll-payments path already holds on
+                    # this; the webhook (the PRIMARY path) was missing it and
+                    # auto-confirmed mismatch deposits. Operator confirms manually
+                    # after the payer-mismatch notification.
+                    log(f"nomod-webhook cid={customer_id!r} PAYER-MISMATCH on "
+                        f"AED {total_f:.2f} — NOT auto-confirming; operator review")
                 elif prev_label != "CONFIRMED":
                     apply_label_transition(
                         customer_id, prev_label, "CONFIRMED",
