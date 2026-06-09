@@ -614,9 +614,26 @@ def handle_queue(payload, send):
             # WAHA. Fail-safe — never blocks the send; no-ops before migration.
             try:
                 from server import record_outbound_draft
-                record_outbound_draft(_sd)
+                _recorded = record_outbound_draft(_sd)
             except Exception:
-                pass
+                _recorded = False
+            # State-sync (2026-06-09): bump conversation_state.last_operator_reply_at
+            # ATOMICALLY with the transcript write, right here at the server-side
+            # send-commit — so /review's owe verdict (_owes_reply) and the owe-reply
+            # sweep can't go stale when the n8n "Mark Op Reply (Approved)" node
+            # aborts in its fragile post-send done-chain (the root of the 6 live
+            # false-positives). Only when a REAL reply was recorded — record_outbound_
+            # draft returns False for operator-card chrome ("Tap Skip…") / empty, so
+            # a non-reply never marks us as replied. upsert_conversation_state
+            # canonicalizes the cid, so the bump lands on the SAME row the transcript
+            # + /review read. Fail-safe — never blocks the send.
+            if _recorded:
+                try:
+                    from server import upsert_conversation_state
+                    upsert_conversation_state(
+                        (_sd or {}).get("customer_phone"), "operator_reply")
+                except Exception:
+                    pass
             # Mark this phone so a sibling card's claim-send is blocked
             # within the same window. NX: first WON claim wins; the
             # phone key expires with the draft claim TTL.
