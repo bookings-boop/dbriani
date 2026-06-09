@@ -683,6 +683,44 @@ def _format_conv_history(rows, now_ts):
     return "\n".join(lines)
 
 
+def _repoint_identity_sql(dup, canon):
+    """4-B (2026-06-09): SQL to fold a merged dup's durable history onto its
+    canonical survivor, so every read under canonicalize_cid sees ONE unified
+    thread (the merge sets customer_facts.merged_into but strands the dup's
+    conversation_messages/state). Collision-safe vs the partial-unique index
+    (customer_id, msg_id WHERE msg_id IS NOT NULL) and the conversation_state PK:
+      0. DELETE the dup's msg_ids that already exist under canon (shared echoes).
+      1. UPDATE the remaining dup messages (+ NULL-msg_id rows) to canon.
+      2. INSERT the dup's state into canon, ON CONFLICT GREATEST-merge every timing
+         field so the fold never loses a fresher timestamp.
+      3. DELETE the dup's state.
+    Pure builder; caller runs each via _psql (fail-safe). Idempotent — re-running
+    after a fold is a no-op (the dup owns nothing)."""
+    d = _lit(dup)
+    c = _lit(canon)
+    return [
+        "DELETE FROM conversation_messages x WHERE x.customer_id = " + d +
+        " AND x.msg_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_messages"
+        " y WHERE y.customer_id = " + c + " AND y.msg_id = x.msg_id)",
+        "UPDATE conversation_messages SET customer_id = " + c +
+        " WHERE customer_id = " + d,
+        "INSERT INTO conversation_state (customer_id, last_customer_message_at,"
+        " last_operator_reply_at, last_nudge_drafted_at, followup_count,"
+        " reengage_attempts, updated_at) SELECT " + c + ","
+        " last_customer_message_at, last_operator_reply_at, last_nudge_drafted_at,"
+        " followup_count, reengage_attempts, now() FROM conversation_state"
+        " WHERE customer_id = " + d +
+        " ON CONFLICT (customer_id) DO UPDATE SET"
+        " last_customer_message_at = GREATEST(conversation_state.last_customer_message_at, EXCLUDED.last_customer_message_at),"
+        " last_operator_reply_at = GREATEST(conversation_state.last_operator_reply_at, EXCLUDED.last_operator_reply_at),"
+        " last_nudge_drafted_at = GREATEST(conversation_state.last_nudge_drafted_at, EXCLUDED.last_nudge_drafted_at),"
+        " followup_count = GREATEST(conversation_state.followup_count, EXCLUDED.followup_count),"
+        " reengage_attempts = GREATEST(conversation_state.reengage_attempts, EXCLUDED.reengage_attempts),"
+        " updated_at = now()",
+        "DELETE FROM conversation_state WHERE customer_id = " + d,
+    ]
+
+
 def _waha_synthetic_id(customer_id, ts, body):
     """Stable synthetic msg_id for an id-less WAHA row so it dedupes
     deterministically across analyses (the read-path-persist used to re-append a

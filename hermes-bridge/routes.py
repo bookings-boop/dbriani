@@ -3895,6 +3895,19 @@ def handle_reconcile_identities(payload, send):
             f"UPDATE customer_facts SET merged_into = {_lit(canon)}, "
             f"updated_at = now() WHERE customer_id = {_lit(dup)} "
             "AND merged_into IS NULL")
+        # 4-B re-point on merge (2026-06-09, flag RECONCILE_REPOINT_ENABLED): fold
+        # the dup's durable conversation_messages + conversation_state onto the
+        # canonical survivor so reads (analyzer / owe-reply / dormancy) see ONE
+        # thread — the merged_into pointer alone strands the dup's rows. Fail-safe:
+        # a re-point error logs but never rolls back the merge (reads still resolve
+        # via canonicalize_cid).
+        if os.environ.get("RECONCILE_REPOINT_ENABLED") == "1":
+            try:
+                from server import _repoint_identity_sql
+                for _rsql in _repoint_identity_sql(dup, canon):
+                    _psql(_rsql)
+            except Exception as _rpe:
+                log("reconcile re-point non-fatal:", repr(_rpe))
         # Audit #12 (2026-06-07): if the DUP carried an operator name-lock,
         # propagate it to canon — else the merge buries the locked name and the
         # next inbound re-extracts a fresh one (the 009 Zayn-revert class).
