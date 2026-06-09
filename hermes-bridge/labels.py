@@ -1008,6 +1008,18 @@ def _do_not_merge_pinned(cid_a, cid_b, rows):
     return False
 
 
+def _phone_disagreement_block(phone_a, phone_b):
+    """4-A (2026-06-09): True (BLOCK the identity merge) when BOTH phones are
+    known and DIFFER — a recycled/re-pointed @lid resolving to a different
+    person's number than the durable lid_phone_map recorded. Digits-only compare
+    (formatting differences are not a conflict). Fail-OPEN: a missing/blank phone
+    on either side never blocks (defers to the name-conflict guard). Pure.
+    ADD-ONLY — can only ever block a merge, never enable one."""
+    a = "".join(ch for ch in str(phone_a or "") if ch.isdigit())
+    b = "".join(ch for ch in str(phone_b or "") if ch.isdigit())
+    return bool(a) and bool(b) and a != b
+
+
 def _manual_override_protects(signal, age_days, window_days=14):
     """Pure. True when a lead carries a RECENT manual operator override
     (signal 'manual:*') that the analyzer's auto-demote-to-COLD must NOT

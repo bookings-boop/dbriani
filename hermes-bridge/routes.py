@@ -3815,7 +3815,7 @@ def handle_reconcile_identities(payload, send):
         # carry DISTINCT real names — they are different humans. Fail-OPEN on a
         # name-fetch error (only a clear name conflict blocks).
         from labels import (_merge_blocked, _do_not_merge_pinned,
-                            _merge_canonical_pick)
+                            _merge_canonical_pick, _phone_disagreement_block)
         # Durable name-INDEPENDENT un-merge pin (stress #4): once a pair has been
         # refused for a name conflict, a 'do_not_merge' row keeps it un-merged
         # even if a later WAHA name-refresh blanks/aligns a name (which would
@@ -3831,6 +3831,31 @@ def handle_reconcile_identities(payload, send):
         if _do_not_merge_pinned(lid, cus, pin_rows):
             skipped.append(f"{lid} <-> {cus} — do_not_merge pin (held un-merged)")
             log(f"reconcile SKIP pinned: {skipped[-1]}")
+            continue
+        # 4-A lid_phone_map phone-disagreement guard (2026-06-09): the durable map
+        # records this @lid's real phone (built from WAHA /lids). If WAHA now
+        # resolves the lid to a @c.us whose phone DISAGREES with the map's CLEAN
+        # (conflict_phone IS NULL) record, the LID was recycled/re-pointed to a
+        # DIFFERENT person — BLOCK + pin, exactly like the name-conflict guard.
+        # ADD-ONLY: can only block a merge, never enable one; runs IN ADDITION to
+        # the name guard below (a merge proceeds only if BOTH agree).
+        _pm_out, _pme = _psql(
+            "SELECT phone FROM lid_phone_map "
+            f"WHERE lid = {_lit(lid)} AND conflict_phone IS NULL")
+        _phone_lid = ((_pm_out or "").strip().splitlines() or [""])[0].strip()
+        _phone_cus = cus.split("@")[0]
+        if _phone_disagreement_block(_phone_lid, _phone_cus):
+            _psql(
+                "INSERT INTO customer_label_history (customer_id, from_label, "
+                "to_label, signal, evidence, message_count, created_at, "
+                f"created_by) SELECT {_lit(lid)}, label, label, 'do_not_merge', "
+                f"{_lit('lid_phone_map phone conflict ' + _phone_lid + ' vs ' + cus)}, "
+                "COALESCE(message_count,0), now(), 'system' FROM customer_facts "
+                f"WHERE customer_id = {_lit(lid)}")
+            skipped.append(
+                f"{lid} (map phone {_phone_lid}) != {cus} — recycled-LID phone "
+                f"conflict, pinned")
+            log(f"reconcile SKIP phone-conflict (pinned): {skipped[-1]}")
             continue
         nm_out, _nme = _psql(
             "SELECT customer_id || '\x1f' || COALESCE(name,'') || '\x1f' || "
