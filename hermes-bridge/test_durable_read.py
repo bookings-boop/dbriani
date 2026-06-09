@@ -200,7 +200,11 @@ def test_never_raises_when_psql_raises():
     assert out["history"] == "WAHA-ONLY-FALLBACK"
 
 
-def test_durable_present_tops_up_with_newer_waha_only():
+def test_durable_present_merges_all_waha_deduped():
+    # F1 (2026-06-09): WAHA history is now MERGED IN FULL, deduped against durable
+    # by msg_id + (direction, body). Older WAHA rows are NO LONGER dropped — the
+    # old 'newer-than-max-only' top-up hid real inbound behind a single recent
+    # durable echo (the Devanshu/Youssra hollow 'first contact' bug).
     now = int(time.time())
     durable_out = "\n".join([
         _enc(now - 7200, "in", "I want to book Saturday", "D1"),
@@ -209,8 +213,13 @@ def test_durable_present_tops_up_with_newer_waha_only():
 
     def waha_raw(cid, **k):
         return [
+            # OLDER than the oldest durable row — old code DROPPED it; F1 keeps it.
             {"ts": now - 99999, "direction": "in",
-             "body": "ANCIENT should be ignored", "msg_id": "OLD"},
+             "body": "earlier message we used to lose", "msg_id": "OLD"},
+            # a WAHA echo of a durable row (same msg_id) — must NOT double-add.
+            {"ts": now - 7200, "direction": "in",
+             "body": "I want to book Saturday", "msg_id": "D1"},
+            # newer than durable — topped up as before.
             {"ts": now - 60, "direction": "in",
              "body": "paid the deposit just now", "msg_id": "NEW"},
         ]
@@ -223,10 +232,11 @@ def test_durable_present_tops_up_with_newer_waha_only():
     h = out["history"]
     assert "I want to book Saturday" in h
     assert "Great — deposit is AED 2000" in h
-    # only the WAHA message NEWER than the last durable ts is topped up
     assert "paid the deposit just now" in h
-    assert "ANCIENT should be ignored" not in h
-    assert out["count"] == 3, out
+    # F1: the OLDER WAHA row is now MERGED, not dropped
+    assert "earlier message we used to lose" in h, "F1 must keep older WAHA history"
+    # dedup: the D1 echo did NOT double-add (2 durable + OLD + NEW = 4, not 5)
+    assert out["count"] == 4, out
     assert out["last_message"] == "paid the deposit just now"
 
 

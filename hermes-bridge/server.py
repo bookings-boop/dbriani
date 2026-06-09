@@ -683,6 +683,52 @@ def _format_conv_history(rows, now_ts):
     return "\n".join(lines)
 
 
+def _waha_synthetic_id(customer_id, ts, body):
+    """Stable synthetic msg_id for an id-less WAHA row so it dedupes
+    deterministically across analyses (the read-path-persist used to re-append a
+    NULL-msg_id row on EVERY analysis, since a NULL msg_id never matches the
+    ON CONFLICT arbiter). Pure."""
+    import hashlib
+    h = hashlib.sha1((body or "").encode("utf-8", "replace")).hexdigest()[:10]
+    return "waha:%s:%d:%s" % (str(customer_id or ""), int(ts or 0), h)
+
+
+def _merge_waha_topup(customer_id, durable_rows, waha_rows):
+    """F1 (2026-06-09): return the WAHA rows NOT already in the durable store, so
+    build_analyzer_history merges ALL of WAHA's history instead of only rows newer
+    than the newest durable ts. The old `ts > max(durable)` filter silently
+    DROPPED every older WAHA message whenever the durable store was partial — one
+    recent durable echo hid all real inbound -> hollow 'first contact' thread
+    (Devanshu / Youssra @lid class).
+
+    Dedup is durable-authoritative on TWO keys: (1) msg_id, and (2)
+    (direction, normalized-body) — the SAME bubble carries a bridge draft id in the
+    durable store but a WAHA 'true_<lid>_<hash>' id, so msg_id-only dedup would
+    double-show it. id-less WAHA rows are stamped with _waha_synthetic_id so the
+    read-path-persist dedupes them. Empty-body rows skipped. Pure; returns NEW row
+    dicts (msg_id populated); caller sorts + windows as before."""
+    def _ck(r):
+        return ((r.get("direction") or ""), (r.get("body") or "").strip()[:240])
+    seen_ids = {r.get("msg_id") for r in (durable_rows or []) if r.get("msg_id")}
+    seen_content = {_ck(r) for r in (durable_rows or [])
+                    if (r.get("body") or "").strip()}
+    topup = []
+    for r in (waha_rows or []):
+        body = (r.get("body") or "").strip()
+        if not body:
+            continue
+        mid = r.get("msg_id") or _waha_synthetic_id(customer_id, r.get("ts"), body)
+        ck = _ck(r)
+        if mid in seen_ids or ck in seen_content:
+            continue
+        seen_ids.add(mid)
+        seen_content.add(ck)
+        nr = dict(r)
+        nr["msg_id"] = mid
+        topup.append(nr)
+    return topup
+
+
 def build_analyzer_history(customer_id, waha_limit=100):
     """FAIL-SAFE durable history for hermes_analyze_lead.
 
@@ -712,14 +758,14 @@ def build_analyzer_history(customer_id, waha_limit=100):
     # Empty / absent store for this cid → graceful WAHA-only fallback.
     if not rows:
         return waha_fetch_history(customer_id, limit=waha_limit)
-    # Top up with WAHA messages NEWER than the newest durable ts (best-effort).
+    # Merge in ALL WAHA history not already durable (F1, 2026-06-09) — deduped by
+    # msg_id + (direction, body) so a partial durable store no longer hides older
+    # WAHA inbound behind a single recent echo. (Was: only ts > max(durable ts),
+    # which dropped every older WAHA row -> hollow 'first contact' thread.)
     topup = []
     try:
-        max_ts = max(int(r.get("ts") or 0) for r in rows)
         waha_rows = waha_fetch_raw(customer_id, limit=waha_limit) or []
-        topup = [r for r in waha_rows
-                 if int(r.get("ts") or 0) > max_ts
-                 and (r.get("body") or "").strip()]
+        topup = _merge_waha_topup(cid, rows, waha_rows)
         combined = sorted(rows + topup, key=lambda r: int(r.get("ts") or 0))
     except Exception:
         topup = []
