@@ -50,7 +50,12 @@ def test_reengaged_passed_date_visible_despite_negative_score_and_overflow():
     # ordered before Marimuthu (caller sorts score-desc) so without the sort he
     # overflows. Marimuthu: COLD, passed date, we re-engaged (recent reply),
     # score -100 (damped).
+    # Item 4 (2026-06-09): the role-anchor gate routes an ANCHORLESS score-0 lead
+    # to 💔 LOST, so these fillers carry the vendor/spam anchor real suppliers
+    # have — keeping them in 💤 NO ACTIVE SALE (their intent) while Marimuthu (a
+    # genuine passed-date prospect) renders in 💔 LOST and stays visible.
     fillers = [(0, _row(f"sup{i}@lid", name=f"Sup{i}",
+                        importance_reasoning="vendor / spam pitch — not a customer",
                         last_analysis_signal="cold_decay")) for i in range(20)]
     mari = _row("mari@lid", name="Marimuthu", dates="Jan 1 2020",
                 last_customer_message_at_seconds=900000,

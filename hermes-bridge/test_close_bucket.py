@@ -56,6 +56,19 @@ def test_vendor_is_not_a_customer():
     assert b == "NOT_A_CUSTOMER"
 
 
+def test_role_anchor_tokens_are_not_a_customer():
+    # Item 4 (2026-06-09): extend the non-customer anchor lexicon with the
+    # yacht-trade roles the operator named — a crew member / captain / agent /
+    # charter operator is a NON-customer, not a lost sale.
+    for r in ("message is from a freelance yacht crew member seeking work",
+              "this is a yacht captain offering his services for hire",
+              "a travel agent reselling our charters to their clients",
+              "another charter operator proposing a partnership"):
+        b, _ = _close_bucket(r)
+        assert b == "NOT_A_CUSTOMER", r
+        assert _close_label_for(r) == "DISREGARDED", r
+
+
 def test_spam_is_not_a_customer():
     assert _close_bucket("spam / wrong number, not a real enquiry")[0] == \
         "NOT_A_CUSTOMER"

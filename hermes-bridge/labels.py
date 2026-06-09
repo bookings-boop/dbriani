@@ -412,7 +412,11 @@ _COMPLETED_RE = re.compile(
 _NAC_RE = re.compile(
     r"\b(vendor|supplier|seller|selling\s+to\s+us|spam|wrong\s+number|"
     r"b2b\s+pitch|partnership|pitch(ing)?|marketing|promot(e|ion|ing)|"
-    r"advertis|agency|broker|recruit|job\s+(enquiry|inquiry|application))\b",
+    r"advertis|agency|broker|recruit|job\s+(enquiry|inquiry|application)|"
+    # yacht-trade non-customer ROLES (item 4, 2026-06-09): a crew member /
+    # captain / reselling agent / charter operator is a NON-customer, not a
+    # lost sale.
+    r"crew|captain|agent|charter\s+operator)\b",
     re.IGNORECASE)
 _LOST_PRICE_RE = re.compile(
     r"\b(price|pricing|expensive|too\s+much|budget|afford|"

@@ -116,6 +116,28 @@ def _booking_date_passed(row):
         return False
 
 
+def _has_role_anchor(row):
+    """True when the lead is a genuine NON-CUSTOMER. Gates the NOT_A_CUSTOMER
+    route: only a lead with such an anchor (or a fresh terminal verdict) belongs
+    in 💤 NO ACTIVE SALE; a RELIABLE score-0 lead WITHOUT one is a genuine lost
+    lead → 💔 LOST, not a non-customer (operator 2026-06-09: real lost leads were
+    being dumped under 'not a customer'). The anchor is EITHER:
+      • the stored DISREGARDED label — an already-classified non-customer
+        (vendor/spam/wrong-number); must NOT be re-routed to 💔 LOST, OR
+      • a non-customer/COMPLETED marker in the analyzer reasoning (labels._NAC_RE
+        — vendor/supplier/agent/crew/captain/broker/spam/recruiter — or a
+        completed booking).
+    Pure; None/import-safe."""
+    if (row.get("label") or "").strip().upper() == "DISREGARDED":
+        return True
+    try:
+        from labels import _close_bucket
+        bkt, _ = _close_bucket(row.get("importance_reasoning"))
+        return bkt in ("NOT_A_CUSTOMER", "COMPLETED")
+    except Exception:
+        return False
+
+
 def _awaiting_section_for(row, score):
     """Route a (non-paused, valid-label) lead to a /review section.
 
@@ -214,7 +236,14 @@ def _awaiting_section_for(row, score):
         # cached 'passed' verdict from before the 4b fix deployed). Keep visible.
         if _booking_date_is_future(row.get("dates")):
             return ""
-        return "NOT_A_CUSTOMER"
+        # ROLE-ANCHOR gate (item 4, 2026-06-09): the 💤 NO ACTIVE SALE / "not a
+        # customer" bucket is ONLY for a genuine non-customer (vendor/supplier/
+        # agent/crew/…, via _has_role_anchor) or a FRESH terminal verdict. A
+        # RELIABLE score-0 lead with NO such anchor is a real lead that quietly
+        # died → 💔 LOST, not "not a customer".
+        if _terminal or _has_role_anchor(row):
+            return "NOT_A_CUSTOMER"
+        return "LOST"
     return ""
 
 

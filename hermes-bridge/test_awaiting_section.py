@@ -98,18 +98,54 @@ def test_cold_decay_is_not_terminal_owe_stays_awaiting():
     assert _awaiting_section_for(row, 200) == ""  # operator 2026-06-02: owed leads render in their OWN tier (with a 🔴 needs-your-reply badge), no separate AWAITING_REPLY section
 
 
-def test_score_zero_owe_goes_to_not_a_customer():
+def test_score_zero_owe_no_anchor_goes_to_lost():
+    # Item 4 (role-anchor gate, 2026-06-09): a RELIABLE score-0 owed lead with NO
+    # non-customer anchor (no vendor/supplier/crew/etc. in the analyzer reasoning)
+    # and no FRESH terminal signal is a genuine lost lead → 💔 LOST, NOT "not a
+    # customer". (Reverses the pre-2026-06-09 'score-0 always → NAC' for the
+    # anchorless case.)
     row = _r("NEW", importance_score=0,
              last_customer_message_at_seconds=3600,
              last_operator_reply_at_seconds=7200,
              last_analysis_signal="new_window",
              last_analyzed_at_seconds=1800)
-    assert _awaiting_section_for(row, 300) == "NOT_A_CUSTOMER"
+    assert _awaiting_section_for(row, 300) == "LOST"
 
 
-def test_score_zero_not_owe_still_not_a_customer():
-    # score-0 always bucketed, owe or not (matches pre-fix behaviour)
+def test_score_zero_not_owe_no_anchor_goes_to_lost():
+    # Item 4: roleless reliable score-0 (owe or not) is a real lost lead → LOST,
+    # not the 💤 NO ACTIVE SALE / "not a customer" bucket.
     row = _r("COLD", importance_score=0,
+             last_customer_message_at_seconds=7200,
+             last_operator_reply_at_seconds=3600)
+    assert _awaiting_section_for(row, 200) == "LOST"
+
+
+def test_score_zero_with_noncustomer_anchor_stays_not_a_customer():
+    # Item 4: a score-0 lead WITH a genuine non-customer anchor in the analyzer
+    # reasoning (vendor/supplier/spam/…) still belongs in 💤 NO ACTIVE SALE.
+    row = _r("COLD", importance_score=0,
+             importance_reasoning="this is a yacht supplier pitching B2B services",
+             last_customer_message_at_seconds=7200,
+             last_operator_reply_at_seconds=3600)
+    assert _awaiting_section_for(row, 200) == "NOT_A_CUSTOMER"
+
+
+def test_score_zero_with_new_role_token_stays_not_a_customer():
+    # Item 4: the new role-anchor tokens (crew/captain/agent/charter operator)
+    # mark a non-customer → 💤 NO ACTIVE SALE, not LOST.
+    row = _r("COLD", importance_score=0,
+             importance_reasoning="message is from a freelance yacht crew member seeking work",
+             last_customer_message_at_seconds=7200,
+             last_operator_reply_at_seconds=3600)
+    assert _awaiting_section_for(row, 200) == "NOT_A_CUSTOMER"
+
+
+def test_score_zero_disregarded_label_stays_not_a_customer():
+    # Item 4: a DISREGARDED lead is an ALREADY-classified non-customer (vendor/
+    # spam/wrong-number) — it stays in 💤 NO ACTIVE SALE even when the reasoning
+    # carries no anchor text; it must NOT be moved to 💔 LOST ('legit prospect').
+    row = _r("DISREGARDED", importance_score=0,
              last_customer_message_at_seconds=7200,
              last_operator_reply_at_seconds=3600)
     assert _awaiting_section_for(row, 200) == "NOT_A_CUSTOMER"
