@@ -4752,7 +4752,7 @@ def handle_autosend_check(payload, send):
     rolls the QC sample and logs the checkpoint event, so evaluating on
     both calls would roll QC twice and double-count the checkpoint."""
     from server import (evaluate_caps, get_mode, log_autosend,
-                        AUTOSEND_MIN_SCORE, build_quality_query,
+                        AUTOSEND_MIN_SCORE, build_quality_query_parts,
                         _draft_latest_for_customer, canonicalize_cid,
                         set_mode)
     from labels import (_quality_floor_ok, _is_handoff_message,
@@ -4840,14 +4840,15 @@ def handle_autosend_check(payload, send):
                    "score": "handoff", "reason": reason})
         return
     try:
-        _score, _flags, _summary = _anthropic_score(build_quality_query({
+        _qpfx, _qbody = build_quality_query_parts({
             "system_prompt": payload.get("system_prompt") or "",
             "customer_name": _nm,
             "history": _hist,
             "incoming_message": _inc,
             "current_draft": _draft,
             "customer_id": cid,
-        }))
+        })
+        _score, _flags, _summary = _anthropic_score(_qbody, system_prefix=_qpfx)
     except Exception as _se:
         log(f"autosend-check FLOOR score error customer={cid}: {_se!r}")
         _score = 0
@@ -5853,7 +5854,7 @@ def handle_quality_check(payload, send):
     returns 200 ok:false so n8n simply shows no badge — the draft is never
     silently changed. Replaces the old /improve auto-rewrite pass."""
     from server import (
-        build_quality_query,
+        build_quality_query_parts,
         extract_json,
         run_hermes,
     )
@@ -5878,7 +5879,8 @@ def handle_quality_check(payload, send):
     import time as _t
     _t0 = _t.time()
     try:
-        score, flags, summary = _anthropic_score(build_quality_query(payload))
+        _qpfx, _qbody = build_quality_query_parts(payload)
+        score, flags, summary = _anthropic_score(_qbody, system_prefix=_qpfx)
     except Exception as e:
         log("quality-check EXEC ERROR", repr(e))
         send(200, {"ok": False, "error": f"score error: {e}"})
@@ -5957,9 +5959,27 @@ def handle_quality_check(payload, send):
 
 
 # === ≥8 quality gate (operator 2026-06-01: "every draft should score 8+") =====
+def _log_anthropic_usage(tag, resp):
+    """One-line REAL usage log for the bridge's direct Anthropic calls (Lever 1a,
+    2026-06-10) so cost is measurable from journald instead of estimated.
+    cache_w = tokens written to cache (~1.25x), cache_r = served from cache
+    (~0.1x); cache_r rising vs cache_w means caching is working. Fail-safe —
+    never raises into the call path."""
+    try:
+        u = (resp or {}).get("usage") or {}
+        log(f"anthropic {tag} in={u.get('input_tokens', 0)} "
+            f"out={u.get('output_tokens', 0)} "
+            f"cache_w={u.get('cache_creation_input_tokens', 0)} "
+            f"cache_r={u.get('cache_read_input_tokens', 0)}")
+    except Exception:
+        pass
+
+
 def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
     """One draft via the Anthropic Messages API — same model/shape as the n8n
-    'Claude AI' node. Returns (messages_list, notes, err)."""
+    'Claude AI' node. Returns (messages_list, notes, err). The static system
+    prompt is cache_control'd (Lever 1a): identical across a regen loop's
+    attempts, so attempts 2+ read it at ~0.1x instead of full input price."""
     import urllib.request
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
@@ -5971,7 +5991,8 @@ def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
           "\n\nReturn ONLY the JSON object specified in the system prompt - "
           "no preamble, no code fences.")
     data = json.dumps({"model": "claude-sonnet-4-6", "max_tokens": 1024,
-                       "system": [{"type": "text", "text": system_text}],
+                       "system": [{"type": "text", "text": system_text,
+                                   "cache_control": {"type": "ephemeral"}}],
                        "messages": [{"role": "user", "content": uc}]}).encode()
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=data)
     req.add_header("x-api-key", key)
@@ -5979,7 +6000,9 @@ def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
     req.add_header("content-type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            txt = json.load(r)["content"][0]["text"]
+            resp = json.load(r)
+        _log_anthropic_usage("draft", resp)
+        txt = resp["content"][0]["text"]
     except Exception as e:
         return [], "", f"anthropic error: {e}"
     t = re.sub(r"^```json\s*|^```\s*|```\s*$", "", (txt or "").strip()).strip()
@@ -5997,17 +6020,28 @@ def _anthropic_draft(system_text, history, name, phone, user_message, hint=""):
         return [], "", "unparseable draft"
 
 
-def _anthropic_score(query_text):
+def _anthropic_score(query_text, system_prefix=None):
     """Fast quality score via Anthropic (the local Hermes scorer is slow on the
-    box). query_text = build_quality_query(...). Returns (score, flags, summary)."""
+    box). Returns (score, flags, summary).
+
+    query_text = the VARIABLE body, build_quality_query_parts(...)[1]. When
+    system_prefix (the ~19K static drafter prompt, build_quality_query_parts(
+    ...)[0]) is given, it goes in a cache_control'd system block so it is cached
+    and read at ~0.1x instead of re-billed at full input price on every score
+    (Lever 1a, 2026-06-10). When None, the legacy single-string behavior holds
+    (query_text carries everything; no large cached block)."""
     import urllib.request
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         return 0, [], ""
+    sysblocks = [{"type": "text", "text": "You are a strict WhatsApp-draft "
+                  "quality scorer. Output ONLY the JSON object requested — no "
+                  "preamble, no code fences."}]
+    if system_prefix:
+        sysblocks.append({"type": "text", "text": system_prefix,
+                          "cache_control": {"type": "ephemeral"}})
     data = json.dumps({"model": "claude-sonnet-4-6", "max_tokens": 300,
-                       "system": [{"type": "text", "text": "You are a strict "
-                        "WhatsApp-draft quality scorer. Output ONLY the JSON "
-                        "object requested — no preamble, no code fences."}],
+                       "system": sysblocks,
                        "messages": [{"role": "user", "content": query_text}]}).encode()
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=data)
     req.add_header("x-api-key", key)
@@ -6015,7 +6049,9 @@ def _anthropic_score(query_text):
     req.add_header("content-type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            txt = json.load(r)["content"][0]["text"]
+            resp = json.load(r)
+        _log_anthropic_usage("score", resp)
+        txt = resp["content"][0]["text"]
     except Exception:
         return 0, [], ""
     t = re.sub(r"^```json\s*|^```\s*|```\s*$", "", (txt or "").strip()).strip()
@@ -6034,7 +6070,7 @@ def _gate_loop(full_system, history, name, phone, user_message, cid,
     feeding the scorer's flags back until >= threshold or max_attempts. Returns
     the best {messages, notes, score, flags, summary, attempts, capped} or None.
     Shared by the main-draft gate and the (fast) Draft-message button."""
-    from server import build_quality_query, sanitize_draft_messages
+    from server import build_quality_query_parts, sanitize_draft_messages
     best, hint, attempts = None, "", 0
     for attempt in range(1, max_attempts + 1):
         attempts = attempt
@@ -6047,10 +6083,11 @@ def _gate_loop(full_system, history, name, phone, user_message, cid,
         try:
             # 2A: pass the bubble LIST (not a joined blob) so the scorer judges
             # real WhatsApp message structure (wall_of_text).
-            score, flags, summary = _anthropic_score(build_quality_query({
+            _qpfx, _qbody = build_quality_query_parts({
                 "system_prompt": score_system, "customer_name": name,
                 "history": history, "incoming_message": user_message,
-                "current_draft": msgs, "customer_id": cid}))
+                "current_draft": msgs, "customer_id": cid})
+            score, flags, summary = _anthropic_score(_qbody, system_prefix=_qpfx)
         except Exception:
             score, flags, summary = 0, [], ""
         # 3A: deterministic price guard inside the gate (the Anthropic scorer
@@ -6092,7 +6129,7 @@ def handle_draft_gated(payload, send):
     persona, and if below threshold REGENERATE feeding the scorer's flags back,
     up to max_attempts. Returns the BEST draft. override_directions skips the
     gate. Fail-open: ok:false lets n8n fall back to its normal draft."""
-    from server import (build_quality_query, extract_json, run_hermes,
+    from server import (build_quality_query_parts, extract_json, run_hermes,
                         sanitize_draft_messages)
     sp = (payload.get("system_prompt") or "").strip()
     if not sp:
@@ -6134,10 +6171,11 @@ def handle_draft_gated(payload, send):
             # (score, flags, summary) contract. (Bug 2 slow-regen, 2026-06-02.)
             # 2A: pass the bubble LIST so the scorer judges real message
             # structure, not a flattened blob.
-            score, flags, summary = _anthropic_score(build_quality_query({
+            _qpfx, _qbody = build_quality_query_parts({
                 "system_prompt": sp, "customer_name": name, "history": hist,
                 "incoming_message": umsg, "current_draft": msgs,
-                "customer_id": cid}))
+                "customer_id": cid})
+            score, flags, summary = _anthropic_score(_qbody, system_prefix=_qpfx)
         except Exception:
             score, flags, summary = 0, [], ""
         # 3A: deterministic price guard + ground-truth correction into regen.
@@ -6181,10 +6219,12 @@ def handle_draft_gated(payload, send):
     orig = payload.get("original_messages") or payload.get("original_draft")
     if orig:
         try:
-            original_score, _of, _osum = _anthropic_score(build_quality_query({
+            _qpfx2, _qbody2 = build_quality_query_parts({
                 "system_prompt": sp, "customer_name": name, "history": hist,
                 "incoming_message": umsg, "current_draft": orig,
-                "customer_id": cid}))
+                "customer_id": cid})
+            original_score, _of, _osum = _anthropic_score(
+                _qbody2, system_prefix=_qpfx2)
             # _anthropic_score returns 0 (not None) on failure/out-of-range.
             # Map that to None so n8n's swap uses `: score` (the local-Hermes
             # badge) instead of flooring baseScore to 1 — which would make the

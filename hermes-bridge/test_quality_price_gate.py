@@ -21,7 +21,7 @@ def _run(draft):
         captured["status"] = status
         captured["body"] = body
 
-    def fake_anthropic_score(query):
+    def fake_anthropic_score(query, system_prefix=None):
         # LLM scorer says 7/10, clean — the deterministic price gate must
         # override. (2026-06-07: /quality-check now scores via _anthropic_score,
         # not the slow local run_hermes — see the incident saturation fix.)

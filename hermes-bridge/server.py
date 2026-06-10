@@ -3661,19 +3661,20 @@ def _format_draft_to_score(current_draft):
     return "\n--- DRAFT TO SCORE ---\n" + str(current_draft or "").strip()
 
 
-def build_quality_query(p):
-    """Compose the -q query for a FAST quality SCORE of an existing draft.
-    Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
-    {"score": N, "flags": [...], "summary": "one line"}. See /quality-check.
+def build_quality_query_parts(p):
+    """Split form of build_quality_query: returns (static_prefix, variable_body)
+    so the SCORER call can place the static prefix in a `cache_control`'d system
+    block (Lever 1a, 2026-06-10) — the ~19K drafter prompt is then cached and
+    read at ~0.1x instead of re-billed at full input price on every score.
+    `prefix + "\\n" + body` is BYTE-IDENTICAL to build_quality_query(p) when a
+    system prompt exists; prefix is "" (everything in body) when there is none.
 
     Accepts an optional p["system_prompt"] so the SCORER judges against the
     SAME persona the drafter used (the gate passes n8n's live system prompt) —
     otherwise drafter and scorer can diverge (server-prompt drift)."""
-    parts = []
     sp = (p.get("system_prompt") or "").strip() or load_system_prompt()
-    if sp:
-        parts.append(sp)
-        parts.append("=" * 60)
+    prefix = (sp + "\n" + ("=" * 60)) if sp else ""
+    parts = []
     name = (p.get("customer_name") or "the customer").strip()
     hist = (p.get("history") or "").strip()
     _task, _show_msg = _quality_task_framing(p.get("incoming_message"), hist)
@@ -3761,7 +3762,17 @@ def build_quality_query(p):
         "ignores_question, rule_violation, off_tone, too_pushy, wall_of_text, "
         "cramped_options. Use an empty list if the draft is strong."
     )
-    return "\n".join(parts)
+    return prefix, "\n".join(parts)
+
+
+def build_quality_query(p):
+    """Compose the -q query for a FAST quality SCORE of an existing draft.
+    Hermes scores 1-10 and flags issues — it does NOT rewrite. Returns
+    {"score": N, "flags": [...], "summary": "one line"}. See /quality-check.
+    Thin wrapper over build_quality_query_parts — recombines the (prefix, body)
+    split byte-for-byte for legacy single-string callers."""
+    prefix, body = build_quality_query_parts(p)
+    return (prefix + "\n" + body) if prefix else body
 
 
 def build_learn_query(p):

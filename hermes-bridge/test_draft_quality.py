@@ -87,13 +87,16 @@ def test_price_correction_hint_empty_when_no_mismatch():
 def test_draft_gated_returns_original_score_same_scorer():
     import routes
     import server
-    saved = (server.build_quality_query, routes._anthropic_score,
+    saved = (server.build_quality_query_parts, routes._anthropic_score,
              routes._anthropic_draft, server.sanitize_draft_messages)
     try:
-        server.build_quality_query = lambda p: "Q::" + str(p.get("current_draft"))
+        # Lever 1a: the gate now calls build_quality_query_parts -> (prefix, body)
+        # and _anthropic_score(body, system_prefix=prefix). Stub the split form.
+        server.build_quality_query_parts = lambda p: (
+            "PFX", "Q::" + str(p.get("current_draft")))
         routes._anthropic_draft = lambda *a, **k: (["regen bubble"], "notes", None)
         # original ("old draft") scores 5; regenerated ("regen bubble") scores 9
-        routes._anthropic_score = lambda q: (
+        routes._anthropic_score = lambda q, system_prefix=None: (
             (9, [], "") if "regen bubble" in q else (5, [], ""))
         server.sanitize_draft_messages = lambda m: (m, False)
         captured = {}
@@ -107,19 +110,20 @@ def test_draft_gated_returns_original_score_same_scorer():
         assert b["score"] == 9             # regenerated draft (Anthropic)
         assert b["original_score"] == 5    # original, SAME scorer -> like-for-like
     finally:
-        (server.build_quality_query, routes._anthropic_score,
+        (server.build_quality_query_parts, routes._anthropic_score,
          routes._anthropic_draft, server.sanitize_draft_messages) = saved
 
 
 def test_draft_gated_original_score_none_when_absent():
     import routes
     import server
-    saved = (server.build_quality_query, routes._anthropic_score,
+    saved = (server.build_quality_query_parts, routes._anthropic_score,
              routes._anthropic_draft, server.sanitize_draft_messages)
     try:
-        server.build_quality_query = lambda p: "Q::" + str(p.get("current_draft"))
+        server.build_quality_query_parts = lambda p: (
+            "PFX", "Q::" + str(p.get("current_draft")))
         routes._anthropic_draft = lambda *a, **k: (["regen bubble"], "n", None)
-        routes._anthropic_score = lambda q: (9, [], "")
+        routes._anthropic_score = lambda q, system_prefix=None: (9, [], "")
         server.sanitize_draft_messages = lambda m: (m, False)
         captured = {}
         routes.handle_draft_gated(
@@ -128,7 +132,7 @@ def test_draft_gated_original_score_none_when_absent():
             lambda code, body: captured.update(body=body))
         assert captured["body"]["original_score"] is None   # backward-compatible
     finally:
-        (server.build_quality_query, routes._anthropic_score,
+        (server.build_quality_query_parts, routes._anthropic_score,
          routes._anthropic_draft, server.sanitize_draft_messages) = saved
 
 
