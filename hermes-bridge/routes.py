@@ -39,27 +39,36 @@ from util import log  # noqa: F401
 # --- on-demand re-analysis queue (R2, 2026-06-01) ---------------------------
 # A fresh customer inbound extracts facts but does NOT re-analyze (only the
 # hourly sweep writes verdict/score) → cards show stale facts + "not analyzed"
-# until the next hourly window. _enqueue_reanalyze() queues the lead on each
-# inbound; the queue is DRAINED by /pipeline-analyze {source:"reanalyze"}
-# (reuses the sweep's SHARED lock + per-lead analysis + timeout handling, so
-# it can never run concurrently with the hourly sweep on the 2-vCPU box).
-# INERT until an n8n cron POSTs that endpoint — enqueue is cheap Redis only.
+# until the next hourly window. _enqueue_reanalyze() queues the lead on EVERY
+# inbound (F2: bare replies too), throttled by a per-cid cooldown marker
+# (REANALYZE_DEDUP_TTL, default 30 min — survives the drain); the queue is
+# DRAINED by /pipeline-analyze {source:"reanalyze"} (the n8n "Reanalyze Queue
+# Cron", every 5 min, cap REANALYZE_CAP) behind _filter_reanalyze_cids
+# (canonicalize + active-labels only) and the sweep's SHARED lock, so it can
+# never run concurrently with the hourly sweep.
 _REANALYZE_QUEUE = "hermes:reanalyze:queue"
 _REANALYZE_QUEUED = "hermes:reanalyze:queued:"   # + cid (dedup marker)
 
 
 def _enqueue_reanalyze(cid):
     """Queue a customer for on-demand re-analysis after a fresh inbound.
-    Deduped (SET NX, 10 min) so repeated messages don't pile up; bounded
-    (LTRIM) so the list can't grow unbounded if the cron is disabled.
-    Fail-silent — never block the inbound/draft path on Redis."""
+    Deduped via a per-cid COOLDOWN marker (SET NX, REANALYZE_DEDUP_TTL s,
+    default 30 min). The drain deliberately does NOT delete the marker, so
+    it also throttles post-analysis: a chatty thread can't burn an
+    Anthropic call every 5-min cron tick (the 2026-06-07 saturation
+    surface). Bounded (LTRIM) so the list can't grow unbounded if the cron
+    is disabled. Fail-silent — never block the inbound path on Redis."""
     cid = (cid or "").strip()
     if not cid:
         return
     try:
-        added, _ = _redis(["SET", _REANALYZE_QUEUED + cid, "1", "NX", "EX", "600"])
+        ttl = str(int(os.environ.get("REANALYZE_DEDUP_TTL", "1800")))
+    except ValueError:
+        ttl = "1800"
+    try:
+        added, _ = _redis(["SET", _REANALYZE_QUEUED + cid, "1", "NX", "EX", ttl])
         if (added or "").strip().upper() != "OK":
-            return  # already queued in the last 10 min
+            return  # queued or analyzed within the cooldown window
         _redis(["RPUSH", _REANALYZE_QUEUE, cid])
         _redis(["LTRIM", _REANALYZE_QUEUE, "-500", "-1"])  # safety bound
     except Exception as e:
@@ -67,8 +76,9 @@ def _enqueue_reanalyze(cid):
 
 
 def _drain_reanalyze_queue(limit):
-    """Pop up to `limit` UNIQUE cids off the reanalyze queue and clear their
-    dedup markers. Returns a list (possibly empty). Fail-safe."""
+    """Pop up to `limit` UNIQUE cids off the reanalyze queue. The per-cid
+    markers are LEFT to expire (see _enqueue_reanalyze: they double as the
+    post-analysis cooldown). Returns a list (possibly empty). Fail-safe."""
     try:
         out, _ = _redis(["LPOP", _REANALYZE_QUEUE, str(int(limit))])
     except Exception as e:
@@ -80,11 +90,44 @@ def _drain_reanalyze_queue(limit):
         if c and c not in seen:
             seen.add(c)
             cids.append(c)
-            try:
-                _redis(["DEL", _REANALYZE_QUEUED + c])
-            except Exception:
-                pass
     return cids
+
+
+def _filter_reanalyze_cids(cids):
+    """Guard the queue-fed analyze path the way the hourly SELECT guards its
+    own candidates: canonicalize merged identities, then keep only
+    active-pipeline rows. The queue is fed by RAW inbound cids with no label
+    filter, and the importance UPDATE downstream is unconditional — this
+    filter is what protects terminal (LOST/SCAM/DISREGARDED/PAUSED_*) and
+    merged-away rows from score/reasoning clobber. FAIL-CLOSED on DB error:
+    skip the drain (the hourly sweep is the backstop) rather than analyze
+    unchecked cids."""
+    from server import canonicalize_cid
+    ordered = []
+    for c in cids or []:
+        try:
+            c2 = (canonicalize_cid(c) or c).strip()
+        except Exception:
+            c2 = (c or "").strip()
+        if c2 and c2 not in ordered:
+            ordered.append(c2)
+    if not ordered:
+        return []
+    lits = ",".join(_lit(c) for c in ordered)
+    out, err = _psql(
+        "SELECT customer_id FROM customer_facts "
+        f"WHERE customer_id IN ({lits}) AND merged_into IS NULL "
+        "AND label IN ('NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
+        "'WAITING_FOR_PAYMENT','CONFIRMED')")
+    if err:
+        log("filter_reanalyze fail-closed (db err):", err)
+        return []
+    keep = {ln.strip() for ln in (out or "").splitlines() if ln.strip()}
+    dropped = [c for c in ordered if c not in keep]
+    if dropped:
+        log(f"reanalyze filter dropped {len(dropped)} cid(s): "
+            f"{', '.join(dropped[:5])}")
+    return [c for c in ordered if c in keep]
 
 
 # --- AREA B: HARD never-demote-a-won/paid rule (2026-06-07) ------------------
@@ -781,11 +824,13 @@ def handle_customer_facts(payload, send):
             else ((cached or {}).get("message_count", 0) + 1)
         hdr = build_customer_header({**merged, "message_count": mc})
         addendum = _build_behavioral_addendum(cid)
-        if do_extract:
-            # R2: a fresh inbound that carried facts — queue a re-analysis so
-            # the verdict/score + card facts refresh promptly (drained by the
-            # reanalyze cron), instead of waiting for the next hourly sweep.
-            _enqueue_reanalyze(cid)
+        # R2/F2: EVERY fresh inbound queues a re-analysis — including bare
+        # replies ("ok", "?") that carry no extractable facts but DO change
+        # conversation state (Devanshu 2026-06-09: replies after the verdict
+        # never re-triggered analysis while the enqueue sat behind
+        # `if do_extract:`). The per-cid cooldown in _enqueue_reanalyze
+        # bounds the rate; the drain's cap + label filter bound the load.
+        _enqueue_reanalyze(cid)
         log(f"customer-facts cid={cid!r} extract={do_extract} msg#{mc} "
             f"behavioral_rules_attached={'yes' if addendum else 'no'}")
         send(200, {"ok": True, "extracted": bool(do_extract),
@@ -4024,6 +4069,15 @@ def handle_pipeline_analyze(payload, send):
             if not cids:
                 send(200, {"ok": True, "skipped": True,
                                  "skipped_reason": "reanalyze_queue_empty",
+                                 "telegram_text": ""})
+                return
+            # F2 guard: the queue carries RAW inbound cids — canonicalize
+            # merged identities and drop terminal-label rows before the
+            # unconditional importance UPDATE can touch them.
+            cids = _filter_reanalyze_cids(cids)
+            if not cids:
+                send(200, {"ok": True, "skipped": True,
+                                 "skipped_reason": "reanalyze_no_active_leads",
                                  "telegram_text": ""})
                 return
         else:
