@@ -449,7 +449,7 @@ def handle_queue(payload, send):
         # (regen visibly "didn't take") — never the dangerous direction
         # (Redis ahead of an unseen card). Invariant: Redis is updated
         # iff the card shows the new draft, so Send == what's on screen.
-        from server import _tg_post
+        from server import _tg_post, _draft_get
         did = (payload.get("draft_id") or "").strip()
         fields = payload.get("fields") or {}
         card = payload.get("card") or {}
@@ -458,7 +458,54 @@ def handle_queue(payload, send):
             return
         chat_id = card.get("chat_id")
         message_id = card.get("message_id")
-        if not (chat_id and message_id):
+        if not message_id:
+            # FIX B-2 (2026-06-10, Eva/Thunder exec 22653): bridge-posted
+            # sweep/followup cards historically persisted
+            # telegram_message_id=None, so every operator edit died here
+            # ("card.chat_id/message_id required") and the refined text was
+            # silently discarded — the flow fell through to learn-only.
+            # When the message id is missing but the chat is known, post the
+            # refined text as a FRESH card, persist the new message id
+            # (restores editability + tgmsg index), THEN update Redis. Same
+            # invariant as the normal path: Redis is updated iff the
+            # operator can see the new text on a card.
+            if not chat_id:
+                _d0, _ = _draft_get(did)
+                chat_id = (_d0 or {}).get("telegram_chat_id")
+            if not chat_id:
+                send(200, {"ok": False,
+                           "error": "card.chat_id/message_id required"})
+                return
+            tg_body = {"chat_id": chat_id,
+                       "text": (card.get("text") or "")[:4000]}
+            if card.get("parse_mode"):
+                tg_body["parse_mode"] = card["parse_mode"]
+            if card.get("reply_markup"):
+                tg_body["reply_markup"] = card["reply_markup"]
+            r, err = _tg_post("sendMessage", tg_body)
+            if r is None and tg_body.pop("parse_mode", None):
+                # markdown parse failure — retry plain (sweep-post parity)
+                r, err = _tg_post("sendMessage", tg_body)
+            mid = ((r or {}).get("result") or {}).get("message_id")
+            if not mid:
+                log(f"REGEN_COMMIT id={did} FALLBACK fresh-card post FAILED "
+                    f"err={err} — Redis left unchanged")
+                send(200, {"ok": False, "stage": "telegram",
+                           "error": "fallback card post failed: " + str(err)})
+                return
+            d, uerr = _draft_update(
+                did, {**fields, "telegram_message_id": mid})
+            if d is None:
+                log(f"REGEN_COMMIT id={did} FALLBACK card posted mid={mid} "
+                    f"but Redis update FAILED err={uerr}")
+                send(200, {"ok": False, "stage": "redis",
+                           "error": "redis update failed: " + str(uerr)})
+                return
+            log(f"REGEN_COMMIT id={did} OK via FALLBACK fresh card "
+                f"mid={mid} (legacy card had no message_id)")
+            send(200, {"ok": True, "draft": d, "fallback_new_card": True})
+            return
+        if not chat_id:
             send(200, {"ok": False,
                        "error": "card.chat_id/message_id required"})
             return
@@ -6471,6 +6518,7 @@ def handle_owe_reply_sweep(payload, send):
     payload {dry_run?: bool, limit?: int}. dry_run = side-effect-free list of
     owed candidates + wait time (NO draft, NO post)."""
     from server import (read_lead_summary, _draft_save, _tg_post,
+                        _draft_update, _draft_latest_for_customer,
                         DEFAULT_ADMIN_CHAT)
     from review import _owe_reply_candidates, _last_msg_is_inbound
     from reengage_quote import build_followup_card
@@ -6506,6 +6554,14 @@ def handle_owe_reply_sweep(payload, send):
         HOURLY_CAP = int(os.environ.get("OWE_HOURLY_CAP", "20"))
     except (TypeError, ValueError):
         HOURLY_CAP = 20
+    # FIX A (2026-06-10 Eva/Thunder): the live draft pipeline owns any
+    # thread with a recent inbound — the sweep carding it creates a
+    # duplicate draft (history-starved, price-fabrication-prone) that
+    # auto-supersedes the operator's real card.
+    try:
+        FRESH_SKIP = int(os.environ.get("OWE_SWEEP_FRESH_SKIP", "1800"))
+    except (TypeError, ValueError):
+        FRESH_SKIP = 1800
     lock = "lock:owe_reply_sweep"
     if not dry:
         _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "1800"])
@@ -6515,6 +6571,7 @@ def handle_owe_reply_sweep(payload, send):
                        "posted": 0, "candidates": []})
             return
     posted = skipped_excluded = skipped_error = skipped_answered = 0
+    skipped_fresh = skipped_open_draft = 0
     report = []
     try:
         try:
@@ -6566,6 +6623,26 @@ def handle_owe_reply_sweep(payload, send):
                                "skip_reason": _skip})
                 if len(report) >= CAP:
                     break
+                continue
+            # FIX A-1 (2026-06-10 Eva/Thunder): fresh inbound = the live
+            # draft pipeline owns this thread. The sweep duplicated Eva's
+            # 6h-quote card 10 minutes after her message (with an invented
+            # undiscounted price) and auto-superseded the operator's real
+            # card. Skip anything fresher than OWE_SWEEP_FRESH_SKIP; the
+            # lead re-surfaces on the next run once genuinely stale.
+            if isinstance(secs, (int, float)) and secs < FRESH_SKIP:
+                skipped_fresh += 1
+                continue
+            # FIX A-2: an OPEN card (pending / awaiting_*) already exists —
+            # never supersede operator-visible work. Fail-open on Redis
+            # error (sweep proceeds as before).
+            try:
+                _open, _ = _draft_latest_for_customer(cid)
+            except Exception:  # noqa: BLE001
+                _open = None
+            if _open and (_open.get("status") or "") in (
+                    "pending", "awaiting_edit", "awaiting_amount"):
+                skipped_open_draft += 1
                 continue
             # ANTI-STALE-OWE guard: conversation_state can be stale-TRUE when a
             # staff reply went out from another phone and was never captured
@@ -6684,6 +6761,20 @@ def handle_owe_reply_sweep(payload, send):
                 _redis(["DEL", _ck])
                 skipped_error += 1
                 continue
+            # FIX B-1 (2026-06-10 Eva/Thunder): persist the posted card's
+            # Telegram message id onto the draft (_draft_update also writes
+            # the tgmsg reverse index). Without it, regen-commit rejected
+            # every operator edit of a sweep card ("card.chat_id/message_id
+            # required") and the refined text was silently discarded.
+            _mid = ((_resp or {}).get("result") or {}).get("message_id")
+            if _mid:
+                try:
+                    _draft_update(draft_id, {"telegram_message_id": _mid})
+                except Exception as e:  # noqa: BLE001
+                    log("owe-reply-sweep msgid backfill err:", cid, repr(e))
+            else:
+                log("owe-reply-sweep WARN no message_id in tg response:",
+                    cid, draft_id)
             posted += 1
             report.append({"customer_id": cid, "name": name, "label": label,
                            "owe_hours": (round(owe_hours, 1)
@@ -6695,6 +6786,8 @@ def handle_owe_reply_sweep(payload, send):
                    "posted": posted, "skipped_excluded": skipped_excluded,
                    "skipped_answered": skipped_answered,
                    "skipped_error": skipped_error,
+                   "skipped_fresh": skipped_fresh,
+                   "skipped_open_draft": skipped_open_draft,
                    "count": len(report), "candidates": report})
     finally:
         if not dry:
