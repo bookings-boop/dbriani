@@ -4491,9 +4491,14 @@ def read_lead_summary(filter_label=None):
         log("read_lead_summary err:", err)
         return []
     rows = []
-    for line in (out or "").strip().splitlines():
+    # strip("\n") NOT strip(): '\x1f'.isspace() is True, so a bare .strip()
+    # eats the trailing separator run of the LAST row (a brand-new lead has
+    # fields 8-31 all empty) and the <20 guard then drops that lead entirely.
+    for line in (out or "").strip("\n").splitlines():
         parts = line.split("\x1f")  # #B1: 0x1F delimiter (was '|')
         if len(parts) < 20:
+            log(f"read_lead_summary: dropped short row "
+                f"({len(parts)} fields) cid={parts[0].strip()[:48]!r}")
             continue
         try:
             mc = int((parts[6].strip() or "0"))
