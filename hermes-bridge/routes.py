@@ -33,7 +33,7 @@ import uuid  # noqa: F401 — used by handle_* bodies (Phase G regression
             # routes.py inherited the use sites but not the import)
 
 from db import _psql, _lit, _redis  # noqa: F401
-from util import log  # noqa: F401
+from util import log, _envflag  # noqa: F401
 
 
 # --- on-demand re-analysis queue (R2, 2026-06-01) ---------------------------
@@ -962,11 +962,28 @@ def handle_refresh_facts(payload, send):
 def handle_payment_link(payload, send):
     """Nomod minimal build: create a payment link for a confirmed booking.
     Fail-safe — ALWAYS returns 200 so the workflow's draft is never blocked;
-    an ok:false response just means the card posts without a link."""
-    from server import PAYMENTS_ENABLED, nomod_create_link
+    an ok:false response just means the card posts without a link.
+
+    F2-pay (2026-06-10) — this is the single chokepoint every mint path
+    funnels through (n8n Generate Payment Link / Call Nomod / Call Nomod
+    (Reply), /assist send_paylink), so all money guards live HERE:
+      - PAYLINK_MAX_AED ceiling (always on): typo/insanity guard, not a
+        business cap — catches "14900k"->14.9M and extra-zero typos.
+      - price gate (PAYLINK_PRICE_GATE_ENABLED, ships OFF; FAIL-CLOSED,
+        no Redis): when on, only source=="operator_typed" (a human typed
+        the number in the 💳 flow) may mint; AI-quoted/preset/unknown
+        amounts are refused.
+      - mint idempotency (live; FAIL-OPEN): same canonical cid + amount
+        within PAYLINK_DEDUP_TTL returns the EXISTING link instead of
+        minting a duplicate (Xeno 2026-06-07: 2x AED 14,900 in 3m18s).
+      - mint audit (live; fail-open): every mint logs autonomous_sends
+        kind='payment_link_minted' with source/draft_id."""
+    from server import PAYMENTS_ENABLED, nomod_create_link, canonicalize_cid
     cid = (payload.get("customer_id") or "").strip()
     cname = (payload.get("customer_name") or "").strip()
     summary = (payload.get("payment_summary") or "").strip()
+    source = (payload.get("source") or "").strip().lower()
+    draft_id = (payload.get("draft_id") or "").strip()
     if not PAYMENTS_ENABLED:
         log("payment-link refused — PAYMENTS_ENABLED is off")
         send(200, {"ok": False, "error": "payments are disabled"})
@@ -983,14 +1000,78 @@ def handle_payment_link(payload, send):
                          "error": "invalid amount: %r"
                                   % payload.get("amount")})
         return
+    try:
+        max_aed = float(os.environ.get("PAYLINK_MAX_AED", "500000"))
+    except ValueError:
+        max_aed = 500000.0
+    if amount > max_aed:
+        log("payment-link refused — AED%.2f exceeds PAYLINK_MAX_AED %.0f "
+            "(source=%s cid=%s)" % (amount, max_aed, source or "?", cid))
+        send(200, {"ok": False,
+                         "error": "amount AED %.2f exceeds PAYLINK_MAX_AED "
+                                  "(%.0f) — raise the env var deliberately "
+                                  "for a genuine charter this large"
+                                  % (amount, max_aed)})
+        return
+    if (_envflag("PAYLINK_PRICE_GATE_ENABLED", "false")
+            and source != "operator_typed"):
+        log("payment-link refused by price gate — source=%r amount=AED%.2f "
+            "cid=%s" % (source or "missing", amount, cid))
+        send(200, {"ok": False,
+                         "error": "price gate: unconfirmed amount (source=%s)"
+                                  " — use the 💳 Send Link button"
+                                  % (source or "missing")})
+        return
+    try:
+        ccid = (canonicalize_cid(cid) or cid).strip()
+    except Exception:
+        ccid = cid
+    dedup_key = "paylink:mint:%s:%.2f" % (ccid, amount)
+    try:
+        cached, _ = _redis(["GET", dedup_key])
+        cached = (cached or "").strip()
+        if cached:
+            prior = json.loads(cached)
+            log("payment-link DEDUP customer=%s amount=AED%.2f — reusing "
+                "link_id=%s minted within the dedup window"
+                % (cid, amount, prior.get("link_id")))
+            send(200, {"ok": True, "link_url": prior.get("link_url"),
+                             "link_id": prior.get("link_id"),
+                             "amount": amount, "deduped": True})
+            return
+    except Exception as e:
+        log("paylink dedup read err (fail-open):", repr(e))
     url, lid, err = nomod_create_link(amount, summary, cname)
     if err:
         log("payment-link FAILED customer=%s amount=AED%.2f err=%s"
             % (cid, amount, err))
         send(200, {"ok": False, "error": err})
         return
-    log("payment-link OK customer=%s amount=AED%.2f link_id=%s"
-        % (cid, amount, lid))
+    log("payment-link OK customer=%s amount=AED%.2f link_id=%s source=%s"
+        % (cid, amount, lid, source or "?"))
+    try:
+        ttl = str(int(os.environ.get("PAYLINK_DEDUP_TTL", "1800")))
+    except ValueError:
+        ttl = "1800"
+    try:
+        _redis(["SET", dedup_key,
+                json.dumps({"link_url": url, "link_id": lid,
+                            "ts": int(time.time())}),
+                "NX", "EX", ttl])
+    except Exception as e:
+        log("paylink dedup arm err (fail-open):", repr(e))
+    try:
+        notes = {"amount": amount, "link_id": lid, "link_url": url,
+                 "summary": summary, "source": source or "unknown",
+                 "draft_id": draft_id}
+        _, ierr = _psql(
+            "INSERT INTO autonomous_sends (customer_id, kind, notes) "
+            f"VALUES ({_lit(ccid)}, 'payment_link_minted', "
+            f"{_lit(json.dumps(notes))}::jsonb)")
+        if ierr:
+            log("paylink mint-audit insert err (fail-open):", ierr)
+    except Exception as e:
+        log("paylink mint-audit EXC (fail-open):", repr(e))
     send(200, {"ok": True, "link_url": url, "link_id": lid,
                      "amount": amount})
 
@@ -2725,8 +2806,13 @@ def handle_assist(payload, send):
         def _cap(_status, body):
             captured["body"] = body
 
+        # F2-pay: declare LLM-parsed provenance — when the price gate is ON
+        # this path is refused (decision (d) 2026-06-10: /assist stays
+        # gated-off; the number came from NL parsing, not an explicit human
+        # confirmation of the digits).
         pl_payload = {"customer_id": cid, "amount": float(amount),
-                      "summary": detail or "Yacht charter"}
+                      "summary": detail or "Yacht charter",
+                      "source": "assist_llm_parsed"}
         handle_payment_link(pl_payload, _cap)
         body = captured.get("body", {}) or {}
         url = body.get("link_url") or ""
