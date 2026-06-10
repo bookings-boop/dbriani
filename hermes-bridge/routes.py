@@ -3433,6 +3433,56 @@ def _followup_situation_summary(history, row, party_size=None,
         return ""
 
 
+def _money_amounts(text):
+    """Money-like figures in text as ints: 500..5,000,000, with year-like
+    values (2020-2035) excluded and phone numbers collapsed so their digit
+    groups never read as prices. Comma/space formatting normalized."""
+    t = str(text or "")
+    # collapse +-prefixed phone shapes ("+971 58 990 1996") into one long
+    # digit run so the groups can't be misread as amounts
+    t = re.sub(r"\+(\d[\d\s\-()]{6,}\d)",
+                lambda m: "+" + re.sub(r"\D", "", m.group(1)), t)
+    out = set()
+    for m in re.finditer(r"\d[\d,]*(?:\.\d+)?", t):
+        s = m.group(0).replace(",", "")
+        try:
+            v = float(s)
+        except ValueError:
+            continue
+        if not (500 <= v <= 5_000_000):
+            continue
+        if 2020 <= v <= 2035 and v == int(v):
+            continue  # year, not a price
+        out.add(int(v))
+    return out
+
+
+def _strip_invented_prices(bubbles, history):
+    """CORE RULE: a proactive draft must never state a price the thread does
+    not contain (Eva/Thunder 2026-06-10: the owe-sweep draft computed
+    15,000 x 6 + VAT = 94,500 from the in-thread hourly rate — a total the
+    operator never quoted, missing the 87,731 discount). Deterministic:
+    drop any sentence whose money-amount is absent from the conversation
+    history. Returns (clean_bubbles, sorted_offending_amounts). If all
+    bubbles die, the caller's fact-anchored fallback (price-free) engages."""
+    allowed = _money_amounts(history)
+    offenders = set()
+    clean = []
+    for b in bubbles or []:
+        kept = []
+        for sent in re.split(r"(?<=[.!?\n])\s+", str(b)):
+            bad = _money_amounts(sent) - allowed
+            if bad:
+                offenders |= bad
+                continue
+            if sent.strip():
+                kept.append(sent.strip())
+        nb = " ".join(kept).strip()
+        if nb:
+            clean.append(nb)
+    return clean, sorted(offenders)
+
+
 def handle_draft_followup(payload, send):
     """POST /draft-followup — generate a follow-up draft via Hermes.
     Body: {customer_id, history?, customer_name?, silence_window?, silence_hours?}.
@@ -3805,16 +3855,28 @@ def handle_draft_followup(payload, send):
                 if payment_stripped:
                     log(f"draft_followup payment-url scrubbed "
                         f"cid={cid!r}")
+                # PRICE-INVENTION guard (Eva/Thunder 2026-06-10): never let a
+                # proactive draft state a money amount the thread doesn't
+                # contain. All-stripped -> empty draft_text -> R4 fallback.
+                parts, _invented = _strip_invented_prices(parts, history)
+                if _invented:
+                    log(f"draft_followup PRICE-GUARD stripped invented "
+                        f"amount(s) {_invented} cid={cid!r}")
                 draft_text = "\n".join(p for p in parts if p).strip()
             if not draft_text:
                 draft_text = (parsed.get("text") or "").strip()
-                # Same guard for the single-string `text` shape.
+                # Same guards for the single-string `text` shape.
                 if draft_text:
                     cleaned_one, stripped_one = sanitize_draft_messages(
                         [draft_text])
                     if stripped_one:
                         log(f"draft_followup payment-url scrubbed "
                             f"(text-shape) cid={cid!r}")
+                    cleaned_one, _invented = _strip_invented_prices(
+                        cleaned_one, history)
+                    if _invented:
+                        log(f"draft_followup PRICE-GUARD stripped invented "
+                            f"amount(s) {_invented} (text-shape) cid={cid!r}")
                     draft_text = cleaned_one[0] if cleaned_one else ""
         fallback_used = False
         if not draft_text:
