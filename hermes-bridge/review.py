@@ -61,6 +61,13 @@ REVIEW_CAP_NEEDS_ATTENTION = int(os.environ.get(
 REVIEW_CAP_WARM = int(os.environ.get("REVIEW_CAP_WARM", "8"))
 REVIEW_CAP_COLD = int(os.environ.get("REVIEW_CAP_COLD", "5"))
 
+# F3 (2026-06-10): "🔴 needs your reply" owed-digest at the top of /review — a
+# flat, priority-ranked index of EVERY owed lead, independent of which (possibly
+# mis-routed / unanalyzed) tier it landed in. Ships dormant; flip to surface.
+REVIEW_OWED_DIGEST_ENABLED = (
+    os.environ.get("REVIEW_OWED_DIGEST_ENABLED", "0").strip() == "1")
+REVIEW_OWED_DIGEST_CAP = int(os.environ.get("REVIEW_OWED_DIGEST_CAP", "20"))
+
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
 # rendering. Bounded so /review latency stays under 10s even with a
@@ -832,6 +839,78 @@ def _is_near_ready(row):
             or bool(_booking_date_is_future(row.get("dates"))))
 
 
+def _digest_sort_key(item):
+    """Priority order for the owed digest (used with reverse=True, higher first):
+      1. real customers float ABOVE B2B/role-anchored leads (vendor/supplier/
+         agent/crew/broker/…) regardless of score;
+      2. higher expected booking VALUE (_expected_value — the 2026-06-06
+         'high revenue to down' fn);
+      3. composite score (urgency / imminent-date / owed-time tiebreak).
+    item is a (score, row) tuple. Pure; None/junk-safe."""
+    score, row = item[0], item[1]
+    return (
+        0 if _has_role_anchor(row) else 1,
+        _expected_value(score, row),
+        score if isinstance(score, (int, float)) and not isinstance(score, bool)
+        else 0,
+    )
+
+
+def build_owed_digest(scored, cap=None):
+    """The "🔴 NEEDS YOUR REPLY" priority index for the very top of /review.
+
+    A flat, value-ranked list of EVERY lead we owe a reply to — computed from the
+    full `scored` set via _owe_reply_candidates, so an owed lead that was
+    mis-routed or never analyzed (no valid tier label) is still surfaced rather
+    than buried under a tier cap. Population matches the owe-reply sweep
+    (terminal/paused labels excluded); ordering is _digest_sort_key (B2B/role to
+    the bottom, then expected value, then score).
+
+    scored: list of (score, row) tuples — the shape render_review receives.
+    Returns a multi-line block string, or '' when nothing is owed.
+    Render-only, pure, None/junk-safe — a malformed `scored` never raises."""
+    from util import _md_escape
+    try:
+        cap = REVIEW_OWED_DIGEST_CAP if cap is None else int(cap)
+    except (TypeError, ValueError):
+        cap = REVIEW_OWED_DIGEST_CAP
+    if cap < 0:
+        cap = 0
+    # Pair the composite score back onto each owed row. _owe_reply_candidates
+    # returns the SAME row dict objects it was given, so id()-mapping the score
+    # is safe within this single render call.
+    rows = []
+    score_by_id = {}
+    for it in (scored or []):
+        if not (isinstance(it, (list, tuple)) and len(it) >= 2):
+            continue
+        s, r = it[0], it[1]
+        if not isinstance(r, dict):
+            continue
+        rows.append(r)
+        score_by_id[id(r)] = s
+    owed = _owe_reply_candidates(rows)
+    if not owed:
+        return ""
+    items = [(score_by_id.get(id(r), 0), r) for r in owed]
+    items.sort(key=_digest_sort_key, reverse=True)
+    shown = items[:cap]
+    overflow = len(items) - len(shown)
+    out = [f"🔴 *NEEDS YOUR REPLY* — {len(items)} owed (priority order)"]
+    for _score, r in shown:
+        nm = _md_escape((r.get("name") or "").strip()
+                        or str(r.get("customer_id") or "Unknown"))
+        lbl = (str(r.get("label") or "").strip().upper() or "NEW")
+        cs = r.get("last_customer_message_at_seconds")
+        waited = (f" · waited {int(cs // 3600)}h"
+                  if isinstance(cs, (int, float)) and not isinstance(cs, bool)
+                  and cs >= 0 else "")
+        out.append(f" • {nm} — {lbl}{waited}")
+    if overflow > 0:
+        out.append(f"_+{overflow} more owed_")
+    return "\n".join(out)
+
+
 def render_review(scored, totals, mode="ondemand", uncap=False):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -1023,6 +1102,18 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
         header_lines.append(
             f"🔒 {_disregarded_n} disregarded (hidden) — "
             "`/label <name> WARM` to restore one")
+    # 🔴 F3 (2026-06-10): "NEEDS YOUR REPLY" owed digest — a complete, priority-
+    # ranked index of every owed lead at the very top, so an owed-but-mis-routed
+    # or unanalyzed lead is never invisible below a tier cap. Flag-gated (ships
+    # dormant); render-only; fail-open (any error omits the block, never breaks
+    # /review). Sits above 💰 Top-by-value (action before revenue lens).
+    if REVIEW_OWED_DIGEST_ENABLED:
+        try:
+            _owed_digest = build_owed_digest(scored)
+        except Exception:  # noqa: BLE001
+            _owed_digest = ""
+        if _owed_digest:
+            header_lines.append(_owed_digest)
     # 💰 Top-by-value digest (operator 2026-06-06: "sort from high revenue to
     # down"). A value-ranked callout of the highest expected-value ACTIVE leads
     # ACROSS all temperature tiers, so the whales surface at the very top
