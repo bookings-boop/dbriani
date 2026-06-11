@@ -29,9 +29,18 @@ Run ON THE BOX:  python3 backfill_lcm.py [--tranche-size 15] [--execute]
 Dry-run (default) prints the tranche rows + owed before/after, writes NOTHING.
 """
 import argparse
+import os
 import sys
 
 sys.path.insert(0, "/home/ubuntu/hermes-bridge")
+# Standalone scripts don't inherit the bridge's systemd EnvironmentFile —
+# load .env (WAHA_API_KEY/WAHA_BASE etc.) before importing waha.
+with open("/home/ubuntu/hermes-bridge/.env") as _f:
+    for _ln in _f:
+        _ln = _ln.strip()
+        if _ln and not _ln.startswith("#") and "=" in _ln:
+            _k, _v = _ln.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 from db import _psql  # noqa: E402
 from waha import waha_fetch_raw  # noqa: E402
 
@@ -86,10 +95,11 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"  {cid}: WAHA fetch err {e!r} — skipped")
             continue
-        win = max((m.get("timestamp") or 0 for m in msgs
-                   if not m.get("fromMe")), default=0)
-        wout = max((m.get("timestamp") or 0 for m in msgs
-                    if m.get("fromMe")), default=0)
+        # waha_fetch_raw returns {ts, direction:'in'|'out', body, msg_id}
+        win = max((m.get("ts") or 0 for m in msgs
+                   if m.get("direction") == "in"), default=0)
+        wout = max((m.get("ts") or 0 for m in msgs
+                    if m.get("direction") == "out"), default=0)
         if not win:
             print(f"  {cid}: no inbound in WAHA — left NULL (by design)")
             continue
