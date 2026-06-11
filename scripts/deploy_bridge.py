@@ -250,12 +250,25 @@ def heal_telegram_webhook(webhook_url):
     plus discarding the stale retry queue is the documented runbook
     recovery (see docs/fixes-2026-05-23-evening.md §5).
 
-    Returns the setWebhook response (best-effort logging only)."""
+    Returns the setWebhook response (best-effort logging only).
+
+    SECURITY (2026-06-11): setWebhook RESETS secret_token to empty whenever
+    it is omitted — so this self-heal MUST re-send the current secret, or it
+    would silently strip the webhook auth (after which the n8n Verify Admin
+    secret check rejects every real Telegram update). The secret is read
+    from the n8n container env at heal-time (same source as the bot token,
+    never hardcoded) and built into the JSON body server-side via jq so the
+    value never appears on a command line or in a log."""
     out, _, _ = ssh_run(
         'TOKEN=$(docker exec ' + N8N_CONTAINER + ' printenv TELEGRAM_BOT_TOKEN); '
-        f'curl -s -X POST -H "Content-Type: application/json" '
-        f'-d \'{{"url":"{webhook_url}","drop_pending_updates":true}}\' '
-        f'"https://api.telegram.org/bot${{TOKEN}}/setWebhook"',
+        'SECRET=$(docker exec ' + N8N_CONTAINER
+        + ' printenv TELEGRAM_WEBHOOK_SECRET 2>/dev/null || true); '
+        f'BODY=$(jq -nc --arg u "{webhook_url}" --arg s "$SECRET" '
+        "'{url:$u, drop_pending_updates:true} "
+        "+ (if $s == \"\" then {} else {secret_token:$s} end)'); "
+        'curl -s -X POST -H "Content-Type: application/json" '
+        '-d "$BODY" '
+        '"https://api.telegram.org/bot${TOKEN}/setWebhook"',
         "set-webhook", timeout=30)
     return out
 

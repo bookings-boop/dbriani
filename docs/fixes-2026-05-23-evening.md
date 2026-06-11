@@ -68,6 +68,6 @@ Default-branch push remains blocked by the auto-mode classifier. The commits are
 
 **Root cause:** n8n's CLI prints `"Note: Changes will not take effect if n8n is running. Please restart n8n for changes to take effect."` — easy to miss. The in-memory webhook registration doesn't refresh on import, only on container start. Even `n8n update:workflow --active=true` doesn't re-register.
 
-**Fix:** `docker restart n8n-n8n-1`, then `setWebhook` with `drop_pending_updates=true` so old stale retries don't fire against current state.
+**Fix:** `docker restart n8n-n8n-1`, then `setWebhook` with `drop_pending_updates=true` so old stale retries don't fire against current state. ⚠️ 2026-06-11: the `setWebhook` call MUST also pass `secret_token=$TELEGRAM_WEBHOOK_SECRET` — omitting it resets the secret to empty and strips the n8n Verify Admin auth (forgeable control-plane). Use `scripts/setup-telegram-webhook.sh` (handles it) rather than a bare curl.
 
 **Runbook rule:** Any future `n8n import:workflow` on the Phase 1B workflow MUST be followed by `docker restart n8n-n8n-1`. Use `getWebhookInfo` to verify `pending_update_count == 0` and `last_error_message` is absent before considering the deploy live.

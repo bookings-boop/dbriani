@@ -163,8 +163,14 @@ Key paths in N8N expressions:
 **One-time webhook setup (run once after workflow imported):**
 
 ```bash
-# TELEGRAM_BOT_TOKEN is sourced from .env — see scripts/setup-telegram-webhook.sh
-curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://n8n.13-63-82-112.sslip.io/webhook/telegram"
+# TELEGRAM_BOT_TOKEN + TELEGRAM_WEBHOOK_SECRET are sourced from .env —
+# prefer scripts/setup-telegram-webhook.sh which handles both. The
+# secret_token MUST be included on EVERY setWebhook or it is reset to
+# empty (stripping the n8n Verify Admin auth → forged control-plane).
+curl -X POST \
+  --data-urlencode "url=https://n8n.13-63-82-112.sslip.io/webhook/telegram" \
+  --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
+  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook"
 ```
 
 Verify:
