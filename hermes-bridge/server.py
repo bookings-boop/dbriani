@@ -3555,11 +3555,42 @@ def _quality_task_framing(incoming, history):
 # quality score on a mismatch (operator 2026-06-06: HARD block + regenerate).
 # CONSERVATIVE allowlist — only the yachts/items below are validated; unknown
 # items are NEVER flagged, so this cannot false-positive a legit quote on the
-# live send path. Expand as the canonical catalog is consolidated.
+# live send path. Phase 1 (2026-06-11) = the quote-routing experiment surface;
+# legacy "(was X)" catalog prices are deliberately NOT allowed, so deprecated
+# rates get flagged. Allowed values may be exact ints and/or (lo, hi) INCLUSIVE
+# ranges — a boat with an operator-sanctioned discount band (Satoshi: list
+# 3,000, negotiable floor 2,000) validates as a range, because locking a
+# range-priced boat to one point would flag legitimate quotes at the other end.
+# An EMPTY set means the boat has NO valid hourly rate (daily-only charters) —
+# every /hr figure on it is flagged.
 _CANON_YACHT_RATES = {
-    "von dutch 40": {1400},                 # no discount (operator 2026-06-06)
-    "bliss 55": {1400, 1100},               # list 1,400; standing anchor 1,100
-    "sunseeker satoshi 70": {3000, 1500},   # 3,000; morning floor 1,500
+    "von dutch 40": {1400},           # no discount (operator 2026-06-06)
+    "bliss 55": {1400, 1100},         # list 1,400; standing anchor 1,100
+    "satoshi": {(2000, 3000), 1500},  # RANGE 2,000-3,000 (operator 2026-06-11:
+                                      # tourists reach 3,000, UAE residents
+                                      # settle lower); 1,500 = morning hard
+                                      # floor. Key matches bare "Satoshi" and
+                                      # "Sunseeker Satoshi 70".
+    # --- quote-routing experiment surface (operator-approved 2026-06-11) ---
+    "princess 60": {1400},            # returning to fleet (operator-stated)
+    "bella": {1400},                  # returning to fleet (operator-stated);
+                                      # also matches retired "Bella 125 …" —
+                                      # an /hr quote there flags, by design
+    "ferretti 780": {5500},
+    "haigan": {4500},                 # matches "Haigan" and "Haigan 96"
+    "galeon 780": {5000},
+    "ferretti 670": {3500},
+    "zeta 100": {7000},
+    "tatti": {9000},                  # matches "Tatti 110" and "Tattii"
+    "diana 50": {1100},
+    "elise 50": {900},                # 1,100 is legacy — flag it
+    "belle 75": {2800},
+    "azimut 79": {2700},
+    "eclipse 90": {4000},             # 5,000 is legacy — flag it
+    "novia 55": {1300},
+    "zirve 72": {4500},               # 4,900 is legacy — flag it
+    "asya 110": {5300},
+    "cante": {4400},                  # Cante 97
 }
 _CANON_CATERING = {                          # term -> valid AED amount(s) (for 2/min)
     "fine dining": {2500},                   # AED 2,500 incl. chef (catalog §9/§10)
@@ -3586,6 +3617,30 @@ def _price_num(s):
         return int(str(s).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+def _rate_ok(val, allowed):
+    """True if an AED/hr figure matches the allowlist: ints are exact rates,
+    (lo, hi) tuples are inclusive operator-sanctioned ranges. An empty
+    allowlist means no hourly rate is ever valid (daily-only boat). Pure."""
+    for a in allowed:
+        if isinstance(a, tuple):
+            if a[0] <= val <= a[1]:
+                return True
+        elif val == a:
+            return True
+    return False
+
+
+def _rates_label(allowed):
+    """Human label for an allowlist ('1,400' / '2,000-3,000/1,500') used in
+    mismatch strings, which _price_correction_hint passes verbatim to the
+    regen prompt as ground truth. Sorted with a mixed int/tuple key — plain
+    sorted() would raise on a set mixing ints and range tuples. Pure."""
+    parts = [f"{a[0]:,}-{a[1]:,}" if isinstance(a, tuple) else f"{a:,}"
+             for a in sorted(allowed,
+                             key=lambda a: a[0] if isinstance(a, tuple) else a)]
+    return "/".join(parts) if parts else "no hourly rate (daily-only)"
 
 
 def validate_draft_prices(text):
@@ -3624,8 +3679,8 @@ def validate_draft_prices(text):
             cur_name, cur_pos = val, pos
         elif (cur_name is not None and val is not None
               and pos - cur_pos <= _YACHT_RATE_PROXIMITY
-              and val not in _CANON_YACHT_RATES[cur_name]):
-            ok = "/".join(f"{r:,}" for r in sorted(_CANON_YACHT_RATES[cur_name]))
+              and not _rate_ok(val, _CANON_YACHT_RATES[cur_name])):
+            ok = _rates_label(_CANON_YACHT_RATES[cur_name])
             _add(f"{cur_name.title()} quoted AED {val:,}/hr (catalog: {ok}/hr)")
 
     # 2) CATERING: a catering term with a nearby AED figure that isn't canonical.

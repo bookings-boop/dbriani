@@ -125,6 +125,69 @@ def test_empty_safe():
     assert validate_draft_prices(None) == []
 
 
+# --- Satoshi RANGE (operator 2026-06-11: list 3,000, discount floor 2,000 — a
+# point rate would flag legitimate quotes at the other end of the band) -------
+def test_satoshi_range_endpoints_and_midpoint_clean():
+    assert validate_draft_prices("Satoshi — AED 3,000/hr") == []
+    assert validate_draft_prices("Satoshi — AED 2,000/hr for residents") == []
+    assert validate_draft_prices("Satoshi — special at AED 2,400/hr") == []
+
+
+def test_satoshi_below_floor_flagged_with_range_label():
+    m = validate_draft_prices("Satoshi — only AED 1,800/hr today")
+    assert any("1,800" in x for x in m), m
+    # the regen hint must hand the drafter the RANGE as ground truth
+    assert any("2,000-3,000" in x for x in m), m
+
+
+def test_satoshi_above_list_flagged():
+    m = validate_draft_prices("Satoshi — AED 3,200/hr")
+    assert any("3,200" in x for x in m), m
+
+
+def test_satoshi_bare_name_matches_key():
+    # drafts often write just "Satoshi" — the key must catch it without the
+    # full "Sunseeker Satoshi 70" form.
+    m = validate_draft_prices("the Satoshi is AED 1,200/hr")
+    assert any("1,200" in x for x in m), m
+
+
+# --- Phase-1 expansion (quote-routing experiment surface, 2026-06-11) --------
+def test_phase1_push_boats_catalog_rates_clean():
+    draft = ("Ferretti 780 — up to 20 guests\nAED 5,500/hr\n\n"
+             "Haigan — up to 25 guests\nAED 4,500/hr\n\n"
+             "Galeon 780 — AED 5,000/hr\n\n"
+             "Zeta 100 — AED 7,000/hr\n\n"
+             "Diana 50 — AED 1,100/hr")
+    assert validate_draft_prices(draft) == []
+
+
+def test_phase1_legacy_prices_flagged():
+    # "(was X)" catalog prices are deprecated on purpose — they must flag.
+    assert any("4,900" in x for x in
+               validate_draft_prices("Zirve 72 — AED 4,900/hr")), "zirve legacy"
+    assert any("1,100" in x for x in
+               validate_draft_prices("Elise 50 — AED 1,100/hr")), "elise legacy"
+    assert any("5,000" in x for x in
+               validate_draft_prices("Eclipse 90 — AED 5,000/hr")), "eclipse legacy"
+
+
+def test_returning_fleet_princess_60_and_bella():
+    # operator 2026-06-11: both returning to the fleet at 1,400/hr.
+    assert validate_draft_prices("Princess 60 — AED 1,400/hr") == []
+    assert validate_draft_prices("Bella — AED 1,400/hr") == []
+    m = validate_draft_prices("Princess 60 — AED 1,800/hr")
+    assert any("1,800" in x and "Princess 60" in x for x in m), m
+
+
+def test_tatti_spelling_variants():
+    # classifier corpus spells it "Tattii"; catalog says "Tatti 110" — the
+    # substring key must catch both.
+    assert validate_draft_prices("Tatti 110 — AED 9,000/hr") == []
+    m = validate_draft_prices("Tattii — AED 8,500/hr")
+    assert any("8,500" in x for x in m), m
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]
