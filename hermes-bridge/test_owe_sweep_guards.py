@@ -180,6 +180,24 @@ def test_sweep_ignores_closed_drafts():
     assert send.body.get("posted") == 1, send.body
 
 
+def test_sweep_skips_ancient_owed_thread():
+    """OWE_MAX_AGE gate (2026-06-11, backfill enabler): a thread unanswered
+    for >14d is re-engagement material, not an URGENT card — without this
+    the last_customer_message_at backfill would card ~58 ancient threads."""
+    row = dict(ROW_OLD, last_customer_message_at_seconds=40 * 24 * 3600)
+    send, spies = _run_sweep(row)
+    assert send.body.get("posted") == 0, send.body
+    assert not spies["draft_save"]
+    assert send.body.get("skipped_ancient") == 1, send.body
+
+
+def test_sweep_cards_within_max_age():
+    """13 days unanswered — still inside the active window, must card."""
+    row = dict(ROW_OLD, last_customer_message_at_seconds=13 * 24 * 3600)
+    send, spies = _run_sweep(row)
+    assert send.body.get("posted") == 1, send.body
+
+
 # ------------------------------------------------------ regen-commit fallback
 def _run_regen(card, *, draft=None, tg_resp=None, tg_err=None):
     spies = {"tg": [], "update": []}

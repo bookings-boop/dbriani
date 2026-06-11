@@ -6629,6 +6629,17 @@ def handle_owe_reply_sweep(payload, send):
         FRESH_SKIP = int(os.environ.get("OWE_SWEEP_FRESH_SKIP", "1800"))
     except (TypeError, ValueError):
         FRESH_SKIP = 1800
+    # OWE_MAX_AGE gate (operator 2026-06-11, backfill enabler): a thread
+    # unanswered for longer than this is RE-ENGAGEMENT material (the
+    # followup engine's job), not an URGENT "needs your reply" card.
+    # 336h = 14d, aligned with the ghost-recovery engine's own 24h-14d
+    # active-recovery band. Without it, the last_customer_message_at
+    # backfill (82 NULL rows, 58 of them >30d old) would flood the
+    # operator with ancient cards (~324/day unpaired worst case).
+    try:
+        MAX_AGE_H = float(os.environ.get("OWE_MAX_AGE_H", "336"))
+    except (TypeError, ValueError):
+        MAX_AGE_H = 336.0
     lock = "lock:owe_reply_sweep"
     if not dry:
         _lk, _ = _redis(["SET", lock, "1", "NX", "EX", "1800"])
@@ -6638,7 +6649,7 @@ def handle_owe_reply_sweep(payload, send):
                        "posted": 0, "candidates": []})
             return
     posted = skipped_excluded = skipped_error = skipped_answered = 0
-    skipped_fresh = skipped_open_draft = 0
+    skipped_fresh = skipped_open_draft = skipped_ancient = 0
     report = []
     try:
         try:
@@ -6699,6 +6710,11 @@ def handle_owe_reply_sweep(payload, send):
             # lead re-surfaces on the next run once genuinely stale.
             if isinstance(secs, (int, float)) and secs < FRESH_SKIP:
                 skipped_fresh += 1
+                continue
+            # OWE_MAX_AGE: ancient unanswered threads stay out of the card
+            # stream (data stays correct; the reengage engine owns them).
+            if owe_hours is not None and owe_hours > MAX_AGE_H:
+                skipped_ancient += 1
                 continue
             # FIX A-2: an OPEN card (pending / awaiting_*) already exists —
             # never supersede operator-visible work. Fail-open on Redis
@@ -6855,6 +6871,7 @@ def handle_owe_reply_sweep(payload, send):
                    "skipped_error": skipped_error,
                    "skipped_fresh": skipped_fresh,
                    "skipped_open_draft": skipped_open_draft,
+                   "skipped_ancient": skipped_ancient,
                    "count": len(report), "candidates": report})
     finally:
         if not dry:
