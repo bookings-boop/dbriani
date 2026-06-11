@@ -68,6 +68,15 @@ REVIEW_OWED_DIGEST_ENABLED = (
     os.environ.get("REVIEW_OWED_DIGEST_ENABLED", "0").strip() == "1")
 REVIEW_OWED_DIGEST_CAP = int(os.environ.get("REVIEW_OWED_DIGEST_CAP", "20"))
 
+# 📅 F3-dates (2026-06-12): "DATE THIS WEEK" digest — every ACTIVE lead with a
+# booking ≤7 days out that we are NOT owed a reply on. This is the orphaned
+# population Ahmed fell into: an imminent-date, waiting-on-customer lead has NO
+# surfacing path (every path is owed-keyed or cap-bound, and booking date fed
+# no rank). Mirrors the F3 owed digest exactly; ships dormant; flip to surface.
+REVIEW_DATES_DIGEST_ENABLED = (
+    os.environ.get("REVIEW_DATES_DIGEST_ENABLED", "0").strip() == "1")
+REVIEW_DATES_DIGEST_CAP = int(os.environ.get("REVIEW_DATES_DIGEST_CAP", "25"))
+
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
 # rendering. Bounded so /review latency stays under 10s even with a
@@ -426,24 +435,20 @@ def _yacht_rate_bonus(yachts_str):
     return min(_yacht_max_rate(yachts_str) // 3, 2400)
 
 
-def _booking_urgency_bonus(dates_str):
-    """Return urgency bonus by booking-date proximity. Operator's #1
-    sorting concern: bookings happening NOW must surface above bookings
-    months out, regardless of label.
+def _urgency_from_date(d):
+    """Days-proximity → urgency bonus, given an already-parsed date (or None).
+    Extracted from _booking_urgency_bonus (2026-06-12) so _date_urgency can
+    feed it an ISO booking_date_abs the month-name parser can't anchor.
 
       today / tomorrow → +600  (drop-everything)
       within 3 days    → +400
       within 7 days    → +200
-      else             → 0
-
-    Past dates return 0 — _label_eval already demotes them to COLD via
-    the date_passed signal."""
-    d = _parse_booking_date(dates_str)
+      else / past / None → 0
+    Pure."""
     if not d:
         return 0
     import datetime as _dt
-    today = _dt.date.today()
-    days_until = (d - today).days
+    days_until = (d - _dt.date.today()).days
     if days_until < 0:
         return 0  # past date — already handled by label demotion
     if days_until <= 1:
@@ -453,6 +458,32 @@ def _booking_urgency_bonus(dates_str):
     if days_until <= 7:
         return 200
     return 0
+
+
+def _booking_urgency_bonus(dates_str):
+    """Return urgency bonus by booking-date proximity. Operator's #1
+    sorting concern: bookings happening NOW must surface above bookings
+    months out, regardless of label. Past dates return 0 — _label_eval
+    already demotes them to COLD via the date_passed signal."""
+    return _urgency_from_date(_parse_booking_date(dates_str))
+
+
+def _date_urgency(row):
+    """Urgency bonus from a row's booking date, for the 📅 dates digest.
+    Prefers the normalized ISO booking_date_abs (migration 011) — which
+    _parse_booking_date (month-name only) returns None on, so it fed NO
+    ranking term before this fix — then falls back to the raw dates string.
+    Past / unparseable → 0. Pure; None-safe."""
+    row = row or {}
+    abs_ = row.get("booking_date_abs")
+    if isinstance(abs_, str) and abs_.strip():
+        try:
+            import datetime as _dt
+            return _urgency_from_date(
+                _dt.date.fromisoformat(abs_.strip()[:10]))
+        except (ValueError, TypeError):
+            pass
+    return _booking_urgency_bonus(row.get("dates"))
 
 
 # Re-export from labels (already imported via server's re-export chain
@@ -911,6 +942,84 @@ def build_owed_digest(scored, cap=None):
     return "\n".join(out)
 
 
+# Labels eligible for the 📅 dates digest. COLD is INCLUDED on purpose: a
+# label-engine misdemote (the exact upstream contributor that kept Ahmed WARM
+# instead of HOT) must not be able to hide a lead with an imminent booking.
+# CONFIRMED/terminal/paused are excluded — the booking is already won or dead.
+_DATES_DIGEST_LABELS = frozenset({
+    "WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION", "WARM", "NEW", "COLD"})
+
+
+def build_dates_digest(scored, cap=None):
+    """The "📅 DATE THIS WEEK" index for the top of /review: every ACTIVE lead
+    with a booking ≤7 days out that we are NOT owed a reply on.
+
+    This is the orphaned population Ahmed fell into (RCA 2026-06-12): an
+    imminent-date, waiting-on-customer lead has no surfacing path — owed leads
+    lead the 🔴 digest, and everything else is cap-bound while booking date
+    fed no rank term. Membership here is DATE-keyed, so expected value only
+    ORDERS within the digest — it can never evict a dated lead (the bug that
+    buried Ahmed at WARM #10 behind a browser with higher EV).
+
+    scored: list of (score, row) tuples — the shape render_review holds.
+    Returns a multi-line block string, or '' when nothing is due this week.
+    Render-only, pure, None/junk-safe — a malformed `scored` never raises."""
+    from util import _md_escape
+    try:
+        cap = REVIEW_DATES_DIGEST_CAP if cap is None else int(cap)
+    except (TypeError, ValueError):
+        cap = REVIEW_DATES_DIGEST_CAP
+    if cap < 0:
+        cap = 0
+    items = []
+    for it in (scored or []):
+        if not (isinstance(it, (list, tuple)) and len(it) >= 2):
+            continue
+        s, r = it[0], it[1]
+        if not isinstance(r, dict):
+            continue
+        lbl = (str(r.get("label") or "").strip().upper() or "NEW")
+        if lbl not in _DATES_DIGEST_LABELS:
+            continue
+        if _owes_reply(r):          # owed leads already lead the 🔴 digest
+            continue
+        u = _date_urgency(r)
+        if u <= 0:                  # no future booking within 7 days
+            continue
+        items.append((u, s, r))
+    if not items:
+        return ""
+    # urgency desc, then expected value desc, then composite score desc — EV
+    # only orders (membership is already date-gated, so it cannot evict).
+    items.sort(
+        key=lambda t: (
+            t[0],
+            _expected_value(t[1], t[2]),
+            t[1] if isinstance(t[1], (int, float))
+            and not isinstance(t[1], bool) else 0),
+        reverse=True)
+    shown = items[:cap]
+    overflow = len(items) - len(shown)
+    out = [f"📅 *DATE THIS WEEK* — {len(items)} booking(s) ≤7 days "
+           "(not owed a reply)"]
+    for _u, _s, r in shown:
+        nm = _md_escape((r.get("name") or "").strip()
+                        or str(r.get("customer_id") or "Unknown"))
+        lbl = (str(r.get("label") or "").strip().upper() or "NEW")
+        # compact date: prefer the normalized ISO, else the raw dates string.
+        _d = ((r.get("booking_date_abs") or r.get("dates") or "")
+              if isinstance(r.get("booking_date_abs") or r.get("dates"), str)
+              else "")
+        date_disp = _md_escape(_d.strip()[:18]) if _d.strip() else "soon"
+        imp = r.get("importance_score")
+        imp_tag = (f" imp {imp}" if isinstance(imp, int)
+                   and not isinstance(imp, bool) else "")
+        out.append(f" • {date_disp} · {nm} — {lbl}{imp_tag}")
+    if overflow > 0:
+        out.append(f"_+{overflow} more this week_")
+    return "\n".join(out)
+
+
 def render_review(scored, totals, mode="ondemand", uncap=False):
     """Return a dict with both the single-message rendering (kept for backward
     compat) AND a per-lead-cards rendering so the workflow can post one message
@@ -1114,6 +1223,18 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
             _owed_digest = ""
         if _owed_digest:
             header_lines.append(_owed_digest)
+    # 📅 F3-dates (2026-06-12): "DATE THIS WEEK" — every ACTIVE lead with a
+    # booking ≤7 days out that we're NOT owed a reply on (Ahmed-class:
+    # imminent date + waiting-on-customer, which every other surfacing path
+    # misses). Flag-gated dormant; render-only; fail-open. Sits just under the
+    # 🔴 owed digest (both are "act now", dates after replies).
+    if REVIEW_DATES_DIGEST_ENABLED:
+        try:
+            _dates_digest = build_dates_digest(scored)
+        except Exception:  # noqa: BLE001
+            _dates_digest = ""
+        if _dates_digest:
+            header_lines.append(_dates_digest)
     # 💰 Top-by-value digest (operator 2026-06-06: "sort from high revenue to
     # down"). A value-ranked callout of the highest expected-value ACTIVE leads
     # ACROSS all temperature tiers, so the whales surface at the very top
