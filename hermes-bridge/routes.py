@@ -4706,6 +4706,31 @@ def handle_lead_analyze_disregard(payload, send):
         if cur_label in ("COLD", "CONFIRMED"):
             force_close = True
 
+        # F2 (2026-06-12): second-press escalation — the OPERATOR owns the
+        # lead; the analyzer advises once, never vetoes forever. A plain
+        # Disregard on a non-terminal lead defers to Hermes, whose RULE 3
+        # hard-codes keep_open for B2B/broker chats, so a single press can
+        # NEVER close such a lead (Olga: 15 vetoed presses over 6 days). If
+        # this cid was already analyzed and Hermes said keep_open within the
+        # last 30 days, the operator's REPEAT press is a command: escalate to
+        # the force path. Race-safe: a double-tap inside the 25-45s Hermes
+        # window reads the pre-write snapshot, neither press escalates (fails
+        # toward keep-open); the next deliberate press closes. The 30-day
+        # window stops a months-old veto from turning one stray future press
+        # into an instant close after the lead's situation changed.
+        if not force_close:
+            _pv_out, _pverr = _psql(
+                "SELECT 1 FROM customer_facts WHERE "
+                f"customer_id = {_lit(cid)} "
+                "AND disregard_verdict = 'keep_open' "
+                "AND disregard_analyzed_at > now() - interval '30 days'")
+            if not _pverr and (_pv_out or "").strip():
+                force_close = True
+                explicit_force = True
+                log(f"disregard SECOND-PRESS escalation cid={cid} "
+                    f"label={cur_label} — prior Hermes keep_open honored as "
+                    f"operator override (operator owns the lead)")
+
         # ---- force-override path — skip Hermes, just close ----
         if force_close:
             prev_reasoning = facts.get("disregard_reasoning") or ""
@@ -4831,6 +4856,10 @@ def handle_lead_analyze_disregard(payload, send):
                 "label_before": cur_label, "label_after": _clabel,
                 "reasoning": reasoning, "telegram_text": tx})
         else:
+            # F2 (2026-06-12): make the veto VISIBLE — the keep_open branch
+            # used to write no log line, so 15 silent vetoes looked like 1.
+            log(f"disregard VETO keep_open cid={cid} label={cur_label} "
+                f"score={int(score)}")
             tx = (
                 f"🟢 *KEEP OPEN* — {nm_e}\n"
                 f"_Hermes analysis:_ {reasoning_e}\n"
@@ -4838,7 +4867,8 @@ def handle_lead_analyze_disregard(payload, send):
                 + (f"\n_Suggested play:_ {suggested_e}"
                    if suggested else "")
                 + f"\n\n→ label unchanged ({cur_label})."
-                "\n\n_Disagree? Override below._"
+                "\n\n_Disagree? Tap 🛑 Close anyway — or press_ "
+                "🛑 _Disregard again; a second press always closes._"
             )
             # Override buttons. The operator can either force-close
             # (against Hermes) or accept Hermes' advice by drafting a
