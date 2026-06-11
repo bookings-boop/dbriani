@@ -31,6 +31,7 @@ MUST_CONTAIN = (
     "| ⭐ Bella | 15 |",
     "NEED-BASED option, NOT the morning",
     "no discount asked = no discount given",
+    "Conversation history is NOT pricing precedent",
     "majesty-request",
 )
 MUST_NOT_CONTAIN = ("B2C minimum (morning",)

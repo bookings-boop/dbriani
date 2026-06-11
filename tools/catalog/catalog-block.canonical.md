@@ -12,6 +12,9 @@
 > conversation history. Quote the list rate first; reach for an anchor price
 > ONLY after the customer pushes back on price or states a lower budget.
 > Never volunteer a struck-through or legacy price.
+> Conversation history is NOT pricing precedent: if an older message in this
+> thread quoted a lower or struck-through price, do NOT repeat it — the
+> catalog above is the only valid source for opening quotes.
 
 ### 7.1 Sunseeker Satoshi 70 ft — *Dubriani-owned, prioritize*
 - Formerly Enigma. Refitted late 2024, renamed Satoshi.
