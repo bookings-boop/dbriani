@@ -291,6 +291,43 @@ def handle_debounce(payload, send):
         texts = [str(m.get("text", "")) for m in msgs
                  if str(m.get("text", "")).strip()]
         ids = [m.get("id", "") for m in msgs]
+        # FWD-GATE intake check (BUG-3, 2026-06-12, flag-gated): a thread
+        # whose EVERY Dubriani-side message is an operator FORWARD (plus at
+        # least one reply) is a forwarded-to third party (captain/crew/
+        # vendor), not a lead — suppress downstream (draft/facts/analysis)
+        # via the existing latest:false branch n8n already honors. NEVER
+        # silent (Telegram notice per suppression) and fail-OPEN: any
+        # WAHA/TG error falls through to the normal flush.
+        if os.environ.get("FWD_GATE_ENABLED") == "1":
+            try:
+                from server import _forward_seeded, _tg_post, waha_fetch_raw
+                _rows = waha_fetch_raw(phone, limit=25)
+                if _forward_seeded(_rows):
+                    _n_out = sum(1 for r in _rows
+                                 if r.get("direction") == "out")
+                    log(f"fwd-gate suppress {phone} — forward-seeded thread "
+                        f"({_n_out}/{_n_out} Dubriani-side msgs are forwards)")
+                    try:
+                        _tg_post("sendMessage", {
+                            "chat_id": os.environ.get("TG_ADMIN_CHAT_ID")
+                            or os.environ.get("TELEGRAM_ADMIN_CHAT_ID")
+                            or "5532831477",
+                            "text": (f"🛡 intake-gate: {phone} — thread is "
+                                     f"operator-forward-seeded ({_n_out}/"
+                                     f"{_n_out} Dubriani-side msgs are "
+                                     f"forwards); reply NOT treated as a "
+                                     f"lead. Message them directly if this "
+                                     f"is a real customer.")})
+                    except Exception:
+                        pass
+                    send(200, {"ok": True, "latest": False,
+                               "fwd_gate": True})
+                    return
+            except Exception as _fge:
+                try:
+                    log("fwd-gate non-fatal (fail-open):", repr(_fge))
+                except Exception:
+                    pass
         log(f"debounce FLUSH {phone} latest=true count={len(msgs)}")
         send(200, {"ok": True, "latest": True,
                          "combined": "\n".join(texts),
@@ -4333,9 +4370,32 @@ def handle_pipeline_analyze(payload, send):
                 # — a 157-msg CONFIRMED booking was scored 0/100).
                 hist_ = build_analyzer_history(cid, waha_limit=100)
                 history_ = (hist_ or {}).get("history") or ""
-                v_ = hermes_analyze_lead(cid, history_, facts_,
-                                         message_count=mc_,
-                                         silent_hours=sh_)
+                # FWD-GATE analyzer short-circuit (BUG-3, 2026-06-12):
+                # a forward-seeded thread is a forwarded-to third party —
+                # skip the LLM entirely (it reattributes the forwarded
+                # customer voice and scored a captain 95/100 even while
+                # its own reasoning said "wrong number") and route through
+                # the existing close/score-0 demotion below, whose
+                # NEW/WARM/HOT-only + ever-booked guards keep paid threads
+                # untouchable. Also cleans existing ghosts on their next
+                # scheduled analysis.
+                if (hist_ or {}).get("forward_seeded"):
+                    log(f"pipeline-analyze cid={cid} FWD-GATE "
+                        f"forward-seeded thread -> score 0 / close "
+                        f"(no LLM call)")
+                    v_ = {"importance_score": 0, "verdict": "close",
+                          "reasoning": (
+                              "FORWARD-SEEDED: every Dubriani-side message "
+                              "in this thread is an operator forward of "
+                              "third-party content — the recipient is a "
+                              "forwarded-to party (captain/crew/vendor), "
+                              "not a customer."),
+                          "suggested_action":
+                              "None — not a customer thread."}
+                else:
+                    v_ = hermes_analyze_lead(cid, history_, facts_,
+                                             message_count=mc_,
+                                             silent_hours=sh_)
                 if not v_:
                     return ("error", cid)
                 score_ = int(v_.get("importance_score") or 0)

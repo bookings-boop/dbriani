@@ -630,7 +630,13 @@ def waha_fetch_history(customer_id, limit=30):
     # That produced off-context drafts (operator: "nudge draft is not
     # considering his last 10 messages").
     for m in with_body[-20:]:
-        who = "Dubriani" if m.get("fromMe") else "Customer"
+        if m.get("fromMe") and _waha_is_fwd(m):
+            # BUG-3 (2026-06-12): a forward is NOT Dubriani's own words — the
+            # untagged line made the analyzer attribute forwarded CUSTOMER
+            # messages to us and score the forwarded-to captain 95/100.
+            who = "Dubriani FORWARDED 3rd-party content (NOT Dubriani's own words)"
+        else:
+            who = "Dubriani" if m.get("fromMe") else "Customer"
         secs = max(0, now_ts - (m.get("timestamp") or now_ts))
         ago = (f"{secs // 60}m" if secs < 5400 else
                f"{secs // 3600}h" if secs < 129600 else
@@ -653,6 +659,20 @@ def _waha_msg_id(m):
         i = i.get("_serialized") or i.get("id")
     i = (str(i).strip() if i not in (None, "") else "")
     return i or None
+
+
+def _waha_is_fwd(m):
+    """True if a raw WAHA message dict is a FORWARD (operator relayed someone
+    else's words). WAHA marks forwards as isForwarded (top-level or under
+    _data) and/or a non-zero forwardingScore — verified on live payloads
+    2026-06-12 (BUG-3 RCA: this flag was previously discarded everywhere,
+    so forwarded customer messages were attributed to Dubriani and minted
+    ghost captain/crew leads). Pure; None-safe."""
+    if not isinstance(m, dict):
+        return False
+    d = m.get("_data") or {}
+    return bool(m.get("isForwarded") or d.get("isForwarded")
+                or d.get("forwardingScore") or m.get("forwardingScore"))
 
 
 def waha_fetch_raw(customer_id, limit=100):
@@ -681,6 +701,7 @@ def waha_fetch_raw(customer_id, limit=100):
                 "direction": "out" if m.get("fromMe") else "in",
                 "body": (m.get("body") or ""),
                 "msg_id": _waha_msg_id(m),
+                "fwd": _waha_is_fwd(m),
             })
         return out
     except Exception:

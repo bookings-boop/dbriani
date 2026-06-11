@@ -670,13 +670,40 @@ def _select_history_window(rows, recent_n=20, max_signal=6):
     return window, (len(window) < n)
 
 
+def _forward_seeded(waha_rows):
+    """True iff a thread is OPERATOR-FORWARD-SEEDED: it has at least one
+    outbound row, EVERY outbound row is a forward of someone else's words
+    (fwd=True from waha_fetch_raw), and at least one inbound reply exists —
+    i.e. the 'recipient' is a forwarded-to third party (captain/crew/vendor),
+    not a customer (BUG-3 RCA 2026-06-12: ghosts score 1.00 on this predicate,
+    benign brochure-forward threads ≤0.11; 0 false positives in 334 threads).
+    Computed from RAW WAHA rows ONLY — WAHA is the provenance authority; the
+    durable store cannot carry the flag for rows persisted before this fix.
+    One genuine (non-forward) Dubriani message permanently disarms it.
+    Pure; None-safe; empty/odd input → False (fail-open)."""
+    try:
+        rows = [r for r in (waha_rows or []) if isinstance(r, dict)]
+        outs = [r for r in rows if r.get("direction") == "out"]
+        ins = [r for r in rows if r.get("direction") == "in"]
+        return bool(outs) and bool(ins) and all(r.get("fwd") for r in outs)
+    except Exception:
+        return False
+
+
 def _format_conv_history(rows, now_ts):
     """Format durable rows into the EXACT history-line shape the analyzer
     expects (identical to waha_fetch_history): oldest-first, body→single line,
     240-char cap, relative-age tag."""
     lines = []
     for m in rows:
-        who = "Dubriani" if m.get("direction") == "out" else "Customer"
+        if m.get("direction") == "out" and m.get("fwd"):
+            # BUG-3 (2026-06-12): forwarded content must never read as our
+            # own words — the untagged line is how a forwarded customer
+            # message minted a 95/100 ghost lead for its recipient.
+            who = ("Dubriani FORWARDED 3rd-party content "
+                   "(NOT Dubriani's own words)")
+        else:
+            who = "Dubriani" if m.get("direction") == "out" else "Customer"
         secs = max(0, now_ts - int(m.get("ts") or now_ts))
         ago = (f"{secs // 60}m" if secs < 5400 else
                f"{secs // 3600}h" if secs < 129600 else
@@ -804,8 +831,12 @@ def build_analyzer_history(customer_id, waha_limit=100):
     # WAHA inbound behind a single recent echo. (Was: only ts > max(durable ts),
     # which dropped every older WAHA row -> hollow 'first contact' thread.)
     topup = []
+    fwd_seeded = False
     try:
         waha_rows = waha_fetch_raw(customer_id, limit=waha_limit) or []
+        # BUG-3 (2026-06-12): thread-shape provenance check, from the RAW
+        # WAHA rows only (they carry the fwd flag; durable rows may not).
+        fwd_seeded = _forward_seeded(waha_rows)
         topup = _merge_waha_topup(cid, rows, waha_rows)
         combined = sorted(rows + topup, key=lambda r: int(r.get("ts") or 0))
     except Exception:
@@ -820,6 +851,13 @@ def build_analyzer_history(customer_id, waha_limit=100):
     # isolated below the read build: a persist failure NEVER affects the history
     # we already assembled / return.
     for _tr in topup:
+        # BUG-3 (2026-06-12): never persist a FORWARDED outbound as a genuine
+        # Dubriani 'out' row — that laundering made forwarded customer words
+        # permanently indistinguishable from our own replies (rows 2206-2209).
+        # The rows keep re-merging from WAHA with the flag intact, so no
+        # history is lost; durable provenance column = queued follow-up.
+        if _tr.get("fwd") and _tr.get("direction") == "out":
+            continue
         try:
             record_message(customer_id, _tr.get("direction"),
                            _tr.get("body"), msg_id=_tr.get("msg_id"),
@@ -839,7 +877,8 @@ def build_analyzer_history(customer_id, waha_limit=100):
             f"being over.]\n" + history)
     last = (body_rows[-1].get("body") or "").strip()[:500]
     return {"history": history, "last_message": last, "push_name": "",
-            "count": len(body_rows), "err": None, "source": "durable"}
+            "count": len(body_rows), "err": None, "source": "durable",
+            "forward_seeded": fwd_seeded}
 
 
 def _supersede_pending_for_cid(cid, except_did=None):
