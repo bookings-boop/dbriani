@@ -4287,6 +4287,11 @@ def handle_pipeline_analyze(payload, send):
                 "SELECT customer_id FROM customer_facts WHERE label IN ("
                 "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
                 "'WAITING_FOR_PAYMENT','CONFIRMED') "
+                # 2026-06-11: merged-away rows re-entered the rotation
+                # forever (30 ghosts, 3 of 24 slots burned per sweep) —
+                # the reanalyze drain has _filter_reanalyze_cids, this
+                # bulk SELECT was the only unfiltered analyze entry.
+                "AND merged_into IS NULL "
                 "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
                 f"updated_at DESC LIMIT {int(cap)}"
             )

@@ -166,6 +166,22 @@ MONEY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Quote-acceptance (Eva 2026-06-10: "Ok" after "87,731 AED" stayed WARM —
+# nothing in the ladder represented "customer accepted our quoted price").
+# A SHORT, standalone affirmative — must match the ENTIRE message, so
+# "ok but what time?" / "ok 5000 aed" never route here.
+AFFIRMATIVE_RE = re.compile(
+    r"^(ok(ay)?|yes|yep|yup|sure|deal|done|confirmed?|perfect|great|"
+    r"sounds\s+good|let'?s\s+do\s+it|go\s+ahead|book\s+it|👍|✅)"
+    r"[\s!.👍✅🙏]*$",
+    re.IGNORECASE)
+
+# A currency-adjacent amount in OUR outbound (an open quote). MONEY_RE is
+# too loose here ('price'/'budget' words alone fire it) and \b\d{4,}\b
+# misses comma forms like '87,731'.
+OUTBOUND_QUOTE_RE = re.compile(
+    r"(?:AED|aed)\s*\d[\d,.]*|\d[\d,.]*\s*(?:AED|aed|dirhams?)")
+
 LETS_DO_IT_RE = re.compile(
     # Verified commit/finalize phrases. Detects when a customer is past
     # negotiation and ready to pay. Each alternation is anchored on a

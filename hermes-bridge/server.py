@@ -55,6 +55,7 @@ from waha import (  # noqa: F401
 from labels import (  # noqa: F401
     LABELS, _LABEL_RANK, _HARD_DEMOTE_SIGNALS, _TIER_BELOW,
     MONEY_RE, LETS_DO_IT_RE, PAST_DATE_MONTH_RE, PAYMENT_CONFIRMED_RE,
+    AFFIRMATIVE_RE, OUTBOUND_QUOTE_RE,
     SAME_DAY_RE, PRICING_INQUIRED_RE, YACHT_KEYWORD_RE,
     CORRECTION_WINDOW_DAYS, CORRECTION_DAMPENING_DIVISOR,
     CONFIDENCE_FLOOR, CONFIDENCE_DEMOTE_THRESHOLD,
@@ -622,6 +623,8 @@ def _parse_conv_rows(out):
             continue
         parts = line.split(_CONV_FS)
         if len(parts) < 4:
+            log(f"_parse_conv_rows: dropped malformed row "
+                f"({len(parts)} fields): {line[:80]!r}")
             continue
         try:
             ts = int(parts[0])
@@ -1380,7 +1383,12 @@ def resolve_customer_by_name(name):
     # because both the canonical @lid row AND its merged @c.us row
     # matched. merged_into IS NOT NULL means the row points to a
     # canonical twin; never surface it as a separate match.
-    sql = ("SELECT customer_id || E'\\t' || name FROM customer_facts "
+    # #B1-class hardening (2026-06-11): 0x1F + newline scrub — a tab in a
+    # pushName used to truncate the matched name; a newline shattered the
+    # row (wrong-name match + silently dropped tail fragment).
+    sql = ("SELECT concat_ws(E'\\x1f', customer_id, "
+           "replace(replace(COALESCE(name,''), chr(13), ' '), chr(10), ' ')) "
+           "FROM customer_facts "
            f"WHERE lower(name) LIKE '%{n}%' "
            "AND merged_into IS NULL "
            "ORDER BY updated_at DESC LIMIT 3")
@@ -1388,11 +1396,13 @@ def resolve_customer_by_name(name):
     if err:
         return None, []
     matches = []
-    for ln in (out or "").splitlines():
-        parts = ln.split("\t")
+    for ln in (out or "").strip("\n").splitlines():
+        parts = ln.split("\x1f", 1)
         if len(parts) >= 2:
             matches.append({"customer_id": parts[0].strip(),
                             "name": parts[1].strip()})
+        elif ln.strip():
+            log(f"resolve_by_name: dropped malformed row {ln[:80]!r}")
     if len(matches) == 1:
         return matches[0]["customer_id"], matches
     return None, matches
@@ -1445,6 +1455,8 @@ def resolve_customer_by_phone(phone):
             if len(parts) >= 2:
                 matches.append({"customer_id": parts[0].strip(),
                                 "name": parts[1].strip()})
+            elif ln.strip():
+                log(f"resolve_by_phone: dropped malformed row {ln[:80]!r}")
     if len(matches) == 1:
         return matches[0]["customer_id"], matches
     if matches:
@@ -1635,15 +1647,24 @@ def behavioral_context(customer_id):
                    "WHERE scope='global' AND active=true "
                    f"ORDER BY id DESC LIMIT {FEEDBACK_MAX_GLOBAL}")
     glb = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
-    out, _ = _psql("SELECT scope_value || E'\\t' || rule_text "
+    # #B1-class hardening (2026-06-11): 0x1F + COALESCE + newline scrub — a
+    # tab inside an operator-typed rule used to silently AMPUTATE the rule
+    # tail; a NULL scope/rule nullified the whole concat (active rule never
+    # reached any draft — the "rules don't work" class).
+    out, _ = _psql("SELECT concat_ws(E'\\x1f', COALESCE(scope_value,''), "
+                   "replace(replace(COALESCE(rule_text,''), chr(13), ' '), "
+                   "chr(10), ' ')) "
                    "FROM behavior_rules WHERE scope='scenario' AND active=true "
                    "ORDER BY id DESC LIMIT 50")
     sc = []
-    for ln in (out or "").splitlines():
-        parts = ln.split("\t")
+    for ln in (out or "").strip("\n").splitlines():
+        parts = ln.split("\x1f", 1)
         if len(parts) >= 2:
             sc.append({"scenario": parts[0].strip(),
                        "rule": parts[1].strip()})
+        elif ln.strip():
+            log(f"behavioral_context: dropped malformed scenario-rule "
+                f"row {ln[:80]!r}")
     notes = []
     if cid:
         out, _ = _psql(f"SELECT note_text FROM customer_notes "
@@ -3925,6 +3946,27 @@ def _has_recent_payment_link_sent(customer_id, hours=48):
         return False
 
 
+def _recent_outbound_quote(customer_id, hours=48, last_n=3):
+    """True iff any of OUR last N outbound bubbles (<=hours old) carried a
+    currency amount — i.e. there is an open quote on the table. Used by the
+    quote_accepted ladder signal. Last-3 not last-1: Eva 2026-06-10's
+    87,731 quote was phone-sent and reached the durable store only via the
+    next WAHA top-up — at eval time the newest stored outbound had no
+    money, the 2nd-newest ('15,000 AED/hr') did. Fail-CLOSED on DB error
+    (no promotion on missing evidence)."""
+    cid = (customer_id or "").replace("'", "''")
+    out, err = _psql(
+        "SELECT left(replace(replace(coalesce(body,''), chr(13), ' '), "
+        "chr(10), ' '), 500) FROM conversation_messages "
+        f"WHERE customer_id = '{cid}' AND direction = 'out' "
+        f"AND ts > now() - interval '{int(hours)} hours' "
+        f"ORDER BY ts DESC, id DESC LIMIT {int(last_n)}"
+    )
+    if err or not (out or "").strip():
+        return False
+    return any(OUTBOUND_QUOTE_RE.search(ln) for ln in out.splitlines())
+
+
 # _MONTH_NUM + _parse_booking_date moved to labels.py
 # (re-exported at top of server.py for backward compat).
 
@@ -4048,6 +4090,16 @@ def compute_label(latest_message, facts):
     if customer_id and _has_recent_payment_intent(customer_id):
         return ("HOT", "payment_intent", "trigger in last 24h")
 
+    # Quote acceptance (Eva 2026-06-10): we quoted a price recently and the
+    # customer replied with a bare standalone affirmative ("Ok" after
+    # "after discount we can do 87,731 AED"). Anchored full-match keeps
+    # every message that fires money_mentioned / lets_do_it today on its
+    # existing signal; confidence self-dampens via label_corrections like
+    # every other signal.
+    if customer_id and AFFIRMATIVE_RE.match(msg.strip()) \
+            and _recent_outbound_quote(customer_id):
+        return ("HOT", "quote_accepted", msg.strip()[:200])
+
     m = MONEY_RE.search(msg)
     if m:
         snippet = msg[max(0, m.start() - 10):m.end() + 30].strip()
@@ -4081,19 +4133,27 @@ def get_current_label_row(customer_id):
     the canonical row's label state."""
     customer_id = canonicalize_cid(customer_id)
     cid = (customer_id or "").replace("'", "''")
+    # #B1-class hardening (2026-06-11): 0x1F separator — this is a
+    # single-row read, so one '|'-shifted row used to null the customer's
+    # ENTIRE label state (locks silently bypassed) across 16 call sites,
+    # with zero log. COALESCE(label,'') matters under concat_ws (NULLs are
+    # SKIPPED, shifting positions); strip("\n") not strip() — '\x1f' is
+    # whitespace to Python and trailing empty fields must survive.
     sql = (
-        "SELECT label, "
+        "SELECT concat_ws(E'\\x1f', COALESCE(label,''), "
         "COALESCE(to_char(label_updated_at,'YYYY-MM-DD\"T\"HH24:MI:SSOF'),''), "
         "COALESCE(to_char(label_locked_until,'YYYY-MM-DD\"T\"HH24:MI:SSOF'),''), "
-        "COALESCE(message_count,0), COALESCE(name,''), "
-        "COALESCE(yachts,''), COALESCE(dates,'') "
+        "COALESCE(message_count,0)::text, COALESCE(name,''), "
+        "COALESCE(yachts,''), COALESCE(dates,'')) "
         f"FROM customer_facts WHERE customer_id = '{cid}'"
     )
     out, err = _psql(sql)
     if err or not (out or "").strip():
         return None
-    parts = (out.splitlines() or [""])[0].split("|")
+    parts = ((out or "").strip("\n").splitlines() or [""])[0].split("\x1f")
     if len(parts) < 7:
+        log(f"get_current_label_row: malformed row for cid={customer_id!r} "
+            f"({len(parts)} fields) — label state unavailable")
         return None
     try:
         mc = int((parts[3].strip() or "0"))
@@ -4246,21 +4306,27 @@ def _followup_candidate_sql():
     no nudge within 24h of a payment link. Column order is contractual —
     scan_followup_eligibility() parses by position."""
     return (
-        "SELECT cs.customer_id, "
+        # #B1-class hardening (2026-06-11): 0x1F field separator — a '|' in
+        # a customer pushName used to shift fields, fail the float() parse,
+        # and make that customer permanently invisible to the follow-up
+        # engine with zero log. concat_ws SKIPS NULLs (shifting positions),
+        # so EVERY argument must be COALESCEd; 'f' keeps the parser's
+        # "== 't'" boolean semantics identical to the old NULL→'' rows.
+        "SELECT concat_ws(E'\\x1f', cs.customer_id, "
         "COALESCE(cf.name, ''), "
-        "cf.label, "
+        "COALESCE(cf.label, ''), "
         # silence measured since OUR reply (customer went silent on us)
-        "EXTRACT(EPOCH FROM (now() - cs.last_operator_reply_at))/3600, "
-        "(cs.last_operator_reply_at > cs.last_customer_message_at) AS we_replied, "
-        "(cf.label_locked_until > now()) AS locked, "
+        "COALESCE((EXTRACT(EPOCH FROM (now() - cs.last_operator_reply_at))/3600)::text, ''), "
+        "COALESCE((cs.last_operator_reply_at > cs.last_customer_message_at)::text, 'f'), "
+        "COALESCE((cf.label_locked_until > now())::text, 'f'), "
         "COALESCE(cm.mode, 'approval'), "
         # parts[7]: nudged within the cooldown window (defensive duplicate of
         # the SQL cooldown gate below) — kept at this index by the parser.
-        "(cs.last_nudge_drafted_at > now() - interval '48 hours') AS recently_nudged, "
+        "COALESCE((cs.last_nudge_drafted_at > now() - interval '48 hours')::text, 'f'), "
         # Cap counter — proactive engine bounds itself to FOLLOWUP_CAP
         # unsolicited follow-ups before exhausting; resets on customer
         # message (see upsert_conversation_state).
-        "COALESCE(cs.followup_count, 0) "
+        "COALESCE(cs.followup_count, 0)::text) "
         "FROM conversation_state cs "
         "LEFT JOIN customer_facts cf USING (customer_id) "
         "LEFT JOIN LATERAL ("
@@ -4324,9 +4390,13 @@ def scan_followup_eligibility():
         log("followup_scan err:", err)
         return []
     candidates = []
-    for line in (out or "").strip().splitlines():
-        parts = line.split("|")
+    # strip("\n") NOT strip(): '\x1f'.isspace() is True — a bare .strip()
+    # would eat the LAST row's trailing separator run (the Gül bug class).
+    for line in (out or "").strip("\n").splitlines():
+        parts = line.split("\x1f")
         if len(parts) < 9:
+            log(f"followup_scan: dropped short row ({len(parts)} fields) "
+                f"cid={(parts[0].strip()[:48] if parts else '')!r}")
             continue
         cid = parts[0].strip()
         if not cid:
@@ -4334,6 +4404,8 @@ def scan_followup_eligibility():
         try:
             silent_hrs = float(parts[3].strip())
         except (ValueError, IndexError):
+            log(f"followup_scan: unparseable silence-hours for "
+                f"cid={cid!r} ({parts[3].strip()[:24]!r})")
             continue
         label = parts[2].strip() or "NEW"
         locked = parts[5].strip().lower() == "t"
@@ -4655,6 +4727,7 @@ def _humanize_signal(signal, evidence, created_by):
         "payment_intent":          "Strong booking intent detected",
         "money_mentioned":         "Mentioned money/budget",
         "lets_do_it":              "Indicated they want to book",
+        "quote_accepted":          "Accepted a quoted price",
         "same_day_booking":        "Asked about same-day booking",
         "multi_yacht_engaged":     "Engaged on multiple yachts",
         "pricing_inquired":        "Asked about pricing",
