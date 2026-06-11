@@ -300,7 +300,8 @@ def handle_debounce(payload, send):
         # WAHA/TG error falls through to the normal flush.
         if os.environ.get("FWD_GATE_ENABLED") == "1":
             try:
-                from server import _forward_seeded, _tg_post, waha_fetch_raw
+                from server import (_forward_seeded, _tg_post,
+                                    waha_fetch_raw, DEFAULT_ADMIN_CHAT)
                 _rows = waha_fetch_raw(phone, limit=25)
                 if _forward_seeded(_rows):
                     _n_out = sum(1 for r in _rows
@@ -309,9 +310,7 @@ def handle_debounce(payload, send):
                         f"({_n_out}/{_n_out} Dubriani-side msgs are forwards)")
                     try:
                         _tg_post("sendMessage", {
-                            "chat_id": os.environ.get("TG_ADMIN_CHAT_ID")
-                            or os.environ.get("TELEGRAM_ADMIN_CHAT_ID")
-                            or "5532831477",
+                            "chat_id": DEFAULT_ADMIN_CHAT,
                             "text": (f"🛡 intake-gate: {phone} — thread is "
                                      f"operator-forward-seeded ({_n_out}/"
                                      f"{_n_out} Dubriani-side msgs are "
