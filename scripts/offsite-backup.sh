@@ -72,8 +72,12 @@ for f in "config_${TS}.tar.gz" "data_${TS}.sql.gz"; do
       -o "$WORK/$f.gpg" "$WORK/$f"
   rm -f "$WORK/$f"
 done
-rclone copyto "$WORK/config_${TS}.tar.gz.gpg" "$REMOTE/config/config_${TS}.tar.gz.gpg"
-rclone copyto "$WORK/data_${TS}.sql.gz.gpg"   "$REMOTE/data/data_${TS}.sql.gz.gpg"
+# Transfer hardening (2026-06-10: first run stalled 20+ min on the data
+# bundle under the apt rclone 1.60-DEV build — upgraded to current via
+# rclone.org/install.sh; flags bound the failure modes regardless).
+RCLONE_FLAGS=(--drive-chunk-size 128M --timeout 2m --retries 4 --low-level-retries 20)
+rclone copyto "${RCLONE_FLAGS[@]}" "$WORK/config_${TS}.tar.gz.gpg" "$REMOTE/config/config_${TS}.tar.gz.gpg"
+rclone copyto "${RCLONE_FLAGS[@]}" "$WORK/data_${TS}.sql.gz.gpg"   "$REMOTE/data/data_${TS}.sql.gz.gpg"
 log "[3/4] uploaded: config/config_${TS}.tar.gz.gpg + data/data_${TS}.sql.gz.gpg"
 
 # ── 4. REMOTE RETENTION — keep newest N of each, delete the rest ────────────
