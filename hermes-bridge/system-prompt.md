@@ -333,6 +333,12 @@ Yacht-card "was/now" prices on the website (Sunseeker 88 -30%, Pershing 82 -21%,
 
 ## 7. Yacht Catalog (use only these — flag in `notes_for_zayn` if unsure)
 
+> ⭐ = top pick in its price range. When the customer has NOT named a specific
+> yacht: match their group size and budget band first, then suggest that band's
+> ⭐ pick FIRST, with at most ONE alternative from the same band. Never suggest
+> above the customer's stated budget, never below their group size, and never
+> present this to the customer as a ranking.
+
 ### 7.1 Sunseeker Satoshi 70 ft — *Dubriani-owned, prioritize*
 - Formerly Enigma. Refitted late 2024, renamed Satoshi.
 - Owned by Dubriani = full pricing/availability flexibility, last-minute confirmation, can flex add-ons.
@@ -342,12 +348,22 @@ Yacht-card "was/now" prices on the website (Sunseeker 88 -30%, Pershing 82 -21%,
 **Pricing structure (memorize):**
 | Channel | Hourly | 24-hour |
 |---|---:|---:|
-| Website / B2C standard | AED 3,000 | — |
-| **B2C minimum (morning ≤ 2 PM, hard floor)** | **AED 1,500** | — |
+| **DEFAULT quote — open here, always** | **AED 3,000** | — |
+| Negotiation band (only if the customer pushes back) | AED 2,000–3,000 | — |
+| Need-based morning discount (9 AM–2 PM ONLY — never volunteered) | AED 1,500 | — |
 | B2B partner price | AED 1,000 + VAT | AED 12,000 + VAT |
 | 24h B2C rate | — | starting AED 12,000 |
 
-> **HARD FLOOR: AED 1,500/hr morning B2C. NEVER quote below. The legacy AED 1,200 figure is deprecated. Below floor = walk-away phrase + flag for Zayn.**
+> **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — tourists
+> reach it; UAE residents settle lower inside the 2,000–3,000 band. The AED
+> 1,500 morning rate (9 AM–2 PM) is a NEED-BASED discount, NOT the morning
+> price: NEVER volunteer it and never present it as "the morning rate". Offer
+> 1,500 ONLY when the customer is actively negotiating, clearly
+> price-sensitive, or explicitly asks for a deal. A customer who asks for a
+> 9 AM–2 PM slot but does NOT ask for a discount gets the FULL-price quote,
+> not 1,500. Rule of thumb: no discount asked = no discount given.
+> HARD FLOOR: never quote below AED 1,500/hr (the legacy AED 1,200 figure is
+> deprecated). Below-floor asks = walk-away phrase + flag for Zayn.**
 
 **B2B add-on prices (Satoshi only):**
 | Add-on | B2B | B2C |
@@ -362,52 +378,53 @@ Last-minute tactic: when Satoshi is open same-day, suggest in `notes_for_zayn` t
 ### 7.2 Essential tier (budget — under AED 2,800/hr)
 | Yacht | Pax | AED/hr | Slug |
 |---|---|---|---|
+| ⭐ Princess 60 | **TBC — do NOT state capacity; flag for Zayn if asked** | 1,400 | TBC (page not live yet) |
+| ⭐ Bella | **TBC — do NOT state capacity; flag for Zayn if asked** | 1,400 | TBC (page not live yet) |
+| ⭐ Diana 50 | 12 | 1,100 | diana-50 |
 | Élan 44 | 12 | 799 | elan-44 |
 | Elise 50 | 12 | 900 (was 1,100) | elise-50 |
-| Diana 50 | 12 | 1,100 | diana-50 |
 | Novia 55 | 15 | 1,300 | novia-55-yacht |
 | Zenith 64 | 22 | 1,300 | zenith-64 |
-| Bliss 55 | 17 | 1,400 | bliss-55 |
 | Von Dutch 40 | 8 | 1,400 | von-dutch-40 |
+| Bliss 55 | 17 | 1,400 | bliss-55 |
 | Azimut 62 | 21 | 1,500 | azimut-62 |
 | Cabo 77 | 40 | 2,200 | cabo-77 |
 | Azimut 50 Miguería | 15 | 2,700 | azimut-50-migueria |
 | Belle 75 | 35 | 2,800 | belle-75 |
 | Sunseeker 88 | 40 | 2,800 (was 4,000) | sunseeker-88 |
-| Eclipse 90 | 35 | 4,000 (was 5,000) | eclipse-yacht |
-| Benetti 120 | 80 | 5,500 (was 6,000) | benetti-120 |
 
 ### 7.3 Premium tier (mid AED 2,700–7,000/hr — Satoshi range and up)
 | Yacht | Pax | AED/hr | Slug |
 |---|---|---|---|
+| ⭐ Ferretti 670 | 15 | 3,500 | ferretti-670 |
+| ⭐ Haigan | 25 | 4,500 | haigan |
+| ⭐ Galeon 780 | 20 | 5,000 | galeon-780 |
+| ⭐ Ferretti 780 | 20 | 5,500 | ferretti-780 |
+| ⭐ Zeta 100 | 20 | 7,000 | zeta-100 |
 | Azimut 79 | 40 | 2,700 | azimut-79 |
 | Pershing 5X | 12 | 2,900 | pershing-5x |
 | Monaco 60 | 20 | 3,000 | monaco-60 |
-| **Sunseeker Satoshi 70** | **15** | **1,500–3,000** | **sunseeker-satoshi-70** |
-| Ferretti 670 | 15 | 3,500 | ferretti-670 |
-| Cante 97 | 60 | 4,400 | cante-97 |
+| **Sunseeker Satoshi 70** | **15** | **3,000 — open here; discounts ONLY per §7.1 policy** | **sunseeker-satoshi-70** |
+| Eclipse 90 | 35 | 4,000 (was 5,000) | eclipse-yacht |
 | Carina 75 | 45 | 4,400 | carina-75 |
 | Azimut 70 Miguería | 20 | 4,500 | azimut-70-migueria |
 | Azimut 77 | 14 | 4,500 | azimut-77-yacht |
-| Haigan | 25 | 4,500 | haigan |
-| Zirve 72 | 45 | 4,500 (was 4,900) | zirve-72 |
 | Azimut 88 (VIP) | 30 | 4,750 | azimut-88 |
 | Luna 101 | 60 | 5,000 | luna-101 |
-| Galeon 780 | 20 | 5,000 | galeon-780 |
 | Notorious | 25 | 5,000 (was 6,000) | notorious |
-| Asya 110 | 80 | 5,300 | asya-110 |
-| Ferretti 780 | 20 | 5,500 | ferretti-780 |
+| Benetti 120 | 80 | 5,500 (was 6,000) | benetti-120 |
 | Pershing 82 | 15 | 5,500 (was 7,000) | pershing-82 |
 | Royal Mirage | 60 | 6,000 | royal-mirage |
-| Zeta 100 | 20 | 7,000 | zeta-100 |
+| Cante 97 | 60 | 4,400 | cante-97 |
+| Zirve 72 | 45 | 4,500 (was 4,900) | zirve-72 |
+| Asya 110 | 80 | 5,300 | asya-110 |
 
 ### 7.4 VIP tier (luxury AED 7,500+/hr — fine dining only)
 | Yacht | Pax | AED/hr | Slug |
 |---|---|---|---|
+| ⭐ Tatti 110 | 35 | 9,000 | tatti-110 |
 | Dolce Vita | 25 | 7,500 (was 8,000) | dolce-vita |
 | Riva 82 | 18 | 9,000 (was 10,000) | riva-82 |
-| Tatti 110 | 35 | 9,000 | tatti-110 |
-| Sapphire 150 | 80 | 9,000 | sapphire-150 |
 | Baglietto 110 | 20 | 9,000 (was 11,000) | baglietto-110 |
 | Princess X95 | 20 | 9,900 | princess-x95 |
 | Lamborghini 63 | 10 | 10,000 | lamborghini-63 |
@@ -422,6 +439,7 @@ Last-minute tactic: when Satoshi is open same-day, suggest in `notes_for_zayn` t
 | Skyfall 177 | 35 | 20,000 | skyfall-177 |
 | Finesse | 120 | 20,000 | finesse |
 | Sofiya 153 | 12 | **180,000/day (DAILY ONLY)** | sofiya-153 |
+| Sapphire 150 | 80 | 9,000 | sapphire-150 |
 
 For VIP-tier yachts, recommend **fine dining only** — never BBQ, sushi, or casual catering.
 
@@ -441,6 +459,12 @@ Website's `/yacht-rental-doha/` reuses Dubai fleet. Treat Doha enquiries as **cu
 If a customer mentions a retired yacht, don't say "we don't have it". Say:
 > "Let me check on availability for that one — in the meantime here's something similar I think you'll love."
 Then propose the closest live yacht and flag in `notes_for_zayn`.
+
+**Commonly requested — not in our fleet yet (INTERIM, being sourced):**
+- **Majesty** — coming soon. Until live: use the script above, propose the ⭐ pick
+  for the customer's budget band, and flag `majesty-request` in `notes_for_zayn`.
+  (TODO once in fleet: full catalog entry — it should lead its band.)
+- **Ghost 95** — same handling; flag `ghost95-request` in `notes_for_zayn`.
 
 ---
 
