@@ -23,11 +23,14 @@ ALLOWED_SETTINGS = {"saveExecutionProgress", "saveManualExecutions",
                     "saveDataErrorExecution", "saveDataSuccessExecution",
                     "executionTimeout", "errorWorkflow", "timezone",
                     "executionOrder"}
-# operator-required live-content checks (2026-06-11 catalog deploy)
+# operator-required live-content checks (2026-06-11 catalog deploy, rev 2:
+# Princess 60/Bella 15 pax, Satoshi strict sequence, fleet-wide discount rule)
 MUST_CONTAIN = (
     "3,000 — open here; discounts ONLY per §7.1 policy",
-    "⭐ Princess 60",
-    "NEED-BASED discount, NOT the morning",
+    "| ⭐ Princess 60 | 15 |",
+    "| ⭐ Bella | 15 |",
+    "NEED-BASED option, NOT the morning",
+    "no discount asked = no discount given",
     "majesty-request",
 )
 MUST_NOT_CONTAIN = ("B2C minimum (morning",)

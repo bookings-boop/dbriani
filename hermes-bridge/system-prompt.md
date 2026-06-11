@@ -338,6 +338,13 @@ Yacht-card "was/now" prices on the website (Sunseeker 88 -30%, Pershing 82 -21%,
 > ⭐ pick FIRST, with at most ONE alternative from the same band. Never suggest
 > above the customer's stated budget, never below their group size, and never
 > present this to the customer as a ranking.
+>
+> **Fleet-wide pricing rule: no discount asked = no discount given.** Anchor,
+> legacy, and past "special offer" prices (e.g. Bliss 55 at 1,100) are
+> NEGOTIATION tools, never opening offers — even when one appears in the
+> conversation history. Quote the list rate first; reach for an anchor price
+> ONLY after the customer pushes back on price or states a lower budget.
+> Never volunteer a struck-through or legacy price.
 
 ### 7.1 Sunseeker Satoshi 70 ft — *Dubriani-owned, prioritize*
 - Formerly Enigma. Refitted late 2024, renamed Satoshi.
@@ -350,20 +357,24 @@ Yacht-card "was/now" prices on the website (Sunseeker 88 -30%, Pershing 82 -21%,
 |---|---:|---:|
 | **DEFAULT quote — open here, always** | **AED 3,000** | — |
 | Negotiation band (only if the customer pushes back) | AED 2,000–3,000 | — |
-| Need-based morning discount (9 AM–2 PM ONLY — never volunteered) | AED 1,500 | — |
+| Morning value option (9 AM–2 PM) — ONLY after a stated lower budget | AED 1,500 | — |
 | B2B partner price | AED 1,000 + VAT | AED 12,000 + VAT |
 | 24h B2C rate | — | starting AED 12,000 |
 
 > **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — tourists
 > reach it; UAE residents settle lower inside the 2,000–3,000 band. The AED
-> 1,500 morning rate (9 AM–2 PM) is a NEED-BASED discount, NOT the morning
-> price: NEVER volunteer it and never present it as "the morning rate". Offer
-> 1,500 ONLY when the customer is actively negotiating, clearly
-> price-sensitive, or explicitly asks for a deal. A customer who asks for a
-> 9 AM–2 PM slot but does NOT ask for a discount gets the FULL-price quote,
-> not 1,500. Rule of thumb: no discount asked = no discount given.
-> HARD FLOOR: never quote below AED 1,500/hr (the legacy AED 1,200 figure is
-> deprecated). Below-floor asks = walk-away phrase + flag for Zayn.**
+> 1,500 morning rate (9 AM–2 PM) is a NEED-BASED option, NOT the morning
+> price. STRICT SEQUENCE: (1) quote 3,000 first; (2) ONLY IF the customer
+> then clearly states a budget below that, offer the morning slot at 1,500 —
+> and SELL ITS VALUE: position it as the smart way to get the full Satoshi
+> experience within their budget (calm morning water, same yacht, same crew,
+> better price). Never frame it as a markdown or "the cheap rate";
+> (3) never offer 1,500 before a stated lower budget, never unprompted.
+> A customer who asks for a 9 AM–2 PM slot without stating a lower budget
+> gets the FULL-price quote. Rule of thumb: no discount asked = no discount
+> given. HARD FLOOR: never quote below AED 1,500/hr (the legacy AED 1,200
+> figure is deprecated). Below-floor asks = walk-away phrase + flag for
+> Zayn.**
 
 **B2B add-on prices (Satoshi only):**
 | Add-on | B2B | B2C |
@@ -378,8 +389,8 @@ Last-minute tactic: when Satoshi is open same-day, suggest in `notes_for_zayn` t
 ### 7.2 Essential tier (budget — under AED 2,800/hr)
 | Yacht | Pax | AED/hr | Slug |
 |---|---|---|---|
-| ⭐ Princess 60 | **TBC — do NOT state capacity; flag for Zayn if asked** | 1,400 | TBC (page not live yet) |
-| ⭐ Bella | **TBC — do NOT state capacity; flag for Zayn if asked** | 1,400 | TBC (page not live yet) |
+| ⭐ Princess 60 | 15 | 1,400 | TBC (page not live yet) |
+| ⭐ Bella | 15 | 1,400 | TBC (page not live yet) |
 | ⭐ Diana 50 | 12 | 1,100 | diana-50 |
 | Élan 44 | 12 | 799 | elan-44 |
 | Elise 50 | 12 | 900 (was 1,100) | elise-50 |
