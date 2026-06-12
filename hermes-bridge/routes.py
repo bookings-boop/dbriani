@@ -4698,6 +4698,26 @@ def handle_lead_analyze_disregard(payload, send):
         mc = int(row.get("message_count") or facts.get("message_count")
                  or 0)
 
+        # RESURRECTION GUARD (2026-06-12): a plain Disregard re-press on an
+        # ALREADY-closed row must be idempotent — never re-run Hermes. Telegram
+        # keeps old /review cards (with their 🛑 Disregard button) alive after
+        # the row is hidden, so a stray press on a stale card used to fall into
+        # the Hermes-analyze path below and could RECLASSIFY a DISREGARDED lead
+        # to SCAM/LOST (observed live: 65709073805382@lid COLD→DISREGARDED→SCAM,
+        # 2026-06-10). The force path (1-tap Close / disregard_force:) is already
+        # idempotent (it just re-applies DISREGARDED); only the non-force path
+        # resurrected. Short-circuit it.
+        if cur_label == "DISREGARDED" and not force_close:
+            nm_e = _md_escape(nm)
+            send(200, {
+                "ok": True, "verdict": "close",
+                "label_before": "DISREGARDED", "label_after": "DISREGARDED",
+                "reasoning": "already closed",
+                "telegram_text": (
+                    f"🛑 *Already closed* — {nm_e} is DISREGARDED (hidden from "
+                    f"/review).\n_Undo with_ `/label {nm_e} WARM`")})
+            return
+
         # Operator's explicit Disregard / 🗂 Close-chat tap is authoritative on
         # an already-terminal lead — a COLD dead lead, or a CONFIRMED won
         # booking being closed — so it closes in ONE tap instead of asking

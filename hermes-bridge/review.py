@@ -77,6 +77,27 @@ REVIEW_DATES_DIGEST_ENABLED = (
     os.environ.get("REVIEW_DATES_DIGEST_ENABLED", "0").strip() == "1")
 REVIEW_DATES_DIGEST_CAP = int(os.environ.get("REVIEW_DATES_DIGEST_CAP", "25"))
 
+# 🏁 Bug #3 (2026-06-12): virtual COMPLETED section. A CONFIRMED booking whose
+# event date has PASSED is a won, finished trip — the operator wants it OUT of
+# the active ✅ CONFIRMED bucket into a "thank / review / nurture" view. This is
+# a RENDER-ONLY split: the DB label stays CONFIRMED, so reconcile/paymatch/
+# followup/reanalyze (all of which treat CONFIRMED as terminal) are untouched —
+# a real COMPLETED label would be bounced back to CONFIRMED within the hour by
+# _reconcile_paid_unconfirmed (paid ≥500 + label<>'CONFIRMED'). Ships dormant.
+REVIEW_COMPLETED_SECTION_ENABLED = (
+    os.environ.get("REVIEW_COMPLETED_SECTION_ENABLED", "0").strip() == "1")
+REVIEW_CAP_COMPLETED = int(os.environ.get("REVIEW_CAP_COMPLETED", "10"))
+
+# 💳 Bug #4 (2026-06-12): post-payment action override. A CONFIRMED + paid lead
+# whose cached analysis predates the payment shows a STALE pre-payment action
+# line ("confirm the payment link is live…") because payment events don't
+# trigger re-analysis. When the row carries a payment that landed AFTER the
+# analysis ran, suppress the cached suggested_action and render post-payment
+# logistics guidance instead; also label the gross-charged amount vs the agreed
+# (minted) price. Render-only; ships dormant.
+REVIEW_POSTPAY_OVERRIDE_ENABLED = (
+    os.environ.get("REVIEW_POSTPAY_OVERRIDE_ENABLED", "0").strip() == "1")
+
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
 # rendering. Bounded so /review latency stays under 10s even with a
@@ -526,6 +547,28 @@ def _booking_likely_passed(row):
     return is_stale_relative_date(row.get("dates"), _age_days)
 
 
+def _payment_after_analysis(row):
+    """True when a payment landed AFTER the cached analysis ran — so the stored
+    suggested_action predates the payment and is stale pre-payment advice
+    (Violetta 2026-06-12: analysis frozen 5s before the Nomod payment, still
+    saying 'confirm the payment link is live'). Payments don't trigger
+    re-analysis, so this is the only signal the render has. seconds-ago fields:
+    larger = older, so analysis-older-than-payment ⟺ analyzed_seconds >
+    paid_seconds. Pure; None-safe."""
+    paid_s = row.get("paid_at_seconds")
+    imp_s = row.get("importance_analyzed_at_seconds")
+    if not isinstance(paid_s, (int, float)):
+        return False
+    if not isinstance(imp_s, (int, float)):
+        return False
+    # imp_s/paid_s are seconds-ago (larger = older), so analysis-older-than-
+    # payment ⟺ imp_s > paid_s. A 2s buffer absorbs whole-second truncation /
+    # clock jitter without missing the real case — Violetta's payment landed
+    # exactly 5s after her analysis. A genuine post-payment re-analysis runs
+    # 15-45s LATER → imp_s < paid_s → no override (correct).
+    return imp_s > paid_s + 2
+
+
 def score_lead(row, now_dt):
     """Compute priority score per docs/pipeline-review-plan.md §2e step 3.
     Pure function; deterministic. row is the dict shape from _read_lead_summary.
@@ -736,6 +779,7 @@ def _booking_detail_line(row):
     party = _s("party_size")
     addons = _s("addons")
     amount = _s("paid_amount")
+    minted = _s("minted_amount")
 
     det = []
     if yacht:
@@ -749,8 +793,42 @@ def _booking_detail_line(row):
     if addons:
         det.append("➕ " + _md_escape(addons))
     if amount:
-        det.append("💰 " + _md_escape(amount) + " paid")
+        det.append(_amount_detail(amount, minted, _md_escape))
     return " · ".join(det)
+
+
+def _amount_detail(paid, minted, esc):
+    """💰 line for the booking detail. F-C (Bug #4, flag-gated): when the agreed
+    (minted) link price differs from the GROSS charged (paid) — the processor
+    adds a checkout fee, e.g. 1800 → 1927.8 — show the price with the gross
+    annotated ("AED 1800 paid (AED 1927.8 incl. card fee)") instead of conflating
+    the fee-inclusive gross with the booking price. Falls back to the plain gross
+    line when the flag is off, the minted price is absent, or the numbers match.
+    Pure; `esc` is the caller's _md_escape."""
+    plain = "💰 " + esc(paid) + " paid"
+    if not REVIEW_POSTPAY_OVERRIDE_ENABLED or not minted:
+        return plain
+
+    def _num(s):
+        m = re.search(r"[-+]?\d[\d,]*\.?\d*", s or "")
+        if not m:
+            return None
+        try:
+            return float(m.group(0).replace(",", ""))
+        except ValueError:
+            return None
+
+    gross, price = _num(paid), _num(minted)
+    if gross is None or price is None or abs(gross - price) < 0.01:
+        return plain
+    cur = (paid.split() or ["AED"])[0]
+    if not cur.replace(".", "").isalpha():
+        cur = "AED"
+
+    def _money(v):
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    return ("💰 " + esc(f"{cur} {_money(price)}") + " paid ("
+            + esc(f"{cur} {_money(gross)} incl. card fee") + ")")
 
 
 def _owes_reply(row):
@@ -1080,6 +1158,14 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
         "SCAM":            {"items": [], "cap": 15,
                             "header": "🚫 SCAM — fraud / crypto · do not engage",
                             "emoji": "🚫"},
+        # 🏁 COMPLETED — virtual section (Bug #3, flag-gated). Past-event
+        # CONFIRMED bookings peeled out of ✅ CONFIRMED so a finished trip stops
+        # sitting in the active booked bucket. Rows here keep their real DB label
+        # CONFIRMED; this is a display split only. Empty (and skipped) when the
+        # flag is off, so the render is byte-identical until flipped.
+        "COMPLETED":       {"items": [], "cap": REVIEW_CAP_COMPLETED,
+                            "header": "🏁 COMPLETED — thank / ask for review / nurture for repeat",
+                            "emoji": "🏁"},
     }
     pause_tail = []
     seen_ids = []
@@ -1127,6 +1213,18 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
         #                     of masquerading as a live "awaiting reply" deal.
         #   ''              — render in its own label section (CONFIRMED stays
         #                     in CONFIRMED — a won booking, not "awaiting reply").
+        # 🏁 Bug #3 (flag-gated): peel a PAST-event CONFIRMED booking out of the
+        # active ✅ CONFIRMED bucket into the virtual 🏁 COMPLETED section. Keys
+        # on the REAL label + the parsed booking date (event_passed) — the same
+        # _booking_date_passed the CONFIRMED card already uses for its
+        # completed-card keyboard. Takes precedence over _awaiting_section_for
+        # so a finished trip is never re-surfaced as "awaiting reply".
+        if (REVIEW_COMPLETED_SECTION_ENABLED
+                and (row.get("label") or "").strip().upper() == "CONFIRMED"
+                and _booking_date_passed(row)):
+            sections["COMPLETED"]["items"].append((score, row))
+            seen_ids.append(row["customer_id"])
+            continue
         _dest = _awaiting_section_for(row, score)
         if _dest:
             sections[_dest]["items"].append((score, row))
@@ -1179,7 +1277,7 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                 1 if _is_near_ready(r) else 0,
                 _expected_value(item[0], r), item[0])
     for _lk in ("WAITING_FOR_PAYMENT", "HOT", "NEEDS_ATTENTION",
-                "WARM", "COLD", "CONFIRMED", "NEW"):
+                "WARM", "COLD", "CONFIRMED", "COMPLETED", "NEW"):
         sections[_lk]["items"].sort(key=_value_key, reverse=True)
     # NO ACTIVE SALE: float the operator's active graceful-exits (passed-date
     # leads we've re-engaged) to the top so they're visible above stale
@@ -1197,8 +1295,12 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                   ("WAITING_FOR_PAYMENT", "⏳ awaiting-pay"),
                   ("HOT", "🔥 hot"), ("NEEDS_ATTENTION", "⚠️ need-attn"),
                   ("WARM", "♨️ warm"), ("NEW", "🌱 new"), ("COLD", "❄️ cold"),
-                  ("CONFIRMED", "✅ confirmed"), ("NOT_A_CUSTOMER", "💤 no-sale"),
+                  ("CONFIRMED", "✅ confirmed"), ("COMPLETED", "🏁 completed"),
+                  ("NOT_A_CUSTOMER", "💤 no-sale"),
                   ("LOST", "💔 lost"), ("SCAM", "🚫 scam")]
+    # COMPLETED counts toward "active" exactly like CONFIRMED (it is peeled FROM
+    # CONFIRMED): flipping the flag only redistributes rows between the two
+    # buckets, the headline total is unchanged.
     _active_total = sum(len(sections[_k]["items"]) for _k, _ in _hdr_tiers
                         if _k not in ("NOT_A_CUSTOMER", "LOST", "SCAM"))
     _breakdown = " · ".join(f"{len(sections[_k]['items'])} {_lbl}"
@@ -1268,7 +1370,7 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
 
     for label_key in ("AWAITING_REPLY", "WAITING_FOR_PAYMENT", "HOT",
                       "NEEDS_ATTENTION", "WARM", "NEW", "COLD", "CONFIRMED",
-                      "NOT_A_CUSTOMER", "LOST", "SCAM"):
+                      "COMPLETED", "NOT_A_CUSTOMER", "LOST", "SCAM"):
         sect = sections[label_key]
         items = sect["items"]
         if not items:
@@ -1450,7 +1552,8 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                                   row.get("last_nudge_drafted_at_seconds"))
                       if isinstance(s, (int, float))]
             _out2 = min(_out2c) if _out2c else None
-            if label_key in ("CONFIRMED", "NOT_A_CUSTOMER", "LOST", "SCAM"):
+            if label_key in ("CONFIRMED", "COMPLETED", "NOT_A_CUSTOMER",
+                             "LOST", "SCAM"):
                 _reply_badge = ""
             elif _owes_reply(row):
                 _reply_badge = "🔴 needs your reply"
@@ -1474,12 +1577,14 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
             # details, thank-yous, upsells, re-engagement) but drops Snooze
             # (no auto-nudges to suppress on a confirmed booking) and
             # Disregard (already-won deals don't need closing).
-            if label_key == "CONFIRMED":
+            if label_key in ("CONFIRMED", "COMPLETED"):
                 # #6-auto-B: a completed booking (trip date passed) flips the
                 # draft button to "⭐ Ask for review" once the feedback check-in
                 # was sent (Redis fbasked marker). Upcoming bookings keep
                 # "💬 Draft message". Same nudge: callback — handle_draft_followup
-                # decides feedback-vs-review off the same marker.
+                # decides feedback-vs-review off the same marker. The virtual
+                # 🏁 COMPLETED section (Bug #3) reuses this exact keyboard — its
+                # rows ARE CONFIRMED bookings with a passed event date.
                 from labels import _completed_card_label
                 _cf_passed = _booking_date_passed(row)  # DUP-04: one source
                 _cf_asked = False
@@ -1504,10 +1609,22 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                     ],
                 ]
             elif label_key == "SCAM":
-                # Info-only — a scammer must never be one tap from a drafted
-                # reply / snooze / disregard-close. Operator reopens via /label
-                # if it was mislabeled. H5, 2026-06-07.
-                kb = [[{"text": "ℹ️ Info", "callback_data": f"inf:{sid}"}]]
+                # Info + a hard Close. A scammer must never be one tap from a
+                # drafted reply / snooze (H5, 2026-06-07) — so NO Draft/Snooze
+                # and NO plain `disregard:` (which re-runs Hermes and can
+                # RESURRECT the row back to SCAM, observed live 2026-06-10).
+                # The Close button uses `disregard_force:` → hard-close to
+                # DISREGARDED (created_by operator:disregard_force), the
+                # label-agnostic force path the live n8n router already handles
+                # (Route Action rule disregard-force-2026-05-24) and which
+                # `_is_operator_close` keeps closed against inbound reopen.
+                # Operator 2026-06-12: "no way to close these — no point keeping
+                # them there forever."
+                kb = [
+                    [{"text": "ℹ️ Info", "callback_data": f"inf:{sid}"}],
+                    [{"text": "🛑 Close (scam)",
+                      "callback_data": f"disregard_force:{sid}"}],
+                ]
             else:
                 # 2 rows of 2 — keeps the keyboard scannable. Disregard is
                 # the destructive action, parked alone on row 2 next to Info
@@ -1582,7 +1699,7 @@ def _why_line(row, label_key, today=None):
     # wrong (Saif & Émilie, 2026-06-02). Show a post-event nurture line and
     # ignore any stale suggested_action. Upcoming bookings fall through to the
     # normal logistics/upsell guidance below.
-    if label_key == "CONFIRMED":
+    if label_key in ("CONFIRMED", "COMPLETED"):
         from labels import event_passed
         if event_passed(row.get("dates"), today=today):
             return ("event complete — thank the guest, ask for a review, "
@@ -1593,6 +1710,16 @@ def _why_line(row, label_key, today=None):
         if _booking_likely_passed(row):
             return ("booked & paid — stored date is relative & stale; "
                     "reconfirm the actual date with the guest")
+    # F-A post-payment override (Bug #4, flag-gated): a paid booking whose cached
+    # analysis predates the payment shows a stale pre-payment action line ("…
+    # confirm the payment link is live…") because payment events don't trigger
+    # re-analysis. When a payment landed after the analysis ran, suppress the
+    # stale suggested_action and render post-payment logistics guidance instead.
+    if (REVIEW_POSTPAY_OVERRIDE_ENABLED
+            and label_key in ("CONFIRMED", "WAITING_FOR_PAYMENT")
+            and _payment_after_analysis(row)):
+        return ("paid — confirm logistics: meeting point, boarding time & "
+                "guest count; offer add-ons (extra hour / catering)")
     # For CONFIRMED/WAITING customers, suggested_action from Hermes is
     # more accurate than the generic guidance (it knows what's already
     # been said in the chat). Skip generic notes if we have it.

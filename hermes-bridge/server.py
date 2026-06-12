@@ -4655,7 +4655,25 @@ def read_lead_summary(filter_label=None):
         "COALESCE((SELECT cf5.addons FROM customer_facts cf5 "
         "  WHERE cf5.customer_id = v_lead_summary.customer_id),''), "
         "COALESCE((SELECT cf6.booking_date_abs FROM customer_facts cf6 "
-        "  WHERE cf6.customer_id = v_lead_summary.customer_id),'')"
+        "  WHERE cf6.customer_id = v_lead_summary.customer_id),''), "
+        # Bug #4 (2026-06-12): payment timing + minted price for the post-payment
+        # render override (F-A) and the gross-vs-price amount label (F-C).
+        #  paid_at      — the FIRST payment_received.sent_at (matches the
+        #                 deposit-first ASC of the paid_amount subquery above);
+        #                 lets the render detect a cached analysis that PREDATES
+        #                 the payment (Violetta: analysis frozen 5s before pay).
+        #  minted_amount— the agreed price the link was minted for
+        #                 (payment_link_minted notes->>'amount'); the gross
+        #                 paid_amount can exceed it by the processor checkout fee
+        #                 (1800 → 1927.8). String-only; never numeric-cast on this
+        #                 hot path so a malformed row can't blank /review.
+        "COALESCE(to_char((SELECT a7.sent_at FROM autonomous_sends a7 "
+        "  WHERE a7.customer_id = v_lead_summary.customer_id "
+        "  AND a7.kind = 'payment_received' ORDER BY a7.sent_at ASC LIMIT 1),"
+        "  'YYYY-MM-DD HH24:MI:SSOF'),''), "
+        "COALESCE((SELECT a8.notes->>'amount' FROM autonomous_sends a8 "
+        "  WHERE a8.customer_id = v_lead_summary.customer_id "
+        "  AND a8.kind = 'payment_link_minted' ORDER BY a8.sent_at ASC LIMIT 1),'')"
     )
     select_tail = f") FROM v_lead_summary {where}"   # closes concat_ws
     out, err = _psql(sql + booking_cols + select_tail, timeout=20)
@@ -4722,6 +4740,11 @@ def read_lead_summary(filter_label=None):
             "booking_time": parts[28].strip() if len(parts) > 28 else "",
             "addons": parts[29].strip() if len(parts) > 29 else "",
             "booking_date_abs": parts[30].strip() if len(parts) > 30 else "",
+            # Bug #4 payment timing / minted price (absent on the pre-migration
+            # fallback query → default None/'').
+            "paid_at_seconds":
+                _seconds_since(parts[31]) if len(parts) > 31 else None,
+            "minted_amount": parts[32].strip() if len(parts) > 32 else "",
         }
         rows.append(row)
     return rows

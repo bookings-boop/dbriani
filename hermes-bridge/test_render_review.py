@@ -245,9 +245,20 @@ def test_scam_renders_own_section_info_only_keyboard():
     assert card, "SCAM lead must be visible"
     assert "*SCAM*" in card["text"], card["text"]
     btns = [b["text"] for kbrow in card["inline_keyboard"] for b in kbrow]
+    cbs = [b.get("callback_data", "")
+           for kbrow in card["inline_keyboard"] for b in kbrow]
     assert any("Info" in b for b in btns), btns
+    # H5 invariant preserved: never a Draft/Snooze button, and never the plain
+    # `disregard:` callback (which re-runs Hermes and can RESURRECT the row back
+    # to SCAM — observed live 2026-06-10). The ONLY added action is a force-close
+    # (operator 2026-06-12 "no way to close these"): a hard `disregard_force:`
+    # that closes straight to DISREGARDED, no re-analysis. Its button text must
+    # not contain the scary word "Disregard".
     assert not any(("Draft" in b or "Snooze" in b or "Disregard" in b)
                    for b in btns), btns
+    assert not any(c == f"disregard:{'scam@lid'}" for c in cbs), cbs
+    assert any(c == "disregard_force:scam@lid" for c in cbs), cbs
+    assert any("Close" in b for b in btns), btns
     # No "render_review: unknown label" catch-all → SCAM is a known section.
     assert "🔥 SCAM" not in res["telegram_text"]
 
@@ -306,6 +317,64 @@ def test_confirmed_card_never_shows_likely_lost_or_unreliable():
     assert "likely LOST" not in card["text"], card["text"]
     assert "analysis unreliable" not in card["text"], card["text"]
     assert "booked & paid" in card["text"], card["text"]
+
+
+def _dated(days_from_now):
+    """Past/future booking-date string with an EXPLICIT year so event_passed
+    parses it robustly regardless of when the test runs (no year-inference
+    edge near Jan/Dec)."""
+    import datetime
+    d = datetime.date.today() + datetime.timedelta(days=days_from_now)
+    return d.strftime("%b %d %Y")
+
+
+def test_completed_section_off_by_default_passed_confirmed_stays_confirmed():
+    # Bug #3 (2026-06-12): with REVIEW_COMPLETED_SECTION_ENABLED OFF (default),
+    # a past-event CONFIRMED booking renders in ✅ CONFIRMED exactly as before —
+    # the flag ships dormant, zero behavior change until flipped.
+    import review
+    review.REVIEW_COMPLETED_SECTION_ENABLED = False
+    row = _row("xeno@lid", label="CONFIRMED", name="Xeno", importance_score=78,
+               booked_yacht="Sunseeker Satoshi 70", dates=_dated(-3),
+               last_operator_reply_at_seconds=600,
+               last_customer_message_at_seconds=7200)
+    res = render_review([(5000, row)], {}, "on-demand")
+    assert "✅ CONFIRMED" in res["telegram_text"], res["telegram_text"]
+    assert "🏁 COMPLETED" not in res["telegram_text"], res["telegram_text"]
+    card = _card_for(res, "xeno@lid")
+    assert card and card["text"].startswith("✅ *CONFIRMED*"), card["text"]
+
+
+def test_completed_section_on_routes_passed_event_to_completed():
+    # Bug #3: flag ON → a PAST-event CONFIRMED moves to 🏁 COMPLETED (out of
+    # ✅ CONFIRMED), keeps its real DB label CONFIRMED (booked & paid / won line
+    # still render), and the card keeps a Close affordance. A FUTURE-event
+    # CONFIRMED stays in ✅ CONFIRMED. DB label is never changed → reconcile is
+    # untouched.
+    import review
+    review.REVIEW_COMPLETED_SECTION_ENABLED = True
+    try:
+        past = _row("xeno@lid", label="CONFIRMED", name="Xeno",
+                    importance_score=78, booked_yacht="Sunseeker Satoshi 70",
+                    dates=_dated(-3), last_operator_reply_at_seconds=600,
+                    last_customer_message_at_seconds=7200)
+        future = _row("ant@lid", label="CONFIRMED", name="Antonio",
+                      importance_score=80, booked_yacht="Bliss 55",
+                      dates=_dated(10), last_operator_reply_at_seconds=600,
+                      last_customer_message_at_seconds=7200)
+        res = render_review([(5000, past), (4000, future)], {}, "on-demand")
+        assert "🏁 COMPLETED" in res["telegram_text"], res["telegram_text"]
+        pc = _card_for(res, "xeno@lid")
+        fc = _card_for(res, "ant@lid")
+        assert pc and pc["text"].startswith("🏁 *COMPLETED*"), pc["text"]
+        assert ("booked & paid" in pc["text"]
+                or "won" in pc["text"].lower()), pc["text"]
+        cbs = [b.get("callback_data", "")
+               for kb in pc["inline_keyboard"] for b in kb]
+        assert any(c.startswith("disregard:") for c in cbs), cbs
+        assert fc and fc["text"].startswith("✅ *CONFIRMED*"), fc["text"]
+    finally:
+        review.REVIEW_COMPLETED_SECTION_ENABLED = False
 
 
 if __name__ == "__main__":
