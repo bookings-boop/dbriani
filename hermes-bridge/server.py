@@ -3128,6 +3128,31 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
             f"⚠️ The booking date ({dates}) is in the FUTURE — it has NOT "
             f"passed. Do NOT say it 'has passed' / 'the event is over'. A long "
             f"SILENCE is NOT the same as the event being over.\n")
+    # F-B (Bug #4, 2026-06-12): the analyzer is payment-BLIND — a Nomod payment
+    # is NOT in the WhatsApp transcript, so a re-analysis after payment otherwise
+    # regenerates pre-payment 'confirm the payment link' advice (the rubric even
+    # teaches 'paylink-sent-silent → gentle follow-up'). When the payment-triggered
+    # re-analysis path is on, anchor the received payment so the analyzer knows the
+    # deal is PAID. Gated by PAYMENT_TRIGGERS_REANALYSIS_ENABLED (default off).
+    _payment_anchor = ""
+    if os.environ.get(
+            "PAYMENT_TRIGGERS_REANALYSIS_ENABLED", "0").strip() == "1":
+        try:
+            _pa_out, _pa_err = _psql(
+                "SELECT (COALESCE(notes->>'currency','AED') || ' ' || "
+                "COALESCE(notes->>'total', notes->>'amount','') || ' on ' || "
+                "to_char(sent_at,'YYYY-MM-DD')) FROM autonomous_sends "
+                f"WHERE customer_id = {_lit(customer_id)} "
+                "AND kind = 'payment_received' ORDER BY sent_at ASC LIMIT 1")
+            if not _pa_err and (_pa_out or "").strip():
+                _pv = (_pa_out or "").strip().splitlines()[0].strip()
+                _payment_anchor = (
+                    f"💳 PAYMENT RECEIVED: {_pv} (gross, may incl. processor "
+                    f"fee). This booking is PAID — do NOT suggest "
+                    f"'confirm/complete the payment link'. Suggest post-payment "
+                    f"logistics (meeting point, boarding time, add-ons).\n")
+        except Exception as _pae:
+            log("payment_anchor build skipped:", repr(_pae))
     q = (
         "TASK: You are analyzing a Dubriani yacht-charter sales "
         "conversation to help the sales operator. Decide TWO things:\n"
@@ -3251,6 +3276,7 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         f"Yachts discussed: {yachts}\n"
         f"Date(s): {dates}\n"
         f"{_date_anchor}"
+        f"{_payment_anchor}"
         f"Party size: {party}\n"
         f"Message count: {message_count}\n"
         f"Silent for: {sh}\n\n"

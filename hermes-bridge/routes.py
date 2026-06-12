@@ -75,6 +75,33 @@ def _enqueue_reanalyze(cid):
         log("enqueue_reanalyze err:", repr(e))
 
 
+def _reanalyze_on_payment(cid):
+    """F-B (Bug #4, 2026-06-12): a received payment is rare + high-signal. When a
+    lead is promoted to CONFIRMED on payment, force a fresh re-analysis so the
+    stored score / suggested_action stop reflecting the PRE-payment state — the
+    analyzer otherwise only re-runs on a CUSTOMER inbound, and the cached advice
+    froze seconds before the Nomod payment landed (Violetta: 'confirm the payment
+    link is live' 5s before she paid). DELetes the per-cid cooldown marker first
+    (payment MUST bypass the 30-min throttle — it's the whole point), then
+    enqueues. Gated by PAYMENT_TRIGGERS_REANALYSIS_ENABLED (default off);
+    fail-silent — NEVER blocks the payment path. The /review post-payment render
+    override (REVIEW_POSTPAY_OVERRIDE_ENABLED, Wave 1) already fixes the card;
+    this refreshes the underlying analysis for every other consumer."""
+    if os.environ.get(
+            "PAYMENT_TRIGGERS_REANALYSIS_ENABLED", "0").strip() != "1":
+        return
+    try:
+        from server import canonicalize_cid
+        c = (canonicalize_cid(cid) or cid or "").strip()
+        if not c:
+            return
+        _redis(["DEL", _REANALYZE_QUEUED + c])  # bypass cooldown — payment is rare
+        _enqueue_reanalyze(c)
+        log(f"payment -> reanalyze enqueued cid={c}")
+    except Exception as e:
+        log("reanalyze_on_payment err:", repr(e))
+
+
 def _drain_reanalyze_queue(limit):
     """Pop up to `limit` UNIQUE cids off the reanalyze queue. The per-cid
     markers are LEFT to expire (see _enqueue_reanalyze: they double as the
@@ -1408,6 +1435,7 @@ def handle_poll_payments(payload, send):
                         created_by="system")
                     log(f"poll-payments cid={customer_id!r} "
                         f"{prev_label} -> CONFIRMED matched_via={matched_via}")
+                    _reanalyze_on_payment(customer_id)  # F-B (gated)
             except Exception as e:
                 log("poll-payments promote err:", repr(e))
             matched.append(entry)
@@ -7722,6 +7750,7 @@ def _process_nomod_charge_completed(raw_body, svix_id):
                         f"{prev_label} -> CONFIRMED "
                         f"matched_via={matched_via} "
                         f"payer_mismatch={pay_mismatch}")
+                    _reanalyze_on_payment(customer_id)  # F-B (gated)
             except Exception as e:
                 log(f"nomod-webhook promote err: {e!r}")
 
