@@ -1994,6 +1994,30 @@ def handle_record_message(payload, send):
         msg_id = (payload.get("msg_id") or payload.get("message_id")
                   or payload.get("id") or "")
         ok = record_message(cid, direction, body, msg_id or None)
+        # Bug #1 (2026-06-12, DORMANT): an operator's DIRECT reply sent from
+        # their phone (WAHA fromMe) is recorded here but never updated the
+        # owe-reply clock, so /review kept showing "🔴 needs your reply" after
+        # they had already answered. When this is a FRESH outbound, bump
+        # last_operator_reply_at via the operator_reply_echo event (which does
+        # NOT reset reengage_attempts). The freshness guard stops a WAHA
+        # history-replay of an OLD fromMe from wrongly clearing the badge /
+        # resetting the silence clock. Gated by RECORD_OUT_OPREPLY_ENABLED
+        # (default off) — inert until Wave 4 wires the n8n fromMe → /record-message
+        # route + WAHA `message.any`. record_message dedups on msg_id, but a
+        # redelivered fresh echo only re-bumps to ~now (GREATEST) — harmless.
+        if (ok and direction == "out"
+                and os.environ.get(
+                    "RECORD_OUT_OPREPLY_ENABLED", "0").strip() == "1"):
+            try:
+                _ts = payload.get("ts")
+                _fresh = True
+                if _ts is not None:
+                    _fresh = abs(time.time() - float(_ts)) < 600
+                if _fresh:
+                    from server import upsert_conversation_state
+                    upsert_conversation_state(cid, "operator_reply_echo")
+            except Exception as _ee:
+                log("record_message op-reply-echo bump skipped:", repr(_ee))
         send(200, {"ok": bool(ok), "customer_id": cid,
                    "direction": direction})
     except Exception as e:
@@ -4428,11 +4452,20 @@ def handle_pipeline_analyze(payload, send):
                             reasoning_ +
                             " [Override: recent paylink, no nudge.]"
                         ).strip()
+                # Bug #2 (2026-06-12): store the prose-FREE unreliable verdict
+                # at analyze time, where the REAL fetched-history length is known
+                # (history_), so /review stops recomputing it from reasoning prose
+                # and false-positiving on 'first contact'/'never replied'. Render
+                # reads this column behind REVIEW_UNRELIABLE_FROM_STORE_ENABLED.
+                from analysis_guard import analysis_unreliable_verdict
+                _unrel_ = analysis_unreliable_verdict(
+                    mc_, len(history_), reasoning_)
                 _psql(
                     "UPDATE customer_facts SET "
                     f"importance_score = {score_}, "
                     f"importance_reasoning = {_lit(reasoning_)}, "
                     f"suggested_action = {_lit(suggested_)}, "
+                    f"analysis_unreliable = {'true' if _unrel_ else 'false'}, "
                     "importance_analyzed_at = now() "
                     f"WHERE customer_id = {_lit(cid)}")
                 # #3 reconcile (2026-05-30): a 'close' verdict means the

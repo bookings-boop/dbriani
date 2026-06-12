@@ -12,8 +12,42 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from analysis_guard import (  # noqa: E402
     is_scam, reclassify_close_label, is_analysis_unreliable,
-    is_stale_relative_date,
+    is_stale_relative_date, analysis_unreliable_verdict,
 )
+
+
+def test_verdict_clears_first_contact_prose_with_real_history():
+    # Bug #2: Zaid's shape — the analyzer's 'Rule 8 — first contact' vocabulary
+    # describes CUSTOMER behaviour. With real fetched history present, the stored
+    # verdict must be False (the old render heuristic wrongly flagged it).
+    assert analysis_unreliable_verdict(
+        11, 4200, "Rule 8 — first contact, silent 3d. Customer requested a "
+        "call back; Dubriani replied via text.") is False
+
+
+def test_verdict_clears_never_replied_prose():
+    assert analysis_unreliable_verdict(
+        10, 2600, "Cold lead — customer never replied to Dubriani's outreach.") \
+        is False
+
+
+def test_verdict_flags_genuine_empty_fetch():
+    # Substantial lead but the fetched history came back ~empty (Émilie case).
+    assert analysis_unreliable_verdict(8, 0, "first contact") is True
+    assert analysis_unreliable_verdict(8, 39, "anything") is True
+
+
+def test_verdict_flags_explicit_availability_failure():
+    for r in ("History incomplete — could not fetch message history",
+              "no conversation history available for this lead",
+              "history unavailable / truncated"):
+        assert analysis_unreliable_verdict(5, 1500, r) is True, r
+
+
+def test_verdict_short_lead_with_real_history_is_reliable():
+    # Small lead (mc<6) with real history and behaviour-prose → reliable.
+    assert analysis_unreliable_verdict(4, 800, "first contact, no reply yet") \
+        is False
 
 
 def test_scam_detected():

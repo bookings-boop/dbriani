@@ -70,6 +70,50 @@ def is_analysis_unreliable(msg_count, history_len, reasoning):
     return False
 
 
+# Narrow "history was genuinely unavailable" phrases — distinct from the analyzer
+# describing CUSTOMER behaviour ('first contact' / 'never replied'), which is the
+# false-positive vocabulary _EMPTY_HISTORY_RE matches. Used by the prose-free
+# stored verdict below so the /review flag stops crying wolf on healthy analyses.
+_HISTORY_AVAILABILITY_RE = re.compile(
+    r"(history\s+(is\s+)?(incomplete|unavailable|missing|truncated|not\s+available)"
+    r"|(could\s+not|cannot|can'?t|unable\s+to)\s+(fetch|retrieve|load|read)"
+    r"(\s+the)?(\s+(message|conversation|chat))?\s+history"
+    r"|no\s+(message\s+|conversation\s+)?history\s+(available|found))",
+    re.IGNORECASE)
+
+
+def analysis_unreliable_verdict(msg_count, history_len, reasoning):
+    """Prose-FREE successor to is_analysis_unreliable, computed at ANALYZE time
+    and STORED (Bug #2, 2026-06-12). The render-time heuristic (is_analysis_
+    unreliable via the _analysis_unreliable_for_render sentinel) false-positived
+    on the analyzer's normal rule vocabulary — 'Rule 8 — first contact', 'never
+    replied' — which describes CUSTOMER behaviour, not history availability, and
+    flagged 15+ healthy analyses with no way to clear (re-analysis re-emits the
+    same words). This drops the prose branch entirely and trusts the REAL fetched
+    history length (`history_len`, known at analyze time, not the 9999 render
+    sentinel): unreliable only when the analyzer genuinely ran on empty/near-empty
+    history (the Émilie case — branch already in is_analysis_unreliable) OR the
+    reasoning explicitly claims the history was unavailable. Pure.
+
+    NOTE: is_analysis_unreliable is intentionally LEFT broad and is still used by
+    the pipeline demote-guard (a false 'unreliable' there merely leaves a junk
+    lead un-demoted — cheap; a false positive here cries wolf on the operator
+    queue — expensive). Fork, don't edit."""
+    try:
+        mc = int(msg_count or 0)
+    except (TypeError, ValueError):
+        mc = 0
+    try:
+        hl = int(history_len or 0)
+    except (TypeError, ValueError):
+        hl = 0
+    if mc >= 6 and hl < 40:
+        return True
+    if bool(_HISTORY_AVAILABILITY_RE.search(reasoning or "")):
+        return True
+    return False
+
+
 # --- stale relative date (Émilie: 'tomorrow 4-7PM' frozen 10 days ago) -------
 _REL_DATE_RE = re.compile(
     r"\b(today|tonight|tomorrow|tmrw|this\s+(week|weekend|evening|morning|"

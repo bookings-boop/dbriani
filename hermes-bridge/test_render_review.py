@@ -377,6 +377,37 @@ def test_completed_section_on_routes_passed_event_to_completed():
         review.REVIEW_COMPLETED_SECTION_ENABLED = False
 
 
+def test_unreliable_from_store_overrides_prose():
+    # Bug #2: with REVIEW_UNRELIABLE_FROM_STORE_ENABLED on, the STORED verdict
+    # wins over the reasoning prose — a healthy analysis whose reasoning opens
+    # 'first contact' is NOT flagged; a genuinely-degraded one IS; and a NULL
+    # stored value falls back to the legacy prose heuristic.
+    import review
+    review.REVIEW_UNRELIABLE_FROM_STORE_ENABLED = True
+    try:
+        ok = _row("z@lid", label="WARM", name="Zaid", importance_score=58,
+                  message_count=11, last_operator_reply_at_seconds=500,
+                  analysis_unreliable=False,
+                  importance_reasoning="Rule 8 — first contact, silent 3d")
+        assert "analysis unreliable" not in _card_for(
+            render_review([(800, ok)], {}, "on-demand"), "z@lid")["text"]
+
+        bad = _row("b@lid", label="WARM", name="X", importance_score=10,
+                   message_count=8, last_operator_reply_at_seconds=500,
+                   analysis_unreliable=True, importance_reasoning="x")
+        assert "analysis unreliable" in _card_for(
+            render_review([(800, bad)], {}, "on-demand"), "b@lid")["text"]
+
+        nul = _row("n@lid", label="WARM", name="Y", importance_score=20,
+                   message_count=9, last_operator_reply_at_seconds=500,
+                   analysis_unreliable=None,
+                   importance_reasoning="first contact, no prior messages")
+        assert "analysis unreliable" in _card_for(
+            render_review([(800, nul)], {}, "on-demand"), "n@lid")["text"]
+    finally:
+        review.REVIEW_UNRELIABLE_FROM_STORE_ENABLED = False
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items())
            if k.startswith("test_") and callable(v)]

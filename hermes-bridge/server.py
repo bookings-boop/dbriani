@@ -4342,6 +4342,27 @@ def upsert_conversation_state(customer_id, event):
             "SET last_operator_reply_at = now(), reengage_attempts = 0, "
             "    updated_at = now()"
         )
+    elif event == "operator_reply_echo":
+        # Bug #1 (2026-06-12): an OUTBOUND message captured off the durable
+        # write path — a WAHA `fromMe` echo of an operator's DIRECT phone reply
+        # (typed straight into WhatsApp, bypassing the draft cards), once fromMe
+        # capture is enabled (Wave 4). Bump ONLY last_operator_reply_at so the
+        # owe-reply badge / F3 digest / owe-reply sweep stop showing a stale "🔴
+        # needs your reply" after the operator answered from their phone.
+        # Deliberately does NOT reset reengage_attempts / followup_count the way
+        # `operator_reply` does: bot sends (paylink / file / nudge) ALSO echo
+        # through fromMe, and zeroing the counter would re-arm the FOLLOWUP_CAP
+        # and nudge forever. GREATEST() keeps the clock monotonic so a replayed
+        # old echo can never move last_operator_reply_at backwards.
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_operator_reply_at, updated_at) "
+            f"VALUES ('{cid}', now(), now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_operator_reply_at = GREATEST("
+            "      conversation_state.last_operator_reply_at, now()), "
+            "    updated_at = now()"
+        )
     elif event == "nudge_drafted":
         sql = (
             "INSERT INTO conversation_state "
@@ -4673,7 +4694,13 @@ def read_lead_summary(filter_label=None):
         "  'YYYY-MM-DD HH24:MI:SSOF'),''), "
         "COALESCE((SELECT a8.notes->>'amount' FROM autonomous_sends a8 "
         "  WHERE a8.customer_id = v_lead_summary.customer_id "
-        "  AND a8.kind = 'payment_link_minted' ORDER BY a8.sent_at ASC LIMIT 1),'')"
+        "  AND a8.kind = 'payment_link_minted' ORDER BY a8.sent_at ASC LIMIT 1),''), "
+        # Bug #2 (2026-06-12, migration 013): the STORED prose-free unreliable
+        # verdict. ''  → NULL (not yet stored) → render falls back to the legacy
+        # heuristic; 'true'/'false' → use the stored verdict. Correlated subquery
+        # against customer_facts so the shared view needs no change.
+        "COALESCE((SELECT cf7.analysis_unreliable::text FROM customer_facts cf7 "
+        "  WHERE cf7.customer_id = v_lead_summary.customer_id),'')"
     )
     select_tail = f") FROM v_lead_summary {where}"   # closes concat_ws
     out, err = _psql(sql + booking_cols + select_tail, timeout=20)
@@ -4745,6 +4772,11 @@ def read_lead_summary(filter_label=None):
             "paid_at_seconds":
                 _seconds_since(parts[31]) if len(parts) > 31 else None,
             "minted_amount": parts[32].strip() if len(parts) > 32 else "",
+            # Bug #2 stored unreliable verdict: ''/absent → None (not stored →
+            # render falls back to the legacy heuristic); 'true'/'false' → bool.
+            "analysis_unreliable": (
+                {"true": True, "false": False}.get(parts[33].strip().lower())
+                if len(parts) > 33 and parts[33].strip() else None),
         }
         rows.append(row)
     return rows

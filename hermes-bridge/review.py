@@ -98,6 +98,15 @@ REVIEW_CAP_COMPLETED = int(os.environ.get("REVIEW_CAP_COMPLETED", "10"))
 REVIEW_POSTPAY_OVERRIDE_ENABLED = (
     os.environ.get("REVIEW_POSTPAY_OVERRIDE_ENABLED", "0").strip() == "1")
 
+# ⚠️ Bug #2 (2026-06-12): read the STORED analysis_unreliable verdict (computed
+# at analyze time from the REAL fetched-history length — analysis_guard.
+# analysis_unreliable_verdict) instead of recomputing it here from reasoning
+# prose, which false-positived on the analyzer's 'first contact' / 'never
+# replied' rule vocabulary (15+ healthy leads flagged with no way to clear). NULL
+# (pre-migration / not yet re-analyzed) falls back to the legacy heuristic. Dormant.
+REVIEW_UNRELIABLE_FROM_STORE_ENABLED = (
+    os.environ.get("REVIEW_UNRELIABLE_FROM_STORE_ENABLED", "0").strip() == "1")
+
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
 # rendering. Bounded so /review latency stays under 10s even with a
@@ -521,11 +530,19 @@ from analysis_guard import (  # noqa: E402
 
 
 def _analysis_unreliable_for_render(row):
-    """is_analysis_unreliable at RENDER time. The raw WAHA history string the
-    analyzer used isn't available here, so pass a non-triggering history length
-    (sentinel) and gate purely on branch 1 — the analyzer claims 'first contact
-    / no prior messages' yet the lead has real message_count (>=4). Émilie: 157
-    msgs but 'first contact', scored a paid booking 0/100. Pure; None-safe."""
+    """Whether to show the '⚠️ analysis unreliable' flag on a /review card.
+
+    Bug #2 (2026-06-12): prefer the STORED verdict (computed at analyze time from
+    the real fetched-history length) when REVIEW_UNRELIABLE_FROM_STORE_ENABLED is
+    on and a value is present — it does NOT false-positive on the analyzer's rule
+    vocabulary ('first contact' / 'never replied'). NULL (not yet stored) and the
+    flag-off path fall back to the legacy render heuristic, which passes a
+    non-triggering history length (sentinel) and gates on branch 1 — the analyzer
+    claims 'first contact' yet the lead has real message_count (>=4). Pure; None-safe."""
+    if REVIEW_UNRELIABLE_FROM_STORE_ENABLED:
+        stored = row.get("analysis_unreliable")
+        if stored is not None:
+            return bool(stored)
     return is_analysis_unreliable(
         row.get("message_count"), 9999, row.get("importance_reasoning"))
 
