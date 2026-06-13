@@ -3282,15 +3282,39 @@ def hermes_analyze_lead(customer_id, history, facts, message_count=0,
         f"Silent for: {sh}\n\n"
         f"--- CONVERSATION ---\n{history or '(no history available)'}"
     )
-    res = _run_hermes_analyze(q, customer_id)
-    if res is None:
-        # Every attempt failed (timeout/transient rc/exception) — return None
-        # so the caller keeps the prior score, never auto-closes on a failure.
-        return None
-    rc, out, err, elapsed = res
-    parsed, _ = extract_json(out)
+    # T-1b (2026-06-14): the conversation is the LAST thing the model sees, so for
+    # B2B / partnership pitches it slips into REPLYING to the customer (writes a
+    # chat draft) instead of emitting the verdict JSON — extract_json then finds
+    # none and the lead fails EVERY sweep ("no JSON cid=…"; Sidney et al. 13-19x).
+    # Re-assert the JSON-only output contract AFTER the conversation to beat the
+    # recency effect (validated live: flips Sidney from a chat reply to clean
+    # JSON), and retry once on a residual non-JSON slip. Gated by
+    # ANALYZER_JSON_GUARD_ENABLED; flag off → byte-identical legacy behaviour.
+    _json_guard = os.environ.get("ANALYZER_JSON_GUARD_ENABLED", "0").strip() == "1"
+    if _json_guard:
+        q += (
+            "\n\n--- END OF CONVERSATION ---\n"
+            "CRITICAL OUTPUT CONTRACT: You are a SILENT ANALYST, not the sales "
+            "agent. Your ENTIRE response must be ONE JSON object (starts with '{' "
+            "ends with '}'), nothing else. Do NOT write a reply, greeting, or "
+            "message to the customer; do NOT roleplay the agent; no prose before "
+            "or after the JSON.")
+    parsed = None
+    rc = out = err = elapsed = None
+    _tries = 2 if _json_guard else 1
+    for _att in range(_tries):
+        res = _run_hermes_analyze(q, customer_id)
+        if res is None:
+            # Every attempt failed (timeout/transient rc/exception) — return None
+            # so the caller keeps the prior score, never auto-closes on a failure.
+            return None
+        rc, out, err, elapsed = res
+        parsed, _ = extract_json(out)
+        if isinstance(parsed, dict):
+            break
+        log(f"hermes_analyze_lead: no JSON cid={customer_id}"
+            + (f" (retry {_att + 1}/{_tries})" if _tries > 1 else ""))
     if not isinstance(parsed, dict):
-        log(f"hermes_analyze_lead: no JSON cid={customer_id}")
         return None
     verdict = str(parsed.get("verdict") or "").strip().lower()
     if verdict not in ("close", "keep_open"):
