@@ -6716,6 +6716,102 @@
         "specifyBody": "json",
         "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.body.payload.from) }}, \"event\": \"operator_reply\" }",
         "options": {}
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "fm-frommetrue",
+              "leftValue": "={{ $json.body.payload.fromMe }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            },
+            {
+              "id": "fm-eventany",
+              "leftValue": "={{ $json.body.event }}",
+              "rightValue": "message.any",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "fm-to-regex",
+              "leftValue": "={{ $json.body.payload.to }}",
+              "rightValue": "@(c\\.us|lid)$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            },
+            {
+              "id": "fm-content",
+              "leftValue": "={{ (($json.body.payload.body || '').trim().length > 0) || (!!$json.body.payload.hasMedia) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4432,
+        1360
+      ],
+      "id": "fromme-filter-20260612",
+      "name": "Filter Op Reply fromMe"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "http://172.18.0.1:8788/record-message",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.body.payload.to) }}, \"direction\": \"out\", \"body\": {{ JSON.stringify($json.body.payload.body || \"\") }}, \"msg_id\": {{ JSON.stringify($json.body.payload.id || \"\") }}, \"ts\": {{ $json.body.payload.timestamp || 0 }} }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4672,
+        1360
+      ],
+      "id": "fromme-record-20260612",
+      "name": "Record Op Reply fromMe",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
       }
     }
   ],
@@ -20367,6 +20463,11 @@
             "node": "Filter Op Reply",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Filter Op Reply fromMe",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -22448,6 +22549,17 @@
           }
         ],
         []
+      ]
+    },
+    "Filter Op Reply fromMe": {
+      "main": [
+        [
+          {
+            "node": "Record Op Reply fromMe",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   }
