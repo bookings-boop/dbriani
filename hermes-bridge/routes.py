@@ -4371,6 +4371,13 @@ def handle_pipeline_analyze(payload, send):
             # boarding pack', 'thank-you nudge') rather than the generic
             # CONFIRMED guidance. PAUSED_*/DISREGARDED stay excluded —
             # they're terminal/dormant.
+            # T-1 rotation column (hardcoded name, not user input → no injection):
+            # last_analyze_attempt_at when SWEEP_ATTEMPT_ROTATION_ENABLED, else
+            # the legacy importance_analyzed_at.
+            _rot_col = ("last_analyze_attempt_at"
+                        if os.environ.get(
+                            "SWEEP_ATTEMPT_ROTATION_ENABLED", "0").strip() == "1"
+                        else "importance_analyzed_at")
             sql = (
                 "SELECT customer_id FROM customer_facts WHERE label IN ("
                 "'NEW','WARM','HOT','NEEDS_ATTENTION','COLD',"
@@ -4380,7 +4387,17 @@ def handle_pipeline_analyze(payload, send):
                 # the reanalyze drain has _filter_reanalyze_cids, this
                 # bulk SELECT was the only unfiltered analyze entry.
                 "AND merged_into IS NULL "
-                "ORDER BY importance_analyzed_at ASC NULLS FIRST, "
+                # T-1 (2026-06-13): rotate on last ATTEMPT, not last success.
+                # A Hermes failure (rc=1 / "no JSON") returns without bumping
+                # importance_analyzed_at, so a chronic failer kept its stale
+                # timestamp, stayed at the stalest-first FRONT, and was re-picked
+                # + re-failed every sweep (5 leads burned ~5 of 24 slots/sweep,
+                # starving fresh leads). last_analyze_attempt_at is bumped on
+                # EVERY attempt (success OR failure) in _analyze_one, so failers
+                # move to the BACK after one try. Flag-gated; migration 014 seeds
+                # the column from importance_analyzed_at so order is unchanged at
+                # flip time and only failers shift back as they retry.
+                f"ORDER BY {_rot_col} ASC NULLS FIRST, "
                 f"updated_at DESC LIMIT {int(cap)}"
             )
             out, err = _psql(sql)
@@ -4398,6 +4415,16 @@ def handle_pipeline_analyze(payload, send):
             verdict) on success, ('error', cid) on Hermes failure.
             Pure side-effects on DB so calling in parallel is safe."""
             try:
+                # T-1 (2026-06-13): record the ATTEMPT up-front (covers BOTH the
+                # success persist below AND the ('error', cid) early-returns on
+                # Hermes failure) so the rotation can move a chronic failer to the
+                # back instead of starving the stalest-first front. Fail-silent —
+                # a bump failure must never abort the analysis.
+                try:
+                    _psql("UPDATE customer_facts SET last_analyze_attempt_at = "
+                          f"now() WHERE customer_id = {_lit(cid)}")
+                except Exception:
+                    pass
                 refresh_customer_facts_from_waha(cid)
                 facts_ = get_customer_facts(cid) or {}
                 row_ = get_current_label_row(cid) or {}

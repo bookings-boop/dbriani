@@ -193,10 +193,17 @@ def test_label_row_malformed_logged_before_none():
 def test_hourly_analyze_sql_filters_merged():
     import inspect
     src = inspect.getsource(routes.handle_pipeline_analyze)
-    i = src.find("ORDER BY importance_analyzed_at ASC NULLS FIRST")
+    # Anchor on the ORDER BY (the rotation column is now flag-selected via
+    # {_rot_col}, so don't pin the literal column name).
+    i = src.find("ASC NULLS FIRST")
     assert i != -1
-    assert "merged_into IS NULL" in src[max(0, i - 400):i], \
+    assert "merged_into IS NULL" in src[max(0, i - 900):i], \
         "hourly SELECT still missing merged_into IS NULL"
+    # T-1 (2026-06-13): the rotation must be able to order on
+    # last_analyze_attempt_at (SWEEP_ATTEMPT_ROTATION_ENABLED) so a chronic
+    # Hermes-failer moves to the back instead of starving the stalest-first front.
+    assert "last_analyze_attempt_at" in src, "T-1 attempt-rotation column missing"
+    assert "SWEEP_ATTEMPT_ROTATION_ENABLED" in src, "T-1 rotation flag missing"
 
 
 if __name__ == "__main__":
