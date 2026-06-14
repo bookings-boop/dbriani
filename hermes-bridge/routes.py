@@ -48,6 +48,13 @@ from util import log, _envflag  # noqa: F401
 # never run concurrently with the hourly sweep.
 _REANALYZE_QUEUE = "hermes:reanalyze:queue"
 _REANALYZE_QUEUED = "hermes:reanalyze:queued:"   # + cid (dedup marker)
+# Fix C (2026-06-14): SET of cids whose re-analysis was SUPPRESSED by the
+# cooldown (a fresh inbound arrived inside the window). The drain promotes
+# them back onto the queue once their cooldown expires — re-surfaces the
+# signal exactly once instead of dropping it (Eva's 65-min blind window),
+# WITHOUT walking back the saturation throttle (promotion re-arms the
+# cooldown, so still <=1 re-analysis per window). Gated REANALYZE_DEFER_ENABLED.
+_REANALYZE_PENDING = "hermes:reanalyze:pending"
 
 
 def _enqueue_reanalyze(cid):
@@ -68,11 +75,50 @@ def _enqueue_reanalyze(cid):
     try:
         added, _ = _redis(["SET", _REANALYZE_QUEUED + cid, "1", "NX", "EX", ttl])
         if (added or "").strip().upper() != "OK":
+            # Cooldown active. Fix C: DEFER the signal (re-surfaced after the
+            # window by _promote_deferred_reanalyze) instead of dropping it.
+            if os.environ.get(
+                    "REANALYZE_DEFER_ENABLED", "0").strip() == "1":
+                _redis(["SADD", _REANALYZE_PENDING, cid])
             return  # queued or analyzed within the cooldown window
         _redis(["RPUSH", _REANALYZE_QUEUE, cid])
         _redis(["LTRIM", _REANALYZE_QUEUE, "-500", "-1"])  # safety bound
+        # If this cid was deferred earlier, the fresh enqueue supersedes the
+        # deferral (clear the pending flag so promote never double-surfaces it).
+        if os.environ.get("REANALYZE_DEFER_ENABLED", "0").strip() == "1":
+            _redis(["SREM", _REANALYZE_PENDING, cid])
     except Exception as e:
         log("enqueue_reanalyze err:", repr(e))
+
+
+def _promote_deferred_reanalyze(cap):
+    """Fix C (2026-06-14): re-surface cids whose re-analysis was SUPPRESSED by
+    the cooldown, once their cooldown window has expired. Called at the HEAD of
+    the reanalyze drain (handle_pipeline_analyze source=reanalyze) — i.e. under
+    the shared sweep lock, so it can never race the hourly sweep. Each promoted
+    cid goes back through _enqueue_reanalyze, which RPUSHes it AND re-arms the
+    per-cid cooldown — so a chatty thread still re-analyzes at most once per
+    window (the 2026-06-07 saturation fix is preserved). Bounded by `cap` so a
+    backlog can't flood a single drain. Flag-gated; fail-silent."""
+    if os.environ.get("REANALYZE_DEFER_ENABLED", "0").strip() != "1":
+        return
+    try:
+        out, _ = _redis(["SMEMBERS", _REANALYZE_PENDING])
+        pend = [c.strip() for c in (out or "").splitlines() if c.strip()]
+        promoted = 0
+        for c in pend:
+            if promoted >= int(cap):
+                break
+            ex, _ = _redis(["EXISTS", _REANALYZE_QUEUED + c])
+            if (ex or "").strip() == "0":
+                # cooldown expired -> consume the deferral exactly once
+                _redis(["SREM", _REANALYZE_PENDING, c])
+                _enqueue_reanalyze(c)
+                promoted += 1
+        if promoted:
+            log(f"reanalyze promoted {promoted} deferred cid(s)")
+    except Exception as e:
+        log("promote_deferred_reanalyze err:", repr(e))
 
 
 def _reanalyze_on_payment(cid):
@@ -4345,6 +4391,11 @@ def handle_pipeline_analyze(payload, send):
         return
     try:
         if reanalyze:
+            # Fix C: first re-surface any cooldown-suppressed cids whose window
+            # has expired (no-op unless REANALYZE_DEFER_ENABLED=1). Runs under
+            # the shared lock; promoted cids land on the queue just before this
+            # same drain pops them.
+            _promote_deferred_reanalyze(cap)
             # R2: analyze EXACTLY the leads queued by recent inbounds, drained
             # under the shared lock + capped. Empty queue → nothing to do
             # (finally still releases the lock).
