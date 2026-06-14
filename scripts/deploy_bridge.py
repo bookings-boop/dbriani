@@ -322,15 +322,24 @@ def main():
     # 3. upload all bridge python modules + master prompt to bridge.
     # The bridge was a single server.py file; refactoring week split it
     # into util.py, db.py, etc. — upload every *.py module in BRIDGE_DIR
-    # (excluding test_* files which the bridge doesn't need at runtime)
     # so the box always has the full set in sync. Otherwise a deploy
     # that lands a server.py importing a not-yet-uploaded module would
     # crash the bridge on restart.
+    # Runtime modules (everything NOT test_*) are gated by py_compile and
+    # block the deploy on failure. test_* files are ALSO shipped (so the
+    # box test suite stays in lockstep with the repo — item-5 fix
+    # 2026-06-14) but are kept OUT of the blocking compile-gate and given
+    # a separate WARN-only syntax check below, so a syntax-broken test can
+    # never abort the deploy of an otherwise-healthy bridge.
     modules = sorted(p for p in BRIDGE_DIR.glob("*.py")
                      if not p.name.startswith("test_"))
+    test_modules = sorted(p for p in BRIDGE_DIR.glob("test_*.py"))
     for mod in modules:
         ssh_upload(mod.read_bytes(),
                    f"~/hermes-bridge/{mod.name}", f"upload-{mod.name}")
+    for tmod in test_modules:
+        ssh_upload(tmod.read_bytes(),
+                   f"~/hermes-bridge/{tmod.name}", f"upload-{tmod.name}")
     ssh_upload(prompt_text.encode(),
                "~/hermes-bridge/system-prompt.md", "upload-prompt")
     # The bridge reads file-registry.md at runtime (handle_send_file
@@ -338,8 +347,8 @@ def main():
     # so /send-file resolves keys to Drive URLs without an extra hop.
     ssh_upload(registry_text.encode(),
                "~/hermes-bridge/file-registry.md", "upload-registry")
-    print(f"4. uploaded {len(modules)} module(s) "
-          f"({', '.join(m.name for m in modules)}) "
+    print(f"4. uploaded {len(modules)} runtime module(s) "
+          f"+ {len(test_modules)} test file(s) "
           f"+ system-prompt.md + file-registry.md")
 
     # 4. compile-check every uploaded module on the box.
@@ -350,6 +359,22 @@ def main():
     if "COMPILE_OK" not in out:
         die(f"bridge modules failed to compile on the box:\n{err[:400]}")
     print(f"5. all {len(modules)} module(s) compile on the box")
+
+    # 4b. WARN-only syntax check of the shipped test files. These are NOT
+    # in the blocking gate above: a syntax-broken test must never abort the
+    # deploy of a healthy bridge. py_compile checks SYNTAX only (a bad
+    # import passes), so this just flags an unparseable test for follow-up.
+    if test_modules:
+        test_paths = " ".join(f"~/hermes-bridge/{t.name}" for t in test_modules)
+        t_out, t_err, _ = ssh_run(
+            f"python3 -m py_compile {test_paths}; echo TEST_COMPILE_RC:$?",
+            "compile-tests")
+        if "TEST_COMPILE_RC:0" in t_out:
+            print(f"5b. all {len(test_modules)} shipped test file(s) "
+                  f"compile on the box")
+        else:
+            print(f"5b. WARN: a shipped test file failed syntax compile "
+                  f"(does NOT block deploy):\n{(t_err or t_out)[:400]}")
 
     # 5. inject master prompt + file registry into all 4 workflow Set
     # nodes + rewrite the local workflow JSON so the on-disk file
