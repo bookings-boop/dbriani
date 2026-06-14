@@ -224,9 +224,11 @@ PAYMENT_CONFIRMED_RE = re.compile(
     r"made\s+the?\s+payment|just\s+paid|now\s+paid|"
     r"transaction\s+(successful|complete|done)|"
     r"all\s+(paid|done|settled)|"
-    r"settled\s+(it|the\s+(payment|invoice))|"
-    r"payment\s+✅|paid\s+✅|done\s+✅"
-    r")\b",
+    r"settled\s+(it|the\s+(payment|invoice))"
+    r")\b"
+    r"|(?:\b(?:payment|paid|done)\b\s*✅)"   # word then emoji: 'done ✅','paid ✅','payment ✅','done✅'
+    r"|(?:✅\s*\b(?:payment|paid|done)\b)"   # emoji then word: '✅ done','✅ paid'
+    r"|(?:^\s*✅+\s*$)",                      # bare ✅ = whole message only
     re.IGNORECASE,
 )
 

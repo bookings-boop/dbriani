@@ -62,6 +62,24 @@ def test_outbound_quote_re():
         assert not labels.OUTBOUND_QUOTE_RE.search(t), t
 
 
+def test_payment_confirmed_re_emoji_done_signals():
+    rx = labels.PAYMENT_CONFIRMED_RE
+    # emoji done-signals that the trailing-\b bug used to drop
+    for m in ("done ✅", "✅ done", "✅", "paid ✅", "payment ✅",
+              "✅ paid", "Done ✅", "done✅", "  ✅  "):
+        assert rx.search(m), ("should match", m)
+    # word forms still match (no regression)
+    for m in ("all done", "i've paid", "payment done", "just paid",
+              "transaction successful", "settled the invoice"):
+        assert rx.search(m), ("regression", m)
+    # must NOT over-match casual chat / embedded emoji
+    for m in ("well done team", "the boat is done for the day",
+              "good morning", "thanks", "ok",
+              "✅✅ but i have a question about the dock",
+              "great ✅ see you then but one question"):
+        assert not rx.search(m), ("over-match", m)
+
+
 # ----------------------------------------------------------------- ladder
 def test_eva_replay_ok_after_quote_promotes_hot():
     old = _patch(server, _recent_outbound_quote=lambda cid, **k: True,
@@ -106,17 +124,17 @@ def test_money_inbound_keeps_money_mentioned_priority():
 
 
 def test_payment_confirmed_outranks_quote_accepted():
-    # NOTE: "done ✅" does NOT match PAYMENT_CONFIRMED_RE today — the
-    # trailing \b after the emoji never finds a word boundary (latent
-    # pre-existing bug, queued separately). "all done" genuinely matches,
-    # proving the payment-confirmed branch keeps ladder priority over
+    # "done ✅" now matches PAYMENT_CONFIRMED_RE (emoji-\b bug fixed, item 4
+    # 2026-06-14) — the emoji branches sit OUTSIDE the \b(...)\b wrapper, so
+    # the trailing word-boundary no longer has to fall after the emoji. This
+    # also proves the payment-confirmed branch keeps ladder priority over
     # quote_accepted for payment-language.
     old = _patch(server,
                  _recent_outbound_quote=lambda cid, **k: True,
                  _has_recent_payment_intent=lambda cid: False,
                  _has_recent_payment_link_sent=lambda cid, hours=48: True)
     try:
-        label, sig, _e = server.compute_label("all done", dict(EVA))
+        label, sig, _e = server.compute_label("done ✅", dict(EVA))
     finally:
         _restore(server, old)
     assert (label, sig) == ("CONFIRMED", "payment_confirmed_chat"), (label, sig)
