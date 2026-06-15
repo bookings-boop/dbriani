@@ -124,9 +124,15 @@ def test_sql_keeps_followup_cap():
 def test_sql_excludes_analyzer_killed_leads():
     # Audit #7 (2026-06-07): analyzer_close/score0 demote dead leads to COLD,
     # which is reengage-eligible — don't ghost-recovery a declined/vendor lead.
+    # REPAIRED (2026-06-14, belt-fix #3): the guard formerly read
+    # cs.last_analysis_signal, a column never written with 'auto:analyzer%'
+    # (0/592 rows in prod) — a dead no-op. It now reads the table the signal
+    # actually lands in: customer_label_history.signal.
     sql = _followup_candidate_sql()
     assert "auto:analyzer%" in sql
-    assert "last_analysis_signal" in sql
+    assert "customer_label_history" in sql
+    # the dead predicate on the always-empty conversation_state column is gone
+    assert "cs.last_analysis_signal NOT LIKE 'auto:analyzer%'" not in sql
 
 
 def test_sql_excludes_merged_duplicate_rows():
