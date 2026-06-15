@@ -47,6 +47,7 @@ _CACHE_TTL_S = 300.0
 _CACHE_MAX = 512
 _PROPS = [
     "firstname", "lastname", "phone", "customer_type", "hermes_summary",
+    "hermes_interaction_context",
     "hermes_data_source", "hermes_data_quality_flag",
     "last_quote_amount_aed", "last_quote_yacht", "primary_objection",
 ]
@@ -61,6 +62,16 @@ _PLACEHOLDER_NAMES = {"unknown", "none", "null", "n/a", ""}
 def enabled() -> bool:
     """Feature gate. Default OFF — OFF means context_block() is a pure no-op."""
     return os.environ.get("HUBSPOT_LOOKUP_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _ctx_read_enabled() -> bool:
+    """Sub-gate (default OFF) for ALSO surfacing the live `hermes_interaction_context`
+    field (written by cron-hubspot-sync) alongside the audited `hermes_summary`. OFF ->
+    behaviour is byte-for-byte the legacy summary-only block. Flipped ON once the
+    write-side sync has begun populating interaction_context, closing the read-side gap
+    where freshly-synced context was invisible to Hermes."""
+    return os.environ.get("HUBSPOT_CTX_READ_ENABLED", "").strip().lower() in (
         "1", "true", "yes", "on")
 
 
@@ -158,6 +169,16 @@ _PW = (r"(?:aed|dhs?|dirhams?|price|cost|costs?|paid|pay|quote[d]?|budget|cash|"
        r"deposit|balance|refund|discount|voucher|charge|fee)")
 _PW_NUM_RE = re.compile(r"(?i)(" + _PW + r"\W{0,6})\d{3}(?!\d)")   # word then 3-digit
 _NUM_PW_RE = re.compile(r"(?i)(?<![\d.])\d{3}(\W{0,6}" + _PW + r")")  # 3-digit then word
+
+# Bare 3-digit number (Dubriani hourly rates are 3-digit, e.g. Bliss 900) that is NOT a
+# unit count and NOT part of a YYYY-MM-DD date. interaction_context is fed to the live
+# drafter and may have been written by tools (context_map.js, the Jun-14 backfill) that
+# did NOT pre-strip rates, so the read-side strips bare 3-digit figures defensively. The
+# date guard (?<![\d.\-]) / (?![\d.\-]) keeps "2026-06-14" intact.
+_CTX_RATE_RE = re.compile(
+    r"(?i)(?<![\d.\-])\d{3}(?![\d.\-])"
+    r"(?!\s?(?:pax|pp|ppl|guests?|people|ft|feet|hrs?|hours?|mins?|nights?|days?|"
+    r"cabins?|berths?|knots?|kg|km|m)\b)")
 
 
 def _scrub_money(text: str) -> str:
@@ -269,7 +290,15 @@ def _build_block(phone_key: str) -> str:
     if not _is_real_name(name):
         return ""
     summary = _scrub_money((props.get("hermes_summary") or "").strip())
-    if not summary:
+    # Fresh live rollup (written by cron-hubspot-sync) — only surfaced when the
+    # sub-gate is ON. When OFF, ctx is "" and the block is the legacy summary-only form.
+    # Scrub money AND bare 3-digit rates (this field feeds the drafter; not all writers
+    # pre-strip). hermes_summary is left on its legacy _scrub_money path (unchanged).
+    ctx = ""
+    if _ctx_read_enabled():
+        ctx = _scrub_money((props.get("hermes_interaction_context") or "").strip())
+        ctx = re.sub(r"\s{2,}", " ", _CTX_RATE_RE.sub("", ctx)).strip(" ·;,-")
+    if not summary and not ctx:
         return ""  # nothing usable left after scrub
     ctype = (props.get("customer_type") or "").strip()
     head_type = f"  |  Type: {ctype}" if ctype else ""
@@ -277,12 +306,15 @@ def _build_block(phone_key: str) -> str:
         "--- RETURNING CUSTOMER — internal CRM context (HubSpot) ---",
         f"Name: {name}{head_type}",
         "Known/returning client — acknowledge the relationship; don't re-ask basics already on file.",
-        "Behavioral context from prior dealings:",
-        summary,
+    ]
+    if summary:
+        lines += ["Behavioral context from prior dealings:", summary]
+    if ctx:
+        lines += ["Latest interaction summary:", ctx]
+    lines.append(
         "(Context only. NEVER quote any past price, amount, berth number, or internal "
         "figure to the customer — these are private historical notes. State nothing as "
-        "fact unless it appears in THIS conversation or is listed above.)",
-    ]
+        "fact unless it appears in THIS conversation or is listed above.)")
     return "\n".join(lines)
 
 
