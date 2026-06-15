@@ -74,6 +74,13 @@ RECOVER_CAP = int(getenv("INTAKE_RECOVER_CAP", "8") or "8")
 # Don't re-alert the SAME still-unrecovered gap more than once per cooldown.
 REALERT_COOLDOWN_H = float(getenv("INTAKE_REALERT_COOLDOWN_H", "6") or "6")
 SEEN_PATH = os.path.join(HOME, "hermes-bridge", ".intake_recon_seen.json")
+# Phantom suppression (default ON): a "missed lead" with no inbound message is a
+# contradiction — nothing reached WAHA to be missed. When ON, a hollow WAHA stub
+# that auto-ingest definitively cannot recover is logged silently instead of
+# paging the operator, killing the recurring contentless @lid cards WITHOUT
+# hiding a genuine dropped lead. Set INTAKE_PHANTOM_SUPPRESS_ENABLED=0 to restore
+# the old always-alert behavior instantly. See _is_phantom().
+PHANTOM_SUPPRESS_ENABLED = getenv("INTAKE_PHANTOM_SUPPRESS_ENABLED", "1") != "0"
 
 sys.path.insert(0, os.path.join(HOME, "hermes-bridge"))
 from intake import canon_phone, intake_gaps  # noqa: E402
@@ -220,6 +227,30 @@ def _save_seen(seen):
         print("seen-cache write err (non-fatal):", repr(e))
 
 
+def _is_phantom(g, resp):
+    """True when a detected gap is NOT a real missed lead but a hollow WhatsApp
+    contact stub that can never be actioned — so it should be logged silently
+    rather than paged. Requires ALL of:
+      • hollow WAHA overview — no usable timestamp (age_days hit intake.py's 1e9
+        no-timestamp sentinel), no notifyName, and no last-message text;
+      • a DEFINITIVE 'nothing to ingest' answer from auto-ingest — a non-empty
+        bridge response with ok is False (handle_refresh_facts -> 'no messages in
+        WAHA'). A transport error returns {} (no 'ok' key) and is NOT a phantom,
+        so we still alert and fail toward surfacing.
+    A genuinely dropped lead is never hollow: its message reached WAHA (the drop
+    happened downstream in n8n), so the overview carries a body + timestamp.
+    This therefore only matches a contact WAHA lists but has no message for."""
+    try:
+        age = float(g.get("age_days") or 0)
+    except (TypeError, ValueError):
+        age = 0.0
+    hollow = (age >= 1e9
+              and not (g.get("name") or "").strip()
+              and not (g.get("body") or "").strip())
+    definitive_no_msg = bool(resp) and (resp.get("ok") is False)
+    return hollow and definitive_no_msg
+
+
 def recovery_card(g, ingested_ok):
     """One-tap recovery card: identity + raw last inbound + inline buttons the
     EXISTING callback router already handles (nudge:<cid> drafts a reply via
@@ -287,7 +318,7 @@ def main():
     seen = _load_seen()
     now = time.time()
     cooldown = REALERT_COOLDOWN_H * 3600.0
-    recovered = posted = skipped_cd = 0
+    recovered = posted = skipped_cd = suppressed = 0
     for g in gaps:
         cid = g["cid"]
         # Cooldown: if we already recovered+alerted this cid recently and it is
@@ -305,6 +336,14 @@ def main():
         resp = refresh_facts(cid)
         ingested_ok = bool(resp.get("ok"))
         recovered += 1
+        # Phantom guard: a hollow stub the bridge confirms has no message is not
+        # a missed lead — log it silently and stamp `seen` so we also stop
+        # re-attempting recovery every run, but never page the operator.
+        if PHANTOM_SUPPRESS_ENABLED and _is_phantom(g, resp):
+            suppressed += 1
+            seen[cid] = now
+            print("phantom-suppressed (hollow stub, no message): %s" % cid)
+            continue
         text, markup = recovery_card(g, ingested_ok)
         if tg_send(text, markup):
             posted += 1
@@ -315,7 +354,8 @@ def main():
             if k in live and (now - v) < cooldown}
     _save_seen(seen)
     print("intake-recon: auto-ingested %d, posted %d card(s), "
-          "cooldown-skipped %d" % (recovered, posted, skipped_cd))
+          "phantom-suppressed %d, cooldown-skipped %d"
+          % (recovered, posted, suppressed, skipped_cd))
 
 
 if __name__ == "__main__":
