@@ -308,13 +308,22 @@ def _build_block(phone_key: str) -> str:
         "Known/returning client — acknowledge the relationship; don't re-ask basics already on file.",
     ]
     if summary:
-        lines += ["Behavioral context from prior dealings:", summary]
+        lines += ["Prior dealings (HISTORICAL record — not current facts):", summary]
     if ctx:
-        lines += ["Latest interaction summary:", ctx]
+        lines += ["Prior interaction (HISTORICAL record — NOT a current quote, booking, "
+                  "or availability):", ctx]
+    # CONSTRAINING footer (over-anchoring fix): frames the whole block as historical and
+    # forbids asserting availability / re-pitching the prior yacht / stating past detail as
+    # current fact. NOTE: this is ADVISORY to the LLM (prompt rules are advisory) — it will
+    # reduce, not deterministically prevent, over-anchoring; a deterministic availability-
+    # claim guard is the durable fix if it persists. Keeps the literal "Context only" +
+    # never-quote-figures clause (relied on by the read-side safety contract/tests).
     lines.append(
-        "(Context only. NEVER quote any past price, amount, berth number, or internal "
-        "figure to the customer — these are private historical notes. State nothing as "
-        "fact unless it appears in THIS conversation or is listed above.)")
+        "USE THE ABOVE ONLY to acknowledge the relationship — it is a HISTORICAL record, "
+        "NOT current fact. For THIS reply: answer the customer's ACTUAL question FIRST; do "
+        "NOT assert any yacht is available; do NOT re-pitch a previously-discussed yacht "
+        "unprompted; do NOT state any past detail as a current fact. Context only — NEVER "
+        "quote any past price, amount, or berth number to the customer.")
     return "\n".join(lines)
 
 

@@ -352,7 +352,7 @@ def test_readside_gate_off_is_legacy(monkey_restore=None):
     finally:
         hubspot_lookup._http_search = orig
     assert "Type: repeat client" in block
-    assert "Latest interaction summary:" not in block   # gate OFF -> not surfaced
+    assert "Prior interaction (HISTORICAL" not in block   # gate OFF -> ctx not surfaced
 
 
 def test_readside_gate_on_surfaces_context():
@@ -364,7 +364,8 @@ def test_readside_gate_on_surfaces_context():
     finally:
         hubspot_lookup._http_search = orig
         os.environ.pop("HUBSPOT_CTX_READ_ENABLED", None)
-    assert "Latest interaction summary:" in block
+    assert "Prior interaction (HISTORICAL" in block      # constraining reframe
+    assert "do NOT assert any yacht is available" in block
     assert "Status: quoted" in block
     assert "Type: repeat client" in block               # both surfaced
 
