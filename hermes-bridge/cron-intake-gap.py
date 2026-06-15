@@ -81,6 +81,12 @@ SEEN_PATH = os.path.join(HOME, "hermes-bridge", ".intake_recon_seen.json")
 # hiding a genuine dropped lead. Set INTAKE_PHANTOM_SUPPRESS_ENABLED=0 to restore
 # the old always-alert behavior instantly. See _is_phantom().
 PHANTOM_SUPPRESS_ENABLED = getenv("INTAKE_PHANTOM_SUPPRESS_ENABLED", "1") != "0"
+# A content-less, unrecoverable gap (no name, no text, history unfetchable) is
+# suppressed when it is either undated (the 1e9 no-timestamp sentinel) OR older
+# than this many days — stale junk. A FRESH content-less inbound (< threshold)
+# still pages, as a "go check WhatsApp manually" nudge, so the never-miss net
+# keeps its safety net for genuinely new leads. See _is_phantom().
+PHANTOM_STALE_DAYS = float(getenv("INTAKE_PHANTOM_STALE_DAYS", "7") or "7")
 
 sys.path.insert(0, os.path.join(HOME, "hermes-bridge"))
 from intake import canon_phone, intake_gaps  # noqa: E402
@@ -228,27 +234,30 @@ def _save_seen(seen):
 
 
 def _is_phantom(g, resp):
-    """True when a detected gap is NOT a real missed lead but a hollow WhatsApp
-    contact stub that can never be actioned — so it should be logged silently
-    rather than paged. Requires ALL of:
-      • hollow WAHA overview — no usable timestamp (age_days hit intake.py's 1e9
-        no-timestamp sentinel), no notifyName, and no last-message text;
-      • a DEFINITIVE 'nothing to ingest' answer from auto-ingest — a non-empty
-        bridge response with ok is False (handle_refresh_facts -> 'no messages in
-        WAHA'). A transport error returns {} (no 'ok' key) and is NOT a phantom,
-        so we still alert and fail toward surfacing.
-    A genuinely dropped lead is never hollow: its message reached WAHA (the drop
-    happened downstream in n8n), so the overview carries a body + timestamp.
-    This therefore only matches a contact WAHA lists but has no message for."""
+    """True when a detected gap is NOT an actionable missed lead — there is
+    nothing to show the operator and nothing to draft from — so it is logged
+    silently rather than paged. Requires ALL of:
+      • NO actionable content — the WAHA overview carries no notifyName AND no
+        last-message text (g['name'] and g['body'] both empty);
+      • UNRECOVERABLE — auto-ingest returned a DEFINITIVE 'nothing to ingest'
+        (a non-empty bridge response with ok is False; handle_refresh_facts ->
+        'no messages in WAHA'). A transport error returns {} (no 'ok' key) and is
+        NOT treated as a phantom, so a genuinely dropped lead is never hidden by
+        a network hiccup — we fail toward surfacing;
+      • STALE or UNDATED — age_days is the 1e9 no-timestamp sentinel OR older
+        than PHANTOM_STALE_DAYS. A FRESH content-less inbound (< threshold) still
+        pages as a 'go look in WhatsApp' nudge, preserving the never-miss net.
+    A genuinely actionable lead always carries a name, text, or recent dated
+    content, so it never matches."""
     try:
         age = float(g.get("age_days") or 0)
     except (TypeError, ValueError):
         age = 0.0
-    hollow = (age >= 1e9
-              and not (g.get("name") or "").strip()
-              and not (g.get("body") or "").strip())
-    definitive_no_msg = bool(resp) and (resp.get("ok") is False)
-    return hollow and definitive_no_msg
+    no_content = (not (g.get("name") or "").strip()
+                  and not (g.get("body") or "").strip())
+    unrecoverable = bool(resp) and (resp.get("ok") is False)
+    stale_or_undated = age >= 1e9 or age >= PHANTOM_STALE_DAYS
+    return no_content and unrecoverable and stale_or_undated
 
 
 def recovery_card(g, ingested_ok):
@@ -336,13 +345,13 @@ def main():
         resp = refresh_facts(cid)
         ingested_ok = bool(resp.get("ok"))
         recovered += 1
-        # Phantom guard: a hollow stub the bridge confirms has no message is not
-        # a missed lead — log it silently and stamp `seen` so we also stop
-        # re-attempting recovery every run, but never page the operator.
+        # Phantom guard: a content-less, unrecoverable, stale/undated gap is not
+        # an actionable missed lead — log it silently and stamp `seen` so we also
+        # stop re-attempting recovery every run, but never page the operator.
         if PHANTOM_SUPPRESS_ENABLED and _is_phantom(g, resp):
             suppressed += 1
             seen[cid] = now
-            print("phantom-suppressed (hollow stub, no message): %s" % cid)
+            print("phantom-suppressed (no content, unrecoverable): %s" % cid)
             continue
         text, markup = recovery_card(g, ingested_ok)
         if tg_send(text, markup):
