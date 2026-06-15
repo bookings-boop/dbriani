@@ -1784,7 +1784,8 @@ def handle_label_eval(payload, send):
             operator_closed = _is_operator_close(close_by)
             # (b) A message compute_label reads as a decline/service-mismatch must
             # NEVER reopen — don't rely on the LABEL_RANK coincidence.
-            decline_sig = sig in ("declined", "service_mismatch")
+            decline_sig = sig in ("declined", "declined_ghost_recovery",
+                                  "service_mismatch")
             reopen = (not operator_closed
                       and not decline_sig
                       and _LABEL_RANK.get(target, 0) < _LABEL_RANK[previous_label]
