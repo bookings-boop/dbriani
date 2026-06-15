@@ -1831,6 +1831,40 @@ def _graceful_goodbye_line(label):
     return ""
 
 
+GHOST_RECOVERY_DECLINE_DIRECTIVE = (
+    "⛔ THE CUSTOMER JUST CONFIRMED THEY HAVE GIVEN UP. Your last message asked "
+    "\"Have you given up on booking …?\" and they answered yes / said they have "
+    "given up. This is a DECLINE — NOT renewed interest. Do NOT say \"glad "
+    "you're still interested\", do NOT pitch yachts, quote prices, suggest "
+    "options, or ask qualifying questions — any sales push here is WRONG and "
+    "will annoy the customer. Write ONE brief, warm, gracious goodbye: thank "
+    "them for considering Dubriani, optionally ask lightly if there was "
+    "anything you could have done better, and leave the door open for a future "
+    "charter.")
+
+
+def _ghost_recovery_decline_line(customer_id):
+    """Real-time drafting directive (fix #1, 2026-06-14, Humdan +971501848003).
+    When our most-recent outbound was the 'have you given up on booking?' nudge
+    AND the customer's latest inbound signals they have given up, return a
+    NO-PUSH / close-gracefully directive — otherwise ''. Lands BEFORE the draft
+    is generated, pre-empting the 'glad you're still interested' misread even
+    while the label is still WARM (the analyzer catches up only AFTER the
+    draft). Fail-open; returns '' in the overwhelmingly common case — one cheap
+    read, short-circuited the moment the last outbound isn't the nudge."""
+    try:
+        if not _givenup_decline_enabled():
+            return ""
+        cid = (customer_id or "").strip()
+        if not cid or not _last_outbound_is_givenup_nudge(cid):
+            return ""
+        if _is_givenup_decline(_latest_inbound_body(cid), True):
+            return GHOST_RECOVERY_DECLINE_DIRECTIVE
+        return ""
+    except Exception:  # noqa: BLE001 — must never break the draft path
+        return ""
+
+
 FIRST_CONTACT_DIRECTIVE = (
     "EARLY IN THE CONVERSATION: greet the customer warmly and, if you don't yet "
     "know their name, ask for it naturally as part of your reply. You may answer "
@@ -1858,6 +1892,10 @@ def _lead_state_block(customer_id):
     cid = (customer_id or "").strip()
     if not cid:
         return ""
+    # fix #1 (2026-06-14): a real-time 'they just gave up — close gracefully,
+    # do NOT pitch' directive, computed independent of the (possibly stale)
+    # label so it lands before the draft. '' in the common case.
+    _grd = _ghost_recovery_decline_line(cid)
     row, _ = _psql(
         "SELECT COALESCE(label,'') || '~~' || "
         "COALESCE(importance_score::text,'') || '~~' || "
@@ -1868,6 +1906,12 @@ def _lead_state_block(customer_id):
         "WHERE customer_id = " + _lit(cid) + " AND merged_into IS NULL")
     row = (row or "").strip()
     if not row:
+        # No facts yet, but a ghost-recovery decline still needs the directive.
+        if _grd:
+            _b = "=" * 60
+            return "\n".join([
+                _b, "## 🎯 THIS LEAD'S CURRENT STATE — your reply MUST fit it",
+                _b, _grd])
         return ""
     lbl, isc, irea, dts, psize, ychts, mct = (
         row.splitlines()[0].split("~~") + ["", "", "", "", "", "", ""])[:7]
@@ -1875,8 +1919,9 @@ def _lead_state_block(customer_id):
     _fc_line = _first_contact_line(mct)
     # Emit the block when there's analysis OR a known party size — the capacity
     # constraint must reach the drafter even on a first reply (before analysis),
-    # which is exactly when an under-capacity yacht gets recommended.
-    if not (irea or isc or lbl) and not _cap_line and not _fc_line:
+    # which is exactly when an under-capacity yacht gets recommended. fix #1:
+    # the given-up directive also forces the block to emit.
+    if not (irea or isc or lbl) and not _cap_line and not _fc_line and not _grd:
         return ""
     bar = "=" * 60
     lines = [
@@ -1884,6 +1929,9 @@ def _lead_state_block(customer_id):
         "## 🎯 THIS LEAD'S CURRENT STATE — your reply MUST fit it",
         bar,
     ]
+    # fix #1: lead with the given-up no-push directive so it dominates the block.
+    if _grd:
+        lines.append(_grd)
     if irea or isc or lbl:
         lines.append(f"Label: {lbl or '?'} · Importance: {isc or '?'}/100")
         lines.append(f"Analyzer's read: {irea or '(none yet)'}")
@@ -3732,6 +3780,18 @@ def _rates_label(allowed):
     return "/".join(parts) if parts else "no hourly rate (daily-only)"
 
 
+def _yacht_rates(name):
+    """Allowed AED/hr rates for a known yacht. STRICT mode
+    (DRAFTER_PRICE_STRICT_ENABLED, operator 2026-06-15) tightens Satoshi to
+    {3,000, 1,500} so the model's wrong 2,000/hr opener is flagged + regenerated;
+    OFF keeps the legacy 2,000-3,000 negotiation band. Env read is call-time so
+    the kill-switch needs only an .env flip + restart. Pure otherwise."""
+    if name == "satoshi" and os.environ.get(
+            "DRAFTER_PRICE_STRICT_ENABLED", "0").strip() == "1":
+        return {3000, 1500}
+    return _CANON_YACHT_RATES[name]
+
+
 def validate_draft_prices(text):
     """Return a list of price-mismatch strings for a customer-facing draft
     (empty = clean / nothing checkable). CONSERVATIVE: validates only known
@@ -3768,8 +3828,8 @@ def validate_draft_prices(text):
             cur_name, cur_pos = val, pos
         elif (cur_name is not None and val is not None
               and pos - cur_pos <= _YACHT_RATE_PROXIMITY
-              and not _rate_ok(val, _CANON_YACHT_RATES[cur_name])):
-            ok = _rates_label(_CANON_YACHT_RATES[cur_name])
+              and not _rate_ok(val, _yacht_rates(cur_name))):
+            ok = _rates_label(_yacht_rates(cur_name))
             _add(f"{cur_name.title()} quoted AED {val:,}/hr (catalog: {ok}/hr)")
 
     # 2) CATERING: a catering term with a nearby AED figure that isn't canonical.
@@ -4172,6 +4232,112 @@ def _passed_date_note(dates, reasoning="", now=None):
 # a CLEAR standalone decline (the negative lookahead excludes an engaged
 # "no thanks, what about X?" / "not interested IN the bigger one"), and an
 # EXPLICIT bareboat/no-captain ask (Dubriani is crewed-only, so it's a non-fit).
+# --- "Have you given up?" decline detection (2026-06-14, Humdan +971501848003)
+# A bare "yes" answering the ghost-recovery LAST_SHOT nudge ("Have you given up
+# on booking ...?") is a DECLINE, not renewed interest. Polarity is context-
+# dependent: the SAME "yes" anywhere else stays positive, so the bare-
+# affirmation trigger fires ONLY when our immediately-preceding outbound was
+# that nudge. Explicit "given up"/"gave up" is a decline in any context. The
+# exhaustive safety boundary is pinned in test_givenup_polarity.
+_GIVENUP_NUDGE_RE = re.compile(r"given\s+up\s+on\s+booking", re.I)
+_GIVEN_UP_RE = re.compile(r"\b(?:giv(?:en|e)|gave)\s+up\b", re.I)
+# Deliberately NARROW: clear yes-family only. Excludes ok/sure/sounds good/
+# book it/let's do it/deal/go ahead — answering "have you given up?" with those
+# is ambiguous or POSITIVE ("book it" = NOT given up), so we never auto-close on
+# them (fail toward keeping an interested customer).
+_GIVENUP_AFFIRMATION_RE = re.compile(
+    r"^\s*(?:"
+    r"y(?:es|eah|ep|up|a)|yes\s+i\s+have|i\s+have|we\s+have|i\s+did|we\s+did|"
+    r"(?:sadly|unfortunately)\s+yes|yes\s+(?:sadly|unfortunately)|"
+    r"correct|that'?s\s+right"
+    r")[\s.!,…🙏👍]*$",
+    re.I)
+# Any booking/positive intent VETOES an auto-decline, even if "given up" or a
+# yes-family token appears (e.g. "I'd given up but I still want to book").
+_POSITIVE_INTENT_RE = re.compile(
+    r"\b(?:book|reserve|proceed|deposit|"
+    r"still\s+(?:want|keen|interested|on|need)|"
+    r"let'?s|go\s+ahead|interested|keen|when\s+can|availab|how\s+much|"
+    r"price|quote|send)\b", re.I)
+
+
+def _givenup_decline_enabled():
+    """Kill-switch (2026-06-14) for the 'have you given up?' decline handling —
+    gates BOTH fix #1 (the draft no-push directive) and fix #2 (the LOST
+    classification). Default ON. Flip GIVENUP_DECLINE_ENABLED=0 in .env +
+    restart to instantly revert the draft/label behavior to pre-fix, without a
+    redeploy. (Belt-fix #3, the eligibility-SQL guard repair, is independent and
+    NOT gated by this switch.) Read at call time so a flip takes effect on the
+    next restart."""
+    return _envflag("GIVENUP_DECLINE_ENABLED", "true")
+
+
+def _is_givenup_nudge_text(text):
+    """True iff `text` is our 'Have you given up on booking ...?' LAST_SHOT
+    nudge — the one negative-polarity ghost-recovery line where 'yes' = decline.
+    The soft check-in ('are you still considering ...?') is NOT this. Pure."""
+    return bool(_GIVENUP_NUDGE_RE.search(text or ""))
+
+
+def _is_givenup_decline(msg, last_outbound_was_givenup_nudge):
+    """Pure polarity classifier. True iff this customer inbound signals they
+    have GIVEN UP. Two independent triggers:
+      (E) explicit 'given up'/'gave up' — context-independent.
+      (P) a bare yes-family affirmation — ONLY when our last outbound was the
+          'have you given up?' nudge (that question inverts 'yes' to a decline).
+    Vetoed by any booking/positive intent or a trailing question, so it can
+    never fire on 'no', 'not yet', a re-engagement, or an interested 'yes ...'.
+    Pure — no DB. The exhaustive boundary lives in test_givenup_polarity."""
+    m = (msg or "").strip()
+    if not m or _POSITIVE_INTENT_RE.search(m) or "?" in m:
+        return False
+    if _GIVEN_UP_RE.search(m):
+        return True
+    if last_outbound_was_givenup_nudge and _GIVENUP_AFFIRMATION_RE.match(m):
+        return True
+    return False
+
+
+def _last_outbound_is_givenup_nudge(customer_id):
+    """True iff this customer's most-recent OUTBOUND message is the 'have you
+    given up on booking?' nudge. One cheap indexed read (idx_..._cid_ts).
+    Fail-OPEN (False on any error/timeout/docker-less env) — must never break
+    the draft/analysis path."""
+    try:
+        cid = canonicalize_cid(customer_id)
+        if not cid:
+            return False
+        out, err = _psql(
+            "SELECT replace(replace(coalesce(body,''), chr(13), ' '), "
+            "chr(10), ' ') FROM conversation_messages "
+            "WHERE customer_id = " + _lit(cid) + " AND direction = 'out' "
+            "ORDER BY ts DESC, id DESC LIMIT 1")
+        if err or not out:
+            return False
+        return _is_givenup_nudge_text(out.splitlines()[0])
+    except Exception:  # noqa: BLE001 — fail-open, never break the hot path
+        return False
+
+
+def _latest_inbound_body(customer_id):
+    """The customer's most-recent INBOUND message body (one line). '' on any
+    error — fail-open. Used by the draft-time directive (fix #1)."""
+    try:
+        cid = canonicalize_cid(customer_id)
+        if not cid:
+            return ""
+        out, err = _psql(
+            "SELECT replace(replace(coalesce(body,''), chr(13), ' '), "
+            "chr(10), ' ') FROM conversation_messages "
+            "WHERE customer_id = " + _lit(cid) + " AND direction = 'in' "
+            "ORDER BY ts DESC, id DESC LIMIT 1")
+        if err or not out:
+            return ""
+        return out.splitlines()[0]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 _DECLINE_RE = re.compile(
     r"\b(no\s+thanks?|no\s+thank\s+you|not\s+interested|i'?ll\s+pass|"
     r"we'?ll\s+pass|not\s+for\s+(us|me)|all\s+good\s+thanks|"
@@ -4228,6 +4394,21 @@ def compute_label(latest_message, facts):
     if ((facts or {}).get("label") or "").strip().upper() != "CONFIRMED":
         if _BAREBOAT_RE.search(msg):
             return ("LOST", "service_mismatch", msg[:200])
+        # "Have you given up?" decline (fix #2, 2026-06-14, Humdan
+        # +971501848003): explicit 'given up' in any context, or a bare
+        # yes-family affirmation ONLY when our last outbound was the nudge
+        # (polarity). Routes to terminal LOST so the existing label-driven
+        # machinery stops the re-nudge (eligibility excludes LOST) and the
+        # hourly sweep's stale-yacht re-warm. _last_outbound_is_givenup_nudge
+        # (the only DB touch) is consulted lazily — solely for a bare
+        # affirmation — so normal traffic pays nothing. Safety boundary:
+        # test_givenup_polarity / test_givenup_label.
+        _m = (msg or "").strip()
+        if _givenup_decline_enabled():
+            _ndg = bool(_GIVENUP_AFFIRMATION_RE.match(_m) and customer_id
+                        and _last_outbound_is_givenup_nudge(customer_id))
+            if _is_givenup_decline(_m, _ndg):
+                return ("LOST", "declined_ghost_recovery", _m[:200])
         if _DECLINE_RE.search(msg) and "?" not in msg:
             return ("LOST", "declined", msg[:200])
 
@@ -4510,9 +4691,20 @@ def _followup_candidate_sql():
         "  AND cf.merged_into IS NULL "
         # Don't ghost-recovery a lead the analyzer judged dead/not-convertible
         # (auto:analyzer_close / auto:analyzer_score0 demote to COLD, which is
-        # otherwise reengage-eligible — re-nudges a declined lead). Audit #7.
-        "  AND (cs.last_analysis_signal IS NULL "
-        "       OR cs.last_analysis_signal NOT LIKE 'auto:analyzer%') "
+        # otherwise reengage-eligible — re-nudges a declined lead). Audit #7
+        # REPAIRED (2026-06-14, belt-fix #3): the original predicate read
+        # cs.last_analysis_signal — a column NEVER written with 'auto:analyzer%'
+        # (0/592 rows in prod), so the guard was a dead no-op and an analyzer-
+        # closed COLD lead kept getting nudged (Humdan +971501848003). The
+        # analyzer-close signal actually lands in customer_label_history.signal,
+        # so read THAT. Scoped to 'no genuine customer message since the close'
+        # so a real re-engagement (customer texts back) still re-qualifies.
+        "  AND NOT EXISTS ("
+        "       SELECT 1 FROM customer_label_history h "
+        "       WHERE h.customer_id = cs.customer_id "
+        "         AND h.signal LIKE 'auto:analyzer%' "
+        "         AND h.created_at > COALESCE(cs.last_customer_message_at, "
+        "                                     'epoch'::timestamptz)) "
         # Timing band — silence since our reply: 24h .. 14d.
         "  AND now() - cs.last_operator_reply_at > interval '24 hours' "
         "  AND now() - cs.last_operator_reply_at < interval '14 days' "
@@ -4929,6 +5121,7 @@ def _humanize_signal(signal, evidence, created_by):
         "quote_accepted":          "Accepted a quoted price",
         "same_day_booking":        "Asked about same-day booking",
         "multi_yacht_engaged":     "Engaged on multiple yachts",
+        "declined_ghost_recovery": "Gave up after a re-engagement nudge",
         "pricing_inquired":        "Asked about pricing",
         "date_asked_no_commit":    "Discussed dates, no commitment yet",
         "engaged_5plus":           "5+ messages exchanged — engaged",
