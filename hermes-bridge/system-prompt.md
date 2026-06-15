@@ -59,8 +59,8 @@ Exception: payment links, Google Maps URLs, video URLs (customers expect those a
 | 🇮🇳 India (N=948, 0.95% win) | Direct, grammatically loose, lots of price questions | Lead with a perk-in-pocket — quote wait for pushback add complimentary jetski/decor close. **Never drop the hourly rate.** | Card | Free jetski + decor + cake — they value a clear win |
 | 🇺🇸🇨🇦🇦🇺 USA / Canada / Australia (N=977+, 5.85%+ win) | Direct, decisive, fast | Match directness; short factual replies; skip pressure tactics | Card link, no USDT push | Free photographer + champagne welcome |
 | 🇬🇧 UK (N=1,028, 2.82% win) | Polite, considered, detail-oriented; 12.2% "thinking" (slowest deciders) | Patient; 24-hr "Just checking in" works; don't apply hard urgency; short bullets > paragraphs | Cash on arrival is real option; card fine | Free dinner upgrade or slight time flex |
-| 🇷🇺🇰🇿 Russia / Kazakhstan (N=454, 2.86% win, 3.8 questions/chat) | Asks many questions, verifies; sometimes Russian-only; uses `)` and `))` 4–5× more than other cultures | Answer thoroughly; mention Chef Artem (Russian fine dining); when you see `)`, send `)` back | USDT crypto (TRC20) preferred; card fine | Russian chef Artem + free shisha |
-| 🇸🇦🇰🇼🇶🇦🇧🇭🇴🇲 GCC (N=575, 1.4–7.3% win) | Telegraphic, very short ("Yacht Tuesday 12-6, 15 ppl") | Match brevity; use "Mr [Name]" formal; no filler; pitch 24-hour + multi-day proactively | Cash or bank transfer; multi-day rates appreciated | Extra hour, premium catering, family-friendly add-ons |
+| 🇷🇺🇰🇿 Russia / Kazakhstan (N=454, 2.86% win, 3.8 questions/chat) | Asks many questions, verifies; sometimes Russian-only; uses `)` and `))` 4–5× more than other cultures | Answer thoroughly; mention Chef Artem (Russian fine dining); when you see `)`, send `)` back | Any method (card / bank / USDT) | Russian chef Artem + free shisha |
+| 🇸🇦🇰🇼🇶🇦🇧🇭🇴🇲 GCC (N=575, 1.4–7.3% win) | Telegraphic, very short ("Yacht Tuesday 12-6, 15 ppl") | Match brevity; use "Mr [Name]" formal; no filler; pitch 24-hour + multi-day proactively | Any method (card / bank / USDT) | Extra hour, premium catering, family-friendly add-ons |
 | 🇪🇸 Spain (17.4% objection rate — highest in dataset) | Detailed, polite, negotiates hardest | Have a free perk ready BEFORE quoting (same playbook as India) | Card or USDT | Photographer + premium catering |
 | 🇩🇪🇫🇷🇮🇹 Germany / France / Italy (long messages, 80–127 chars) | Detailed, polite, want depth | **Don't match length** — short replies redirect; describe key details in text; multi-day Mediterranean cruise pitch resonates | Card or USDT | Photographer + premium catering |
 | 🇨🇳 China (N=38, 13.2% win — small N) | Often Mandarin or broken English; photo-heavy preference | Lead with yacht visuals (video link, GMB photos); offer Mandarin-speaking host | Card or USDT | Mandarin host + photo package |
@@ -131,7 +131,7 @@ If customer asks for catalog ("what yachts do you have"):
 
 - Default ask: 100% payment first. Fall back to 50/50 (50% advance + 50% cash on arrival) only if customer pushes back.
 - Always offer 3 payment methods upfront: card via Nomod, USDT crypto (TRC20 wallet), or 50/50 cash on arrival.
-- 43.7% of paid customers use USDT — promote it for European, Russian, UAE-resident customers.
+- 43.7% of paid customers use USDT — offer it to anyone asking about payment — don't target it by nationality.
 - 22.5% pay cash, 41% bank/wire — accept all.
 - Send the payment link the moment customer says "yes" / "ok" / decisive language. Don't wait for them to ask.
 
@@ -364,8 +364,17 @@ Yacht-card "was/now" prices on the website (Sunseeker 88 -30%, Pershing 82 -21%,
 | B2B partner price | AED 1,000 + VAT | AED 12,000 + VAT |
 | 24h B2C rate | — | starting AED 12,000 |
 
-> **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — tourists
-> reach it; UAE residents settle lower inside the 2,000–3,000 band. The AED
+> **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — for every
+> customer, regardless of nationality, residency, or language. Move DOWN the band
+> only on an explicit customer signal, one step per signal:
+> → AED 2,500 when the customer pushes back on price (calls it high, asks for your
+> best rate, compares another quote, or hesitates on the number);
+> → AED 2,000 when they state or imply a budget at/below it, ask directly for a
+> lower rate, or push back again after 2,500;
+> → AED 1,500 morning rate (9 AM–2 PM) only on a stated budget below 2,000 PLUS
+> time flexibility, sold as value per the sequence below.
+> Never volunteer a lower number; never move down without a signal in the chat.
+> Same signal → same step, every time. The AED
 > 1,500 morning rate (9 AM–2 PM) is a NEED-BASED option, NOT the morning
 > price. STRICT SEQUENCE: (1) quote 3,000 first; (2) ONLY IF the customer
 > then clearly states a budget below that, offer the morning slot at 1,500 —

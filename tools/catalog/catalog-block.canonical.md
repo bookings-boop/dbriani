@@ -30,8 +30,17 @@
 | Morning value option (9 AM–2 PM) — ONLY after a stated lower budget | AED 1,500 | — |
 | 24h B2C rate | — | starting AED 12,000 |
 
-> **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — tourists
-> reach it; UAE residents settle lower inside the 2,000–3,000 band. The AED
+> **DEFAULT = FULL PRICE. Open EVERY Satoshi quote at AED 3,000/hr — for every
+> customer, regardless of nationality, residency, or language. Move DOWN the band
+> only on an explicit customer signal, one step per signal:
+> → AED 2,500 when the customer pushes back on price (calls it high, asks for your
+> best rate, compares another quote, or hesitates on the number);
+> → AED 2,000 when they state or imply a budget at/below it, ask directly for a
+> lower rate, or push back again after 2,500;
+> → AED 1,500 morning rate (9 AM–2 PM) only on a stated budget below 2,000 PLUS
+> time flexibility, sold as value per the sequence below.
+> Never volunteer a lower number; never move down without a signal in the chat.
+> Same signal → same step, every time. The AED
 > 1,500 morning rate (9 AM–2 PM) is a NEED-BASED option, NOT the morning
 > price. STRICT SEQUENCE: (1) quote 3,000 first; (2) ONLY IF the customer
 > then clearly states a budget below that, offer the morning slot at 1,500 —

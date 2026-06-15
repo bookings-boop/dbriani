@@ -3656,8 +3656,8 @@ _CANON_YACHT_RATES = {
     "von dutch 40": {1400},           # no discount (operator 2026-06-06)
     "bliss 55": {1400, 1100},         # list 1,400; standing anchor 1,100
     "satoshi": {(2000, 3000), 1500},  # RANGE 2,000-3,000 (operator 2026-06-11:
-                                      # tourists reach 3,000, UAE residents
-                                      # settle lower); 1,500 = morning hard
+                                      # open at ceiling 3,000; negotiate
+                                      # down only on grounded signals); 1,500 = morning hard
                                       # floor. Key matches bare "Satoshi" and
                                       # "Sunseeker Satoshi 70".
     # --- quote-routing experiment surface (operator-approved 2026-06-11) ---
