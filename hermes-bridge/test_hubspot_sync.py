@@ -367,6 +367,7 @@ def test_readside_gate_on_surfaces_context():
     assert "Prior interaction (HISTORICAL" in block      # constraining reframe
     assert "do NOT assert any yacht is available" in block
     assert "Status: quoted" in block
+    assert "Satoshi" not in block                        # yacht NAME dropped from drafter view
     assert "Type: repeat client" in block               # both surfaced
 
 

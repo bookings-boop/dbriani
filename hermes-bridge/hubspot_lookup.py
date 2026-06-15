@@ -298,8 +298,13 @@ def _build_block(phone_key: str) -> str:
     if _ctx_read_enabled():
         ctx = _scrub_money((props.get("hermes_interaction_context") or "").strip())
         ctx = re.sub(r"\s{2,}", " ", _CTX_RATE_RE.sub("", ctx)).strip(" ·;,-")
-    if not summary and not ctx:
-        return ""  # nothing usable left after scrub
+        # Drop the specific yacht NAME from the DRAFTER's injected view (it stays in HubSpot
+        # for humans). Feeding the prior yacht makes the drafter re-pitch it unprompted and
+        # ignore the customer's actual question (confirmed 3/3 on Antonio even with the
+        # "do not re-pitch" instruction — prompt rules are advisory). Remove the temptation
+        # at the source; keep Status / Date asked / Party / Last contact.
+        ctx = " · ".join(seg for seg in ctx.split(" · ")
+                         if not seg.strip().lower().startswith("yacht"))
     ctype = (props.get("customer_type") or "").strip()
     head_type = f"  |  Type: {ctype}" if ctype else ""
     lines = [
