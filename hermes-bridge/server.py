@@ -346,30 +346,47 @@ GHOST_RECOVERY_NO_ORIENTED = (
 )
 
 
+# Touch-1 (24-72h) SOFT follow-ups — operator's templates (2026-06-16), generic
+# (no yacht name). The touch-1 variant pool, rotated per lead for A/B testing.
+GHOST_RECOVERY_SOFT = (
+    "Please let me know your thoughts and I will be happy to put together some "
+    "more suitable options for you based on your requirements.",
+    "Hi. How are you? Have you had a chance to take a look at the selection? "
+    "Please let me know your thoughts and I will be happy to put together some "
+    "more suitable options for you based on your requirements. I look forward to "
+    "your feedback. Thank you",
+)
+
+
 def _ghost_recovery_phrase(silence_window, followup_count, cid):
-    """Pick the ghost-recovery template + its effective window label.
+    """Return (template, effective_window, variant_tag) for the proactive nudge.
 
     Flag FOLLOWUP_ATTEMPT_PHRASING_ENABLED (default OFF = legacy byte-for-byte,
-    keyed on the silence WINDOW). ON -> attempt-aware: the nudge repeated verbatim
-    (Ahmed got the identical "Just checking in..." Sun + Tue) because it keyed on
-    the window and every nudge SEND resets the silence clock
-    (last_operator_reply_at), trapping a repeat-nudged lead in 'soft_checkin'.
-    Key on ATTEMPT instead (followup_count = nudges the customer has already
-    received): 1st nudge -> soft check-in; 2nd+ -> a NO-ORIENTED question rotated
-    per lead+attempt. Pure + deterministic (no LLM, no I/O)."""
+    keyed on the silence WINDOW). ON -> attempt-aware variant pools rotated PER
+    LEAD (vary-by-lead) so an A/B spread accrues; `variant_tag` is stamped onto
+    draft_log.trigger_kind so conversion-per-variant is measurable later. 1st
+    nudge (followup_count 0) -> a SOFT follow-up; 2nd+ -> a NO-ORIENTED (Voss)
+    question. The nudge repeated verbatim (Ahmed Sun+Tue) under the legacy by-
+    window keying because every nudge resets the silence clock. Pure + deterministic."""
     if os.environ.get("FOLLOWUP_ATTEMPT_PHRASING_ENABLED", "0").strip() != "1":
-        return (GHOST_RECOVERY_PHRASES.get(
-            silence_window, GHOST_RECOVERY_PHRASES["soft_checkin"]),
-            silence_window)
+        tmpl = GHOST_RECOVERY_PHRASES.get(
+            silence_window, GHOST_RECOVERY_PHRASES["soft_checkin"])
+        return tmpl, silence_window, "reengage:" + str(silence_window)
     try:
         fc = int(followup_count or 0)
     except (TypeError, ValueError):
         fc = 0
+    import zlib
+    # crc32 = uniform, decorrelated A/B bucket per lead (sum-of-ords correlated
+    # with cid structure -> could bias which variant a lead source/region gets).
+    h = zlib.crc32(str(cid or "").encode())
     if fc <= 0:
-        return GHOST_RECOVERY_PHRASES["soft_checkin"], "soft_checkin"
+        pool = GHOST_RECOVERY_SOFT
+        idx = h % len(pool)
+        return pool[idx], "soft_checkin", "reengage:soft_" + chr(97 + idx)
     pool = GHOST_RECOVERY_NO_ORIENTED
-    idx = (sum(ord(ch) for ch in str(cid or "")) + fc) % len(pool)
-    return pool[idx], "last_shot"
+    idx = (h + fc) % len(pool)
+    return pool[idx], "last_shot", "reengage:noorient_" + str(idx)
 
 
 def _draft_key(did):

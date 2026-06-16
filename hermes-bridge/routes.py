@@ -3868,7 +3868,7 @@ def handle_draft_followup(payload, send):
             # the nudge repeated verbatim (Ahmed Sun+Tue) because it keyed on the
             # silence window and every nudge resets the silence clock. Key on
             # ATTEMPT: 1st = soft check-in, 2nd+ = a rotated no-oriented question.
-            _gr_tmpl, _eff_window = _ghost_recovery_phrase(
+            _gr_tmpl, _eff_window, _gr_tag = _ghost_recovery_phrase(
                 silence_window, payload.get("followup_count"), cid)
             phrase = _gr_tmpl.format(service=service)
             shrs = (f"{silence_hours:.1f}"
@@ -6781,7 +6781,8 @@ def handle_followup_sweep(payload, send):
     pattern of handle_daily_feedback_sweep; card markup mirrors /assist draft_nudge."""
     from server import (scan_followup_eligibility, _draft_save, _tg_post,
                         upsert_conversation_state, _nudge_post_event,
-                        DEFAULT_ADMIN_CHAT, GHOST_RECOVERY_PHRASES)
+                        DEFAULT_ADMIN_CHAT, GHOST_RECOVERY_PHRASES,
+                        _ghost_recovery_phrase)
     from reengage_quote import build_followup_card
     import time as _t
     import random as _r
@@ -6899,6 +6900,11 @@ def handle_followup_sweep(payload, send):
                 "is_proactive_nudge": True,
                 "is_lead": False, "is_payment": False,
                 "break_condition": {"hit": False},
+                # A/B variant tag -> draft_log.trigger_kind so we can measure
+                # conversion per follow-up variant later. Recomputed
+                # deterministically to match the phrase handle_draft_followup drafted.
+                "trigger_kind": _ghost_recovery_phrase(
+                    window, c.get("followup_count"), cid)[2],
             }
             try:
                 _draft_save(draft_obj)
