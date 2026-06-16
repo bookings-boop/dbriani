@@ -4713,6 +4713,22 @@ def _followup_candidate_sql():
     FOLLOWUP_CAP per silence cycle, terminal/paused-label suppression, and
     no nudge within 24h of a payment link. Column order is contractual —
     scan_followup_eligibility() parses by position."""
+    # Lever ③ re-scope (2026-06-16, flag FOLLOWUP_RESCOPE_QUALIFIED_ENABLED,
+    # default OFF = legacy byte-for-byte). ON -> positively INCLUDE only the
+    # qualified labels so the oldest-first LIMIT-80 budget reaches HOT/WARM/COLD/
+    # NEEDS_ATTENTION instead of the long-ghosted NEW/no-facts pool that
+    # _silence_window_for() discards (the live-yield-0 root cause). The IN clause
+    # subsumes terminal suppression — NEW/NULL/LOST/DISREGARDED/CONFIRMED/PAUSED*/
+    # SCAM are simply not in the include list. Ordering + 14d ceiling unchanged.
+    if os.environ.get("FOLLOWUP_RESCOPE_QUALIFIED_ENABLED", "0").strip() == "1":
+        _label_clause = (
+            "  AND cf.label IN ('HOT', 'NEEDS_ATTENTION', 'WARM', 'COLD') ")
+    else:
+        _label_clause = (
+            "  AND (cf.label IS NULL OR cf.label NOT IN ("
+            "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
+            "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
+            "       'DISREGARDED', 'LOST', 'SCAM')) ")
     return (
         # #B1-class hardening (2026-06-11): 0x1F field separator — a '|' in
         # a customer pushName used to shift fields, fail the float() parse,
@@ -4776,11 +4792,9 @@ def _followup_candidate_sql():
         "  AND (cs.last_nudge_drafted_at IS NULL "
         "       OR now() - cs.last_nudge_drafted_at > interval '48 hours') "
         "  AND COALESCE(cs.followup_count, 0) < " + str(FOLLOWUP_CAP) + " "
-        # Active-negotiation suppression — labels operator handles.
-        "  AND (cf.label IS NULL OR cf.label NOT IN ("
-        "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
-        "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
-        "       'DISREGARDED', 'LOST', 'SCAM')) "
+        # Active-negotiation suppression — labels operator handles
+        # (rescope-aware: built above, qualified-only when the flag is ON).
+        + _label_clause +
         # Active-negotiation suppression — paylink in last 24h.
         "  AND NOT EXISTS ("
         "       SELECT 1 FROM autonomous_sends a "
