@@ -2136,6 +2136,116 @@ def handle_record_message(payload, send):
 # Group: pipeline
 # ============================================================================
 
+def _pending_digest_enabled():
+    """Tier-0 /pending gate (Lever ②, 2026-06-16). Default OFF -> the endpoint is
+    DORMANT: returns enabled:false WITHOUT touching Redis, so deploying is a
+    behavioral no-op until the operator flips PENDING_DIGEST_ENABLED=1 + restart
+    (shadow-first). Read live from env so a restart flips it."""
+    return os.environ.get("PENDING_DIGEST_ENABLED", "0").strip() == "1"
+
+
+def _pending_stale_ids(selected):
+    """Ids whose lead messaged (customer OR operator) AFTER the draft was made ->
+    the card is stale (chat moved on / already answered) and must NOT be one-tap
+    sent as a cold nudge. Mirrors /draft-freshness, batched into one query.
+    Fail-OPEN: any error -> empty set (no card is wrongly hidden; the per-card
+    /draft-freshness in n8n's Send chain is the authoritative guard at send time)."""
+    from pending import _created_ms
+    stale = set()
+    try:
+        by_phone = {}
+        for d in selected:
+            ph = (d.get("customer_phone") or "").strip()
+            if ph:
+                by_phone.setdefault(ph, []).append(d)
+        if not by_phone:
+            return stale
+        in_list = ", ".join(_lit(p) for p in by_phone)
+        out, err = _psql(
+            "SELECT customer_id, "
+            "COALESCE(EXTRACT(EPOCH FROM last_customer_message_at), 0), "
+            "COALESCE(EXTRACT(EPOCH FROM last_operator_reply_at), 0) "
+            "FROM conversation_state WHERE customer_id IN (" + in_list + ")")
+        if err or not out:
+            return stale
+        last = {}
+        for line in out.strip().splitlines():
+            p = line.split("|")
+            if len(p) >= 3:
+                try:
+                    last[p[0].strip()] = max(float(p[1] or 0), float(p[2] or 0))
+                except ValueError:
+                    pass
+        for ph, drafts in by_phone.items():
+            newest = last.get(ph, 0.0)
+            if newest <= 0:
+                continue
+            for d in drafts:
+                draft_s = _created_ms(d) / 1000.0
+                if draft_s > 0 and newest > draft_s:
+                    stale.add(d.get("id"))
+    except Exception as e:  # noqa: BLE001 — fail-open
+        log("pending stale-ids err:", repr(e))
+    return stale
+
+
+def handle_pending(payload, send):
+    """POST /pending — Tier-0 approval-throughput digest (Lever ②, 2026-06-16).
+
+    READ-ONLY surfacing of the LIVE pending proactive-nudge pile so the operator
+    clears it before the 24h TTL silently expires unsent cards (the recon-found
+    leak). Reuses the EXISTING per-card send:/edit:/skip: callbacks -> n8n ->
+    /draft-freshness -> /queue claim-send (every guard intact). This endpoint
+    NEVER sends and NEVER writes: TTL-expired ghost members of drafts:active are
+    SKIPPED at read time, never SREM'd. Always 200; fail-open.
+
+    Instrumentation (the root fix the recon exposed — funnel was uninstrumented):
+    logs surfaced/fresh/stale/ghosts_expired so drafted->delivered becomes
+    measurable (carded=journal draft-followup, sent=nudge_sent, expired=ghosts)."""
+    if not _pending_digest_enabled():
+        send(200, {"ok": True, "enabled": False, "count": 0,
+                   "fresh_ids": [], "stale_ids": [], "per_card": [],
+                   "inline_keyboards": [],
+                   "telegram_text": "ℹ️ /pending is not enabled."})
+        return
+    try:
+        import pending
+        members_out, _e = _redis(["SMEMBERS", "drafts:active"])
+        ids = [x.strip() for x in (members_out or "").splitlines() if x.strip()]
+        drafts = []
+        ghosts = 0
+        for did in ids:
+            j, _ge = _redis(["GET", "draft:" + did])
+            j = (j or "").strip()
+            if not j:                 # TTL-expired body -> ghost; SKIP (no SREM)
+                ghosts += 1
+                continue
+            try:
+                drafts.append(json.loads(j))
+            except Exception:
+                ghosts += 1
+        now_ms = int(time.time() * 1000)
+        selected = pending.select_pending_nudges(drafts, now_ms)
+        stale = _pending_stale_ids(selected)
+        r = pending.render_pending(selected, stale, now_ms)
+        log("pending-digest surfaced=" + str(r["count"])
+            + " fresh=" + str(len(r["fresh_ids"]))
+            + " stale=" + str(len(r["stale_ids"]))
+            + " ghosts_expired=" + str(ghosts))
+        send(200, {"ok": True, "enabled": True,
+                   "count": r["count"], "fresh_ids": r["fresh_ids"],
+                   "stale_ids": r["stale_ids"], "per_card": r["per_card"],
+                   "inline_keyboards": r["inline_keyboards"],
+                   "telegram_text": r["telegram_text"],
+                   "ghosts_skipped": ghosts})
+    except Exception as e:  # noqa: BLE001 — fail-open, never 500
+        log("pending ERROR:", repr(e))
+        send(200, {"ok": False, "enabled": True, "degraded": True,
+                   "error": str(e), "count": 0, "fresh_ids": [],
+                   "stale_ids": [], "per_card": [], "inline_keyboards": [],
+                   "telegram_text": "⚠️ /pending failed — bridge error."})
+
+
 def handle_review(payload, send):
     """POST /review — read v_lead_summary, score, render Telegram report
     + inline keyboards. Always returns 200; fail-open.

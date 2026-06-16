@@ -115,6 +115,7 @@ from routes import (  # noqa: F401
     handle_payment_link,
     handle_pipeline_analyze,
     handle_poll_payments,
+    handle_pending,
     handle_queue,
     handle_reconcile_identities,
     handle_record_message,
@@ -5280,6 +5281,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/debounce", "/payment-link", "/feedback",
                              "/label-eval", "/conversation-state",
                              "/hourly-sweep",
+                             "/pending",
                              "/review", "/draft-followup",
                              "/info", "/assist", "/label", "/snooze",
                              "/name",
@@ -5375,6 +5377,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_dormancy_sweep(payload, self._send)
         elif self.path == "/daily-feedback-sweep":
             handle_daily_feedback_sweep(payload, self._send)
+        elif self.path == "/pending":
+            handle_pending(payload, self._send)
         elif self.path == "/review":
             handle_review(payload, self._send)
         elif self.path == "/draft-followup":
