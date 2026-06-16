@@ -334,6 +334,43 @@ GHOST_RECOVERY_PHRASES = {
 }
 GHOST_RECOVERY_WINDOWS = frozenset(GHOST_RECOVERY_PHRASES.keys())
 
+# No-oriented (Chris Voss) questions for the 2nd+ proactive nudge — a "No" answer
+# ("no, I haven't given up") safely re-opens the conversation. Rotated per
+# lead+attempt so repeat outreach never reuses a line. {service} is filled with
+# what THIS lead actually asked about (charter -> "a private yacht", etc).
+GHOST_RECOVERY_NO_ORIENTED = (
+    "Have you given up on booking {service}?",
+    "Have you decided against {service} for now?",
+    "Should I take it {service} is off the table?",
+    "Is {service} no longer something you're planning?",
+)
+
+
+def _ghost_recovery_phrase(silence_window, followup_count, cid):
+    """Pick the ghost-recovery template + its effective window label.
+
+    Flag FOLLOWUP_ATTEMPT_PHRASING_ENABLED (default OFF = legacy byte-for-byte,
+    keyed on the silence WINDOW). ON -> attempt-aware: the nudge repeated verbatim
+    (Ahmed got the identical "Just checking in..." Sun + Tue) because it keyed on
+    the window and every nudge SEND resets the silence clock
+    (last_operator_reply_at), trapping a repeat-nudged lead in 'soft_checkin'.
+    Key on ATTEMPT instead (followup_count = nudges the customer has already
+    received): 1st nudge -> soft check-in; 2nd+ -> a NO-ORIENTED question rotated
+    per lead+attempt. Pure + deterministic (no LLM, no I/O)."""
+    if os.environ.get("FOLLOWUP_ATTEMPT_PHRASING_ENABLED", "0").strip() != "1":
+        return (GHOST_RECOVERY_PHRASES.get(
+            silence_window, GHOST_RECOVERY_PHRASES["soft_checkin"]),
+            silence_window)
+    try:
+        fc = int(followup_count or 0)
+    except (TypeError, ValueError):
+        fc = 0
+    if fc <= 0:
+        return GHOST_RECOVERY_PHRASES["soft_checkin"], "soft_checkin"
+    pool = GHOST_RECOVERY_NO_ORIENTED
+    idx = (sum(ord(ch) for ch in str(cid or "")) + fc) % len(pool)
+    return pool[idx], "last_shot"
+
 
 def _draft_key(did):
     return "draft:" + str(did)
@@ -4873,6 +4910,8 @@ def scan_followup_eligibility():
             "label": label,
             "silence_hours": round(silent_hrs, 2),
             "silence_window": window,
+            # attempt-aware phrasing: nudges the customer has already received
+            "followup_count": followup_count,
         })
         if len(candidates) >= FOLLOWUP_BATCH_LIMIT:
             break

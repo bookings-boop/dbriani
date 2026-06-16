@@ -3861,15 +3861,21 @@ def handle_draft_followup(payload, send):
             # yacht" (operator 2026-06-08). Charter leads keep "a private
             # yacht"; unknown falls back to a generic "with us".
             from labels import _ghost_recovery_service
+            from server import _ghost_recovery_phrase
             service = _ghost_recovery_service((row or {}).get("yachts", ""),
                                               history)
-            phrase = GHOST_RECOVERY_PHRASES[silence_window].format(
-                service=service)
+            # ATTEMPT-AWARE (2026-06-16, flag FOLLOWUP_ATTEMPT_PHRASING_ENABLED):
+            # the nudge repeated verbatim (Ahmed Sun+Tue) because it keyed on the
+            # silence window and every nudge resets the silence clock. Key on
+            # ATTEMPT: 1st = soft check-in, 2nd+ = a rotated no-oriented question.
+            _gr_tmpl, _eff_window = _ghost_recovery_phrase(
+                silence_window, payload.get("followup_count"), cid)
+            phrase = _gr_tmpl.format(service=service)
             shrs = (f"{silence_hours:.1f}"
                     if isinstance(silence_hours, (int, float)) else "a while")
             directive = (
                 f"This is a ghost-recovery message only. The customer has "
-                f"been silent for {shrs} hours (window: {silence_window}). "
+                f"been silent for {shrs} hours (window: {_eff_window}). "
                 f"Use ONLY this exact ghost-recovery phrase (its service noun "
                 f"is already set to what THIS lead asked about) — specifically: "
                 f"\"{phrase}\". You MAY light-touch personalize the phrase "
@@ -6855,6 +6861,8 @@ def handle_followup_sweep(payload, send):
                 handle_draft_followup({
                     "customer_id": cid, "silence_window": window,
                     "silence_hours": shrs, "customer_name": name,
+                    # attempt-aware phrasing: 2nd+ nudge -> no-oriented question
+                    "followup_count": c.get("followup_count"),
                     # defer the cooldown/cap bump to AFTER a confirmed post
                     "no_state_bump": True,
                 }, _cap)
