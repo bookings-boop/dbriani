@@ -4085,6 +4085,27 @@ FOLLOWUP_BATCH_LIMIT = int(os.environ.get("FOLLOWUP_BATCH_LIMIT", "10"))
 # customer_message event. Set via env to tune without redeploy.
 FOLLOWUP_CAP = int(os.environ.get("FOLLOWUP_CAP", "2"))
 
+
+def _followup_cap_on_send():
+    """CAP-BUG retiming flag (2026-06-16). ON -> the FOLLOWUP_CAP budget is spent
+    on the operator's ACTUAL ✅ Send of a proactive nudge (event nudge_sent), not
+    when a card is POSTED to Telegram (event nudge_carded = cooldown only). This
+    un-burns leads whose posted nudge cards were never sent — the legacy bug
+    excluded them having delivered ZERO. OFF (default) preserves the legacy
+    post-time bump (nudge_drafted) byte-for-byte, so deploying with the flag off
+    is a behavioral no-op (shadow-first). Read LIVE from env so a bridge restart
+    flips it; tests monkeypatch os.environ."""
+    return os.environ.get("FOLLOWUP_CAP_ON_SEND_ENABLED", "0") == "1"
+
+
+def _nudge_post_event():
+    """Event name for the POST-time nudge bump (proactive sweep post + /assist
+    operator-directed draft). Flag ON -> 'nudge_carded' (cooldown +
+    reengage_attempts, NO cap++). OFF -> 'nudge_drafted' (legacy: cooldown +
+    reengage_attempts + cap++)."""
+    return "nudge_carded" if _followup_cap_on_send() else "nudge_drafted"
+
+
 # /review report rendering caps (Telegram 4096-char limit safe).
 # (moved to review.py — re-exported at top of file)
 
@@ -4610,6 +4631,46 @@ def upsert_conversation_state(customer_id, event):
             # Increment cap counter — bounds the proactive engine to
             # FOLLOWUP_CAP unsolicited follow-ups per silence window.
             "    followup_count = conversation_state.followup_count + 1, "
+            "    updated_at = now()"
+        )
+    elif event == "nudge_carded":
+        # CAP-BUG retiming (2026-06-16): a nudge card was POSTED to Telegram but
+        # the operator has NOT tapped ✅ Send yet. Bump the 48h cooldown (so the
+        # lead isn't re-carded immediately) and the reengage_attempts tracker,
+        # but DELIBERATELY NOT followup_count — the FOLLOWUP_CAP budget is spent
+        # only on an ACTUAL send (nudge_sent). Identical to nudge_drafted MINUS
+        # the cap increment, so an unsent card never permanently excludes a lead.
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_nudge_drafted_at, followup_count, "
+            "updated_at) "
+            f"VALUES ('{cid}', now(), 0, now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET last_nudge_drafted_at = now(), "
+            "    reengage_attempts = conversation_state.reengage_attempts + "
+            "      CASE WHEN conversation_state.last_customer_message_at IS NOT NULL "
+            "            AND conversation_state.last_customer_message_at "
+            "                < now() - interval '24 hours' "
+            "           THEN 1 ELSE 0 END, "
+            "    updated_at = now()"
+        )
+    elif event == "nudge_sent":
+        # CAP-BUG retiming (2026-06-16): the operator tapped ✅ Send on a PROACTIVE
+        # nudge — NOW spend exactly one unit of the FOLLOWUP_CAP budget. Touches
+        # ONLY followup_count; the cooldown was already set at nudge_carded (post
+        # time). Scoped to genuine proactive nudges at the call site so owe-reply
+        # / regular replies (also is_followup) never consume the proactive budget.
+        # The INSERT branch (row absent) is unreachable for a genuine send — a
+        # nudge can't be sent without first being carded onto an existing
+        # candidate row — but defensively sets last_nudge_drafted_at too, so even
+        # that path can't leave a fresh row with a cap but no 48h cooldown. The
+        # ON CONFLICT (normal) path touches ONLY followup_count.
+        sql = (
+            "INSERT INTO conversation_state "
+            "(customer_id, last_nudge_drafted_at, followup_count, updated_at) "
+            f"VALUES ('{cid}', now(), 1, now()) "
+            "ON CONFLICT (customer_id) DO UPDATE "
+            "SET followup_count = conversation_state.followup_count + 1, "
             "    updated_at = now()"
         )
     else:

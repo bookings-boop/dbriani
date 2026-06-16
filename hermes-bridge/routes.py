@@ -833,6 +833,31 @@ def handle_queue(payload, send):
                         (_sd or {}).get("customer_phone"), "operator_reply")
                 except Exception:
                     pass
+            # CAP-BUG retiming (2026-06-16): a PROACTIVE nudge the operator
+            # actually ✅ Sent now spends one unit of the FOLLOWUP_CAP budget —
+            # the legacy bug burned it at POST, so posted-but-never-sent cards
+            # permanently excluded leads that delivered ZERO. Conditions:
+            #   - flag on (FOLLOWUP_CAP_ON_SEND_ENABLED),
+            #   - the draft is a genuine proactive nudge (is_proactive_nudge —
+            #     NOT owe-reply, which is also is_followup),
+            #   - _recorded: a REAL outbound was captured (same gate as
+            #     operator_reply above — never spend the cap on card chrome).
+            # Idempotent per draft via a Redis NX marker so an n8n retry after the
+            # send-claim TTL expires can't double-spend the budget (followup_count
+            # is a non-idempotent increment). Fail-safe — never blocks the send.
+            if _recorded and (_sd or {}).get("is_proactive_nudge"):
+                try:
+                    from server import (_followup_cap_on_send,
+                                        upsert_conversation_state)
+                    if _followup_cap_on_send():
+                        _nsk = f"nudge_sent:{did}"
+                        _nseen, _ = _redis(
+                            ["SET", _nsk, "1", "NX", "EX", "604800"])
+                        if _nseen and str(_nseen).strip().upper() == "OK":
+                            upsert_conversation_state(
+                                (_sd or {}).get("customer_phone"), "nudge_sent")
+                except Exception:
+                    pass
             # Mark this phone so a sibling card's claim-send is blocked
             # within the same window. NX: first WON claim wins; the
             # phone key expires with the draft claim TTL.
@@ -2001,10 +2026,12 @@ def handle_conversation_state(payload, send):
         send(200, {"ok": False, "error": "customer_id required"})
         return
     if event not in ("customer_message", "operator_reply",
-                     "nudge_drafted", "draft_posted"):
+                     "nudge_drafted", "nudge_carded", "nudge_sent",
+                     "draft_posted"):
         send(200, {"ok": False,
                          "error": "event must be customer_message|"
                                   "operator_reply|nudge_drafted|"
+                                  "nudge_carded|nudge_sent|"
                                   "draft_posted"})
         return
     try:
@@ -2945,6 +2972,9 @@ def handle_assist(payload, send):
             "telegram_chat_id": 5532831477,
             "telegram_message_id": None,
             "is_followup": True,
+            # CAP-BUG retiming (2026-06-16): an operator-directed nudge is a
+            # genuine proactive follow-up — spend the cap on its actual send.
+            "is_proactive_nudge": True,
             "is_lead": False,
             "is_payment": False,
             "break_condition": {"hit": False},
@@ -3639,6 +3669,7 @@ def handle_draft_followup(payload, send):
         run_hermes,
         sanitize_draft_messages,
         upsert_conversation_state,
+        _nudge_post_event,
         waha_fetch_history,
     )
     cid = (payload.get("customer_id") or "").strip()
@@ -4043,11 +4074,14 @@ def handle_draft_followup(payload, send):
         # CAP-BURN FIX: honor no_state_bump — handle_followup_sweep defers the
         # bump until AFTER a confirmed post, so bumping here too double-counts
         # (Milena hit followup_count=3 > cap 2).
+        # CAP-BUG retiming (2026-06-16): _nudge_post_event() -> 'nudge_carded'
+        # (cooldown only, flag ON) or 'nudge_drafted' (legacy cooldown+cap, OFF).
+        # The cap++ is deferred to the operator's actual ✅ Send (nudge_sent).
         if _should_bump_nudge(payload):
             try:
-                upsert_conversation_state(cid, "nudge_drafted")
+                upsert_conversation_state(cid, _nudge_post_event())
             except Exception as _e:
-                log("draft_followup nudge_drafted err:", repr(_e))
+                log("draft_followup nudge bump err:", repr(_e))
         log(f"draft-followup cid={cid!r} label={label} "
             f"waha_used={waha_used} waha_count={waha_count} "
             f"draft_len={len(draft_text)} elapsed={elapsed}s")
@@ -6625,7 +6659,7 @@ def handle_followup_sweep(payload, send):
     skipped_excluded, skipped_error, count, candidates}. Mirrors the self-posting
     pattern of handle_daily_feedback_sweep; card markup mirrors /assist draft_nudge."""
     from server import (scan_followup_eligibility, _draft_save, _tg_post,
-                        upsert_conversation_state,
+                        upsert_conversation_state, _nudge_post_event,
                         DEFAULT_ADMIN_CHAT, GHOST_RECOVERY_PHRASES)
     from reengage_quote import build_followup_card
     import time as _t
@@ -6736,6 +6770,10 @@ def handle_followup_sweep(payload, send):
                 "notes": "Proactive ghost-recovery follow-up (auto-sweep)",
                 "status": "pending", "telegram_chat_id": DEFAULT_ADMIN_CHAT,
                 "telegram_message_id": None, "is_followup": True,
+                # CAP-BUG retiming (2026-06-16): tag genuine proactive nudges so
+                # the send-side cap bump (nudge_sent) fires for THESE — and never
+                # for owe-reply / regular replies, which are also is_followup.
+                "is_proactive_nudge": True,
                 "is_lead": False, "is_payment": False,
                 "break_condition": {"hit": False},
             }
@@ -6792,11 +6830,16 @@ def handle_followup_sweep(payload, send):
                     pass
                 skipped_error += 1
                 continue
-            # Confirmed posted → NOW commit the cooldown/cap bump (deferred from
+            # Confirmed posted → NOW commit the cooldown bump (deferred from
             # handle_draft_followup via no_state_bump) so a failed post never
             # burns the lead's follow-up budget.
+            # CAP-BUG retiming (2026-06-16): with the flag ON this posts
+            # 'nudge_carded' (cooldown only) — the cap is spent only when the
+            # operator actually taps ✅ Send (claim-send -> nudge_sent), so a
+            # posted-but-never-sent card no longer permanently excludes the lead.
+            # Flag OFF -> 'nudge_drafted' (legacy cooldown+cap), unchanged.
             try:
-                upsert_conversation_state(cid, "nudge_drafted")
+                upsert_conversation_state(cid, _nudge_post_event())
             except Exception as _e:  # noqa: BLE001
                 log("followup-sweep post-bump err:", cid, repr(_e))
             posted += 1
