@@ -2214,16 +2214,21 @@ def handle_pending(payload, send):
         ids = [x.strip() for x in (members_out or "").splitlines() if x.strip()]
         drafts = []
         ghosts = 0
-        for did in ids:
-            j, _ge = _redis(["GET", "draft:" + did])
-            j = (j or "").strip()
-            if not j:                 # TTL-expired body -> ghost; SKIP (no SREM)
-                ghosts += 1
-                continue
-            try:
-                drafts.append(json.loads(j))
-            except Exception:
-                ghosts += 1
+        if ids:
+            # ONE batched MGET — each _redis call is a ~50-150ms docker-exec, so
+            # N per-id GETs on a ghost-heavy active set (136 members, mostly
+            # 24h-expired) was ~15s. MGET makes it 2 round-trips total.
+            vals_out, _me = _redis(["MGET"] + ["draft:" + d for d in ids])
+            vals = (vals_out or "").splitlines()
+            for i, did in enumerate(ids):
+                j = vals[i].strip() if i < len(vals) else ""
+                if not j:             # TTL-expired body -> ghost; SKIP (no SREM)
+                    ghosts += 1
+                    continue
+                try:
+                    drafts.append(json.loads(j))
+                except Exception:
+                    ghosts += 1
         now_ms = int(time.time() * 1000)
         selected = pending.select_pending_nudges(drafts, now_ms)
         stale = _pending_stale_ids(selected)

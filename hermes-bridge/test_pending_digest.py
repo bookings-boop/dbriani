@@ -107,6 +107,12 @@ class _RedisStub:
         cmd = str(args[0]).upper()
         if cmd == "SMEMBERS":
             return ("\n".join(self.members), None)
+        if cmd == "MGET":
+            vals = []
+            for key in args[1:]:
+                did = str(key).split("draft:", 1)[-1]
+                vals.append(self.bodies.get(did, ""))   # "" = nil / ghost
+            return ("\n".join(vals), None)
         if cmd == "GET":
             did = str(args[1]).split("draft:", 1)[-1]
             return (self.bodies.get(did, ""), None)
@@ -173,6 +179,45 @@ def test_handle_pending_marks_stale_no_send():
     assert b["fresh_ids"] == []
     cbs = [bt.get("callback_data", "") for bt in b["per_card"][0]["buttons"]]
     assert not any(c.startswith("send:") for c in cbs), cbs
+
+
+def test_handle_pending_batches_redis_one_mget_not_n_gets():
+    # perf: N drafts:active members (mostly ghosts) must be ONE MGET, not N GETs
+    # — each _redis call is a separate ~100ms docker-exec.
+    os.environ["PENDING_DIGEST_ENABLED"] = "1"
+    stub = _RedisStub(["1000_a", "2000_b"],
+                      {"1000_a": _nudge_json("1000_a"),
+                       "2000_b": _nudge_json("2000_b")})
+    orig_r, orig_s = routes._redis, routes._pending_stale_ids
+    routes._redis = stub
+    routes._pending_stale_ids = lambda selected: set()
+    try:
+        routes.handle_pending({}, lambda c, b: None)
+    finally:
+        routes._redis, routes._pending_stale_ids = orig_r, orig_s
+        os.environ.pop("PENDING_DIGEST_ENABLED", None)
+    cmds = [str(c[0]).upper() for c in stub.calls]
+    assert cmds.count("MGET") == 1, cmds
+    assert cmds.count("GET") == 0, (
+        "must batch draft bodies with one MGET, not per-id GET; got " + repr(cmds))
+
+
+def test_handle_pending_empty_active_set_no_mget():
+    # MGET requires >=1 key — an empty active set must not issue a bare MGET
+    os.environ["PENDING_DIGEST_ENABLED"] = "1"
+    stub = _RedisStub([], {})
+    orig_r, orig_s = routes._redis, routes._pending_stale_ids
+    routes._redis = stub
+    routes._pending_stale_ids = lambda selected: set()
+    try:
+        out = {}
+        routes.handle_pending({}, lambda c, b: out.update(body=b))
+    finally:
+        routes._redis, routes._pending_stale_ids = orig_r, orig_s
+        os.environ.pop("PENDING_DIGEST_ENABLED", None)
+    cmds = [str(c[0]).upper() for c in stub.calls]
+    assert "MGET" not in cmds, cmds
+    assert out["body"]["count"] == 0
 
 
 if __name__ == "__main__":
