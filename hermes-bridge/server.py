@@ -90,6 +90,7 @@ from routes import (  # noqa: F401
     handle_customer_facts,
     handle_daily_feedback_sweep,
     handle_debounce,
+    handle_closeout_sweep,
     handle_dormancy_sweep,
     handle_draft,
     handle_draft_followup,
@@ -356,6 +357,13 @@ GHOST_RECOVERY_SOFT = (
     "more suitable options for you based on your requirements. I look forward to "
     "your feedback. Thank you",
 )
+
+# Touch-3 CLOSE-OUT (operator 2026-06-16) — the give-up card's message. Posted
+# approval-first when a lead got both nudges, stayed silent, and aged out; on the
+# operator's ✅ Send the lead is marked DISREGARDED (NEVER auto-sent).
+GHOST_RECOVERY_CLOSEOUT = (
+    "It seems you have given up on this — we will close your request. "
+    "Please stay in touch for future bookings :)")
 
 
 def _ghost_recovery_phrase(silence_window, followup_count, cid):
@@ -4139,6 +4147,12 @@ FOLLOWUP_BATCH_LIMIT = int(os.environ.get("FOLLOWUP_BATCH_LIMIT", "10"))
 # customer as exhausted and skips them. Resets to 0 on the next
 # customer_message event. Set via env to tune without redeploy.
 FOLLOWUP_CAP = int(os.environ.get("FOLLOWUP_CAP", "2"))
+CLOSEOUT_AFTER_DAYS = int(os.environ.get("CLOSEOUT_AFTER_DAYS", "7"))
+
+
+def _closeout_enabled():
+    """Touch-3 give-up close-out sweep (2026-06-16). Default OFF; approval-first."""
+    return os.environ.get("CLOSEOUT_SWEEP_ENABLED", "0").strip() == "1"
 
 
 def _followup_cap_on_send():
@@ -4938,6 +4952,77 @@ def scan_followup_eligibility():
 # (moved to review.py — re-exported at top of file)
 
 
+def _closeout_candidate_sql():
+    """Build the SELECT for give-up CLOSE-OUT candidates (pure). A lead that got
+    both nudges (followup_count >= FOLLOWUP_CAP), still ghosted us (we replied
+    last), aged past CLOSEOUT_AFTER_DAYS since the last nudge, canonical, and not
+    already terminal. Oldest-ghosted first; bounded."""
+    return (
+        "SELECT concat_ws(E'\\x1f', cs.customer_id, "
+        "COALESCE(cf.name, ''), COALESCE(cf.label, ''), "
+        "COALESCE((EXTRACT(EPOCH FROM (now()-cs.last_operator_reply_at))/3600)"
+        "::text, ''), "
+        "COALESCE(cs.followup_count, 0)::text) "
+        "FROM conversation_state cs "
+        "LEFT JOIN customer_facts cf USING (customer_id) "
+        "WHERE cs.last_operator_reply_at IS NOT NULL "
+        "  AND (cs.last_customer_message_at IS NULL "
+        "       OR cs.last_operator_reply_at > cs.last_customer_message_at) "
+        "  AND cf.merged_into IS NULL "
+        "  AND COALESCE(cs.followup_count, 0) >= " + str(FOLLOWUP_CAP) + " "
+        "  AND cs.last_nudge_drafted_at IS NOT NULL "
+        "  AND cs.last_nudge_drafted_at < now() - interval '"
+        + str(CLOSEOUT_AFTER_DAYS) + " days' "
+        "  AND (cf.label IS NULL OR cf.label NOT IN ("
+        "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
+        "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
+        "       'DISREGARDED', 'LOST', 'SCAM')) "
+        "ORDER BY cs.last_operator_reply_at ASC "
+        "LIMIT 40")
+
+
+def scan_closeout_eligibility():
+    """Give-up close-out candidates: {customer_id, name, label, silence_hours,
+    followup_count}. SQL filters (cap-reached, ghosted, aged, not-terminal);
+    Python skips leads already close-out-carded (Redis marker). Empty when the
+    flag is OFF. Bounded by FOLLOWUP_BATCH_LIMIT."""
+    if not _closeout_enabled():
+        return []
+    out, err = _psql(_closeout_candidate_sql(), timeout=15)
+    if err:
+        log("closeout_scan err:", err)
+        return []
+    cands = []
+    for line in (out or "").strip("\n").splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 5:
+            continue
+        cid = parts[0].strip()
+        if not cid:
+            continue
+        seen, _ = _redis(["GET", "closeout:posted:" + cid])
+        if (seen or "").strip():
+            continue
+        try:
+            silent_hrs = float(parts[3].strip())
+        except (ValueError, IndexError):
+            silent_hrs = 0.0
+        try:
+            fc = int(parts[4].strip() or "0")
+        except (ValueError, IndexError):
+            fc = 0
+        cands.append({
+            "customer_id": cid,
+            "name": parts[1].strip(),
+            "label": parts[2].strip() or "NEW",
+            "silence_hours": round(silent_hrs, 2),
+            "followup_count": fc,
+        })
+        if len(cands) >= FOLLOWUP_BATCH_LIMIT:
+            break
+    return cands
+
+
 def _seconds_since(ts_str):
     """Parse 'YYYY-MM-DD HH:MI:SS+TZ' to seconds-ago. None if blank/error."""
     s = (ts_str or "").strip()
@@ -5366,6 +5451,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/pipeline-analyze",
                              "/record-message",
                              "/dormancy-sweep", "/daily-feedback-sweep",
+                             "/closeout-sweep",
                              "/send-file", "/list-files",
                              "/edit-capture", "/edit-feedback", "/edit-rule",
                              "/nomod-webhook"):
@@ -5473,6 +5559,8 @@ class Handler(BaseHTTPRequestHandler):
             handle_followup_action(payload, self._send)
         elif self.path == "/followup-sweep":
             handle_followup_sweep(payload, self._send)
+        elif self.path == "/closeout-sweep":
+            handle_closeout_sweep(payload, self._send)
         elif self.path == "/owe-reply-sweep":
             handle_owe_reply_sweep(payload, self._send)
         elif self.path == "/refresh-facts":

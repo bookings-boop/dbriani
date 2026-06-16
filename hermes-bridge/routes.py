@@ -858,6 +858,23 @@ def handle_queue(payload, send):
                                 (_sd or {}).get("customer_phone"), "nudge_sent")
                 except Exception:
                     pass
+            # CLOSE-OUT (touch 3, 2026-06-16): the operator's ✅ Send of a give-up
+            # close-out card marks the lead DISREGARDED so it's never re-engaged.
+            # Idempotent (Redis NX) + fail-safe; scoped to is_closeout only.
+            if _recorded and (_sd or {}).get("is_closeout"):
+                try:
+                    from server import apply_label_transition
+                    _cdone, _ = _redis(
+                        ["SET", f"closeout_done:{did}", "1", "NX", "EX", "604800"])
+                    if _cdone and str(_cdone).strip().upper() == "OK":
+                        apply_label_transition(
+                            (_sd or {}).get("customer_phone"),
+                            (_sd or {}).get("closeout_from_label"),
+                            "DISREGARDED", "closeout_sent",
+                            "give-up close-out message sent", 0,
+                            created_by="closeout")
+                except Exception:
+                    pass
             # Mark this phone so a sibling card's claim-send is blocked
             # within the same window. NX: first WON claim wins; the
             # phone key expires with the draft claim TTL.
@@ -6761,6 +6778,125 @@ def handle_draft_gated(payload, send):
                "attempts": attempts, "capped": best["score"] < threshold,
                "original_score": original_score,
                "override": bool(override)})
+
+
+def handle_closeout_sweep(payload, send):
+    """POST /closeout-sweep — TOUCH-3 give-up close-out (2026-06-16).
+
+    Scans leads that got both nudges, stayed silent, and aged out
+    (server.scan_closeout_eligibility) and SELF-POSTS an APPROVAL-FIRST close-out
+    card. APPROVAL-FIRST: nothing reaches the customer until the operator taps ✅
+    Send; on send the lead is marked DISREGARDED (the claim-send is_closeout
+    hook). Gated by CLOSEOUT_SWEEP_ENABLED (default off); dormant otherwise.
+    payload {dry_run?: bool, limit?: int}. Always 200; fail-open."""
+    from server import (scan_closeout_eligibility, _draft_save, _tg_post,
+                        DEFAULT_ADMIN_CHAT, GHOST_RECOVERY_CLOSEOUT)
+    from reengage_quote import build_followup_card
+    import time as _t
+    import random as _r
+    import string as _s
+    try:
+        from waha import phone_for_cid as _phone_for_cid
+    except Exception:  # noqa: BLE001
+        _phone_for_cid = None
+    dry = bool(payload.get("dry_run"))
+    try:
+        limit = int(payload.get("limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if not dry:
+        _lk, _ = _redis(["SET", "lock:closeout_sweep", "1", "NX", "EX", "900"])
+        if (_lk or "").strip() != "OK":
+            send(200, {"ok": True, "skipped": True,
+                       "skipped_reason": "previous_sweep_running",
+                       "posted": 0, "candidates": []})
+            return
+    posted = skipped_error = 0
+    report = []
+    try:
+        try:
+            cands = scan_closeout_eligibility()
+        except Exception as e:  # noqa: BLE001
+            log("closeout-sweep scan err:", repr(e))
+            send(200, {"ok": False, "error": "scan failed",
+                       "posted": 0, "candidates": []})
+            return
+        if limit > 0:
+            cands = cands[:limit]
+        for c in cands:
+            cid = (c.get("customer_id") or "").strip()
+            if not cid:
+                continue
+            name = c.get("name") or ""
+            label = c.get("label") or ""
+            shrs = c.get("silence_hours")
+            if dry:
+                report.append({"customer_id": cid, "name": name,
+                               "label": label, "silence_hours": shrs,
+                               "followup_count": c.get("followup_count"),
+                               "message": GHOST_RECOVERY_CLOSEOUT})
+                continue
+            draft_id = (str(int(_t.time() * 1000)) + "_"
+                        + "".join(_r.choices(_s.ascii_lowercase + _s.digits,
+                                             k=5)))
+            draft_obj = {
+                "id": draft_id, "customer_phone": cid, "customer_name": name,
+                "customer_message": "", "conversation_history": "",
+                "messages": [GHOST_RECOVERY_CLOSEOUT],
+                "draft_text": GHOST_RECOVERY_CLOSEOUT, "messages_sent_count": 0,
+                "notes": "Give-up close-out (auto-sweep)",
+                "status": "pending", "telegram_chat_id": DEFAULT_ADMIN_CHAT,
+                "telegram_message_id": None, "is_followup": True,
+                # NOT a nudge (cap already reached) -> never spends the nudge cap.
+                "is_proactive_nudge": False, "is_closeout": True,
+                # stashed so the claim-send DISREGARD hook needs no lookup.
+                "closeout_from_label": label,
+                "trigger_kind": "reengage:closeout",
+                "is_lead": False, "is_payment": False,
+                "break_condition": {"hit": False},
+            }
+            try:
+                _draft_save(draft_obj)
+            except Exception as e:  # noqa: BLE001
+                log("closeout-sweep _draft_save err:", cid, repr(e))
+                skipped_error += 1
+                continue
+            phone = ""
+            if _phone_for_cid is not None:
+                try:
+                    phone = _phone_for_cid(cid) or ""
+                except Exception:  # noqa: BLE001
+                    phone = ""
+            card = build_followup_card(
+                "👋 CLOSE-OUT — confirm before sending", name, cid, label, shrs,
+                "", GHOST_RECOVERY_CLOSEOUT, draft_id, phone=phone)
+            _resp, _terr = _tg_post("sendMessage", {
+                "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                "parse_mode": "Markdown", "reply_markup": card["reply_markup"]})
+            if _terr:
+                _resp, _terr = _tg_post("sendMessage", {
+                    "chat_id": DEFAULT_ADMIN_CHAT, "text": card["text"],
+                    "reply_markup": card["reply_markup"]})
+            if _terr:
+                log("closeout-sweep tg err:", cid, _terr)
+                skipped_error += 1
+                continue
+            # idempotency: don't re-card this lead (TTL > the give-up window).
+            try:
+                _redis(["SET", "closeout:posted:" + cid, draft_id,
+                        "EX", str(14 * 86400)])
+            except Exception:  # noqa: BLE001
+                pass
+            posted += 1
+        send(200, {"ok": True, "dry_run": dry, "posted": posted,
+                   "skipped_error": skipped_error, "count": len(cands),
+                   "candidates": report})
+    finally:
+        if not dry:
+            try:
+                _redis(["DEL", "lock:closeout_sweep"])
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def handle_followup_sweep(payload, send):
