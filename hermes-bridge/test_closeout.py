@@ -41,8 +41,10 @@ def test_closeout_sql_gates():
     assert "last_operator_reply_at" in sql
     # aged past the give-up window since the last nudge
     assert "last_nudge_drafted_at" in sql
-    # never re-close a terminal lead
-    assert "DISREGARDED" in sql and "LOST" in sql and "CONFIRMED" in sql
+    # COLD-only (operator 2026-06-17): never close-out HOT/WARM (live deals) or
+    # NEW/unanalyzed — only genuinely cold/dead leads.
+    assert "cf.label = 'COLD'" in sql
+    assert "'HOT'" not in sql and "'WARM'" not in sql
     # canonical identities only
     assert "merged_into IS NULL" in sql
 

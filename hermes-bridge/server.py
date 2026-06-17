@@ -4973,10 +4973,10 @@ def _closeout_candidate_sql():
         "  AND cs.last_nudge_drafted_at IS NOT NULL "
         "  AND cs.last_nudge_drafted_at < now() - interval '"
         + str(CLOSEOUT_AFTER_DAYS) + " days' "
-        "  AND (cf.label IS NULL OR cf.label NOT IN ("
-        "       'WAITING_FOR_PAYMENT', 'CONFIRMED', "
-        "       'PAUSED_SPAM', 'PAUSED_B2B', 'PAUSED_PERSONAL', "
-        "       'DISREGARDED', 'LOST', 'SCAM')) "
+        # COLD-only (operator 2026-06-17): close-out is for genuinely cold/dead
+        # leads — NEVER HOT/WARM (often live deals being re-engaged by hand) or
+        # NEW/unanalyzed. Terminal labels are excluded for free (not 'COLD').
+        "  AND cf.label = 'COLD' "
         "ORDER BY cs.last_operator_reply_at ASC "
         "LIMIT 40")
 
