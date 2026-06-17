@@ -3899,6 +3899,35 @@ def handle_draft_followup(payload, send):
             # watersports/wakeboarding lead is never nudged about "a private
             # yacht" (operator 2026-06-08). Charter leads keep "a private
             # yacht"; unknown falls back to a generic "with us".
+            # ── PAST-DATE SUPPRESS (FOLLOWUP_PASTDATE_GUARD_ENABLED, incident
+            # 2026-06-17). The proactive ghost-recovery sweep targets on SILENCE
+            # alone and never checked whether the discussed charter date already
+            # passed, so a stale date got echoed into a "lock it in" nudge
+            # (Nassr: "…Satoshi for Jun 14… lock it in", 3 days past). The
+            # date_passed re-engage directive lives only in the else-branch
+            # (unreachable once silence_window is set), and prompt directives are
+            # ADVISORY — so the ONLY robust stop is a DETERMINISTIC guard here:
+            # if the booking date is in the past, post NO proactive card. A
+            # passed-date lead belongs to the analyzer date_passed -> dormancy/
+            # re-engage path, not the silence sweep. Mirrors the exclusion-guard
+            # skip protocol so every caller (sweep skipped_excluded counter,
+            # nudge button's body.get("excluded")) skips save+post. Default OFF
+            # = byte-for-byte legacy.
+            if os.environ.get(
+                    "FOLLOWUP_PASTDATE_GUARD_ENABLED", "0").strip() == "1":
+                from server import _is_past_booking_date
+                if _is_past_booking_date((row or {}).get("dates") or ""):
+                    log(f"/draft-followup SUPPRESS proactive nudge -> {cid} "
+                        f"(past booking date: "
+                        f"{(row or {}).get('dates', '')!r})")
+                    send(200, {"ok": False, "excluded": True,
+                               "category": "past_date", "customer_id": cid,
+                               "telegram_text": (
+                                   "🚫 Skipped — the discussed charter date has "
+                                   "already passed; proactive nudge suppressed "
+                                   "(passed-date re-engage is handled "
+                                   "separately).")})
+                    return
             from labels import _ghost_recovery_service
             from server import _ghost_recovery_phrase
             service = _ghost_recovery_service((row or {}).get("yachts", ""),
@@ -4294,6 +4323,11 @@ def handle_draft_followup(payload, send):
         send(200, {
             "ok": True, "customer_id": cid, "label": label,
             "draft_text": draft_text,
+            # Charter date surfaced so the /pending card can show 📅date / ⛔PAST
+            # (incident 2026-06-17). booking_date_abs is the resolved YYYY-MM-DD;
+            # `dates` is the verbatim free-text fallback.
+            "dates": (row or {}).get("dates", ""),
+            "booking_date_abs": (row or {}).get("booking_date_abs", ""),
             "notes_for_zayn": notes_for_zayn,
             "customer_name": name,
             "quality_badge": quality_badge,
@@ -7078,6 +7112,9 @@ def handle_followup_sweep(payload, send):
                 "customer_message": "", "conversation_history": "",
                 "messages": [draft_text], "draft_text": draft_text,
                 "messages_sent_count": 0,
+                # Charter date for the /pending card badge (incident 2026-06-17).
+                "booking_date_abs": body.get("booking_date_abs", ""),
+                "dates": body.get("dates", ""),
                 "notes": "Proactive ghost-recovery follow-up (auto-sweep)",
                 "status": "pending", "telegram_chat_id": DEFAULT_ADMIN_CHAT,
                 "telegram_message_id": None, "is_followup": True,
