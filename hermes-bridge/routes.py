@@ -5050,7 +5050,22 @@ def handle_lead_analyze_disregard(payload, send):
         # booking being closed — so it closes in ONE tap instead of asking
         # Hermes for permission (which left COLD leads un-closed, 2026-06-02).
         # Active HOT/WARM/NEW leads still get the Hermes safety analysis below.
-        if cur_label in ("COLD", "CONFIRMED"):
+        _one_tap_terminal = ("COLD", "CONFIRMED")
+        # Bug 1 (2026-06-17): a LOST lead is already terminal too, but a plain
+        # 🛑 Disregard on it fell through to the Hermes path below, which
+        # re-derived LOST from the "customer never replied" reasoning
+        # (analysis_guard.reclassify_close_label → labels._LOST_GHOST_RE → LOST,
+        # never DISREGARDED). Net: a LOST→LOST no-op — the 💔 LOST card re-rendered
+        # on every /review and the operator pressed Disregard 9× on one lead
+        # (Digital Fivver), each press burning a live Hermes call, the card never
+        # leaving. When enabled, treat LOST like the other terminal labels: one
+        # tap → force path → LOST→DISREGARDED (hidden), idempotent via the
+        # resurrection guard above. Reversible by the operator via the card's own
+        # `/label X WARM`. SCAM is deliberately excluded (keep its fraud-audit
+        # rank). Flag OFF → tuple unchanged → byte-identical to prior behavior.
+        if _envflag("DISREGARD_TERMINAL_LOST_ONE_TAP_ENABLED", "0"):
+            _one_tap_terminal = ("COLD", "CONFIRMED", "LOST")
+        if cur_label in _one_tap_terminal:
             force_close = True
 
         # F2 (2026-06-12): second-press escalation — the OPERATOR owns the
