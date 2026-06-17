@@ -106,6 +106,20 @@ REVIEW_POSTPAY_OVERRIDE_ENABLED = (
 # (pre-migration / not yet re-analyzed) falls back to the legacy heuristic. Dormant.
 REVIEW_UNRELIABLE_FROM_STORE_ENABLED = (
     os.environ.get("REVIEW_UNRELIABLE_FROM_STORE_ENABLED", "0").strip() == "1")
+# Bug 2 (2026-06-17): a NULL stored analysis_unreliable means the lead was never
+# written by the pipeline-analyze path (e.g. only ever touched via /disregard,
+# which historically didn't write the column) — NOT evidence of a starved
+# analysis. The NULL fallback below recomputes via the broad legacy regex, which
+# re-introduces the exact false positive the stored prose-free verdict was built
+# to kill (it matches behaviour prose like 'never replied'/'first contact' and
+# cried wolf on 14 healthy/dead-but-correct leads, incl. Wijdane). When on, treat
+# NULL as RELIABLE instead. Pairs with DISREGARD_WRITES_UNRELIABLE_ENABLED, which
+# populates the column going forward so re-analysis can clear a stale TRUE. NOTE:
+# _analysis_unreliable_for_render also gates the H8 score-0 routing reset, so this
+# also stops a score-0 NULL lead from being lifted out of the buried tier — fine
+# for these terminal /disregard-closed leads. Dormant.
+REVIEW_UNRELIABLE_NULL_IS_RELIABLE_ENABLED = (
+    os.environ.get("REVIEW_UNRELIABLE_NULL_IS_RELIABLE_ENABLED", "0").strip() == "1")
 
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
@@ -543,6 +557,11 @@ def _analysis_unreliable_for_render(row):
         stored = row.get("analysis_unreliable")
         if stored is not None:
             return bool(stored)
+        # Bug 2 (2026-06-17): NULL = never written by pipeline-analyze, NOT
+        # starved. Don't fall back to the broad legacy regex (it false-positives
+        # on 'never replied'/'first contact' prose). Treat NULL as reliable.
+        if REVIEW_UNRELIABLE_NULL_IS_RELIABLE_ENABLED:
+            return False
     return is_analysis_unreliable(
         row.get("message_count"), 9999, row.get("importance_reasoning"))
 

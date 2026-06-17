@@ -5174,11 +5174,25 @@ def handle_lead_analyze_disregard(payload, send):
 
         # Persist analysis snapshot regardless of verdict (drives future
         # /info display and avoids re-spending Hermes on same chat).
+        # Bug 2 (2026-06-17): ALSO recompute + store analysis_unreliable here so a
+        # /disregard re-analysis can CLEAR a stale TRUE. The column was only ever
+        # written by the pipeline-analyze path; a lead analyzed solely via
+        # /disregard kept a frozen verdict (…7506 read "history incomplete"
+        # forever though re-analysis had read the real chat). Mirrors the pipeline
+        # write — analysis_unreliable_verdict on the REAL fetched-history length
+        # (`history`, in scope above). Flag-gated; OFF → _unrel_set is empty → the
+        # snapshot SQL is byte-identical to before.
+        _unrel_set = ""
+        if _envflag("DISREGARD_WRITES_UNRELIABLE_ENABLED", "0"):
+            from analysis_guard import analysis_unreliable_verdict
+            _unrel = analysis_unreliable_verdict(mc, len(history or ""), reasoning)
+            _unrel_set = f"analysis_unreliable = {'true' if _unrel else 'false'}, "
         upd = (
             "UPDATE customer_facts SET "
             f"disregard_verdict = {_lit(verdict)}, "
             f"disregard_reasoning = {_lit(reasoning)}, "
             "disregard_analyzed_at = now(), "
+            f"{_unrel_set}"
             f"importance_score = {int(score)}, "
             f"importance_reasoning = {_lit(reasoning)}, "
             f"suggested_action = {_lit(suggested)}, "
