@@ -1224,6 +1224,21 @@ def handle_payment_link(payload, send):
         ccid = (canonicalize_cid(cid) or cid).strip()
     except Exception:
         ccid = cid
+    # customer-facing booking summary from cached facts (read-only,
+    # fail-open) for the WhatsApp paylink detail line: yacht/date/time/pax.
+    booking_summary = ""
+    try:
+        from server import get_customer_facts
+        _bf = get_customer_facts(cid) or get_customer_facts(ccid) or {}
+        _bp = [
+            (_bf.get("yachts") or "").split(",")[0].strip(),
+            (_bf.get("dates") or "").strip(),
+            (_bf.get("booking_time") or "").strip(),
+            (_bf.get("party_size") or "").strip(),
+        ]
+        booking_summary = " · ".join([x for x in _bp if x])
+    except Exception as _be:
+        log("paylink booking_summary err (fail-open):", repr(_be))
     dedup_key = "paylink:mint:%s:%.2f" % (ccid, amount)
     try:
         cached, _ = _redis(["GET", dedup_key])
@@ -1235,7 +1250,7 @@ def handle_payment_link(payload, send):
                 % (cid, amount, prior.get("link_id")))
             send(200, {"ok": True, "link_url": prior.get("link_url"),
                              "link_id": prior.get("link_id"),
-                             "amount": amount, "deduped": True})
+                             "amount": amount, "deduped": True, "booking_summary": booking_summary})
             return
     except Exception as e:
         log("paylink dedup read err (fail-open):", repr(e))
@@ -1271,7 +1286,7 @@ def handle_payment_link(payload, send):
     except Exception as e:
         log("paylink mint-audit EXC (fail-open):", repr(e))
     send(200, {"ok": True, "link_url": url, "link_id": lid,
-                     "amount": amount})
+                     "amount": amount, "booking_summary": booking_summary})
 
 def handle_poll_payments(payload, send):
     """POST /poll-payments — fetch recent Nomod charges, match each to
