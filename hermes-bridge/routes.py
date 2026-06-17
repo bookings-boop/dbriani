@@ -2301,9 +2301,18 @@ def handle_review(payload, send):
     )
     mode = (payload.get("mode") or "ondemand").strip()
     filter_label = (payload.get("filter") or "all").strip().lower()
+    # Bug 3 (2026-06-17): `/review confirmed` — a focused, uncapped list of
+    # booked deals (upcoming ✅ CONFIRMED + past-event 🏁 COMPLETED). Flag-gated;
+    # OFF → 'confirmed' behaves exactly as today (falls through to the full
+    # pipeline). When ON, scope the DB read to label=CONFIRMED so render emits
+    # ONLY the CONFIRMED + COMPLETED sections (every other tier empty → skipped)
+    # — render_review needs no change. Uncapped so no booking is truncated.
+    _confirmed_view = (filter_label == "confirmed"
+                       and _envflag("REVIEW_CONFIRMED_FILTER_ENABLED", "0"))
+    _db_filter = (filter_label if filter_label in ("hot", "warm", "cold")
+                  else ("confirmed" if _confirmed_view else None))
     try:
-        rows = read_lead_summary(
-            filter_label if filter_label in ("hot", "warm", "cold") else None)
+        rows = read_lead_summary(_db_filter)
 
         # Auto-heal: refresh customers whose facts are likely stale or
         # missing. Two triggers:
@@ -2348,9 +2357,7 @@ def handle_review(payload, send):
             if refreshed_count:
                 # Re-read summary after refresh so the render uses fresh
                 # name/yachts/dates pulled from WAHA.
-                rows = read_lead_summary(
-                    filter_label if filter_label in
-                    ("hot", "warm", "cold") else None)
+                rows = read_lead_summary(_db_filter)
                 log(f"/review auto-healed {refreshed_count}/"
                     f"{len(needs_refresh)} customers")
 
@@ -2368,7 +2375,7 @@ def handle_review(payload, send):
                 totals[lab] += 1
         rendered = render_review(
             scored, totals, mode=mode,
-            uncap=(filter_label in ("hot", "warm", "cold")))
+            uncap=(filter_label in ("hot", "warm", "cold") or _confirmed_view))
         # Phase 4: monthly edit-learning digest — prepend to the report header
         # on the 1st of the month (the cron's monthly summary) or on demand
         # (payload.digest=true, used for testing).

@@ -5055,6 +5055,13 @@ def read_lead_summary(filter_label=None):
         where = "WHERE label = 'WARM'"
     elif fl == "cold":
         where = "WHERE label = 'COLD'"
+    elif fl == "confirmed":
+        # Bug 3 (2026-06-17): `/review confirmed` — scope to booked deals. A
+        # past-event CONFIRMED row peels into the 🏁 COMPLETED virtual section at
+        # render time (review.py), so this single DB label covers both the
+        # upcoming ✅ CONFIRMED and the 🏁 COMPLETED views. COMPLETED is NOT a
+        # real DB label (purely a render split), so no IN-list is needed.
+        where = "WHERE label = 'CONFIRMED'"
     # Exclude merged duplicate rows. When a customer's @c.us and @lid
     # identities are merged, the non-canonical row keeps merged_into set
     # and must NOT appear as a second line in /review (Madawi/Émilie each
