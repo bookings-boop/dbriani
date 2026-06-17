@@ -121,6 +121,21 @@ REVIEW_UNRELIABLE_FROM_STORE_ENABLED = (
 REVIEW_UNRELIABLE_NULL_IS_RELIABLE_ENABLED = (
     os.environ.get("REVIEW_UNRELIABLE_NULL_IS_RELIABLE_ENABLED", "0").strip() == "1")
 
+# Bug 4 (2026-06-17): open-thread reminder on an UPCOMING confirmed booking. A
+# paid booking the customer is still actively working (accepted a 4th-hour
+# extension whose payment link we haven't sent, or an undecided add-on) showed
+# only the generic "confirm logistics or upsell" line and buried the live thread
+# (Antonio). _scope_change_hint surfaces an explicit ⚠️ reminder — but it was DEAD
+# CODE (never called) AND gated on _owes_reply only (False when WE sent the last
+# message, as with Antonio). When on, wire it into the confirmed card and broaden
+# the trigger to recent two-way activity within the window. ALERT-ONLY: it is a
+# card line for the operator — it NEVER auto-mints a payment link or auto-drafts.
+# Dormant by default → byte-identical render until flipped.
+CONFIRMED_OPEN_THREADS_ENABLED = (
+    os.environ.get("CONFIRMED_OPEN_THREADS_ENABLED", "0").strip() == "1")
+CONFIRMED_OPEN_THREAD_WINDOW_DAYS = int(
+    os.environ.get("CONFIRMED_OPEN_THREAD_WINDOW_DAYS", "10"))
+
 # /review inline auto-heal — for customers with missing critical
 # facts (no name AND no yacht), refresh from WAHA history before
 # rendering. Bounded so /review latency stays under 10s even with a
@@ -933,13 +948,27 @@ def _scope_change_hint(row):
     or add-on is NOT reflected and any top-up isn't tracked yet (structured
     balance tracking is a separate, financial feature). Pure; '' when not
     applicable; NON-financial (computes no amounts)."""
+    if not CONFIRMED_OPEN_THREADS_ENABLED:
+        return ""
     if (row.get("label") or "").strip().upper() != "CONFIRMED":
         return ""
-    if not _owes_reply(row):
+    # Upcoming bookings only — a finished trip has no "before the date" relevance.
+    if _booking_likely_passed(row):
+        return ""
+    # Open thread = the customer is still engaging on this confirmed booking. The
+    # original trigger (_owes_reply: customer messaged after our last outbound)
+    # MISSED Antonio — he accepted a 4th-hour extension + was undecided on
+    # catering, but WE sent the last message, so _owes_reply was False. Broaden to
+    # ALSO fire on recent two-way activity within the window.
+    cs = row.get("last_customer_message_at_seconds")
+    recent = (isinstance(cs, (int, float)) and not isinstance(cs, bool)
+              and cs <= CONFIRMED_OPEN_THREAD_WINDOW_DAYS * 86400)
+    if not (_owes_reply(row) or recent):
         return ""
     return ("\n⚠️ *open thread on a confirmed booking* — the detail above is the "
-            "ORIGINAL booking. If they're changing it (extra hour / add-on), "
-            "confirm the new duration & collect any top-up before the date.")
+            "ORIGINAL booking. Open the chat to confirm any change in duration or "
+            "add-ons before assuming logistics-only; if they added an extra hour "
+            "or add-on, send its payment link and collect the top-up before the date.")
 
 
 def _expected_value(score, row):
@@ -1483,6 +1512,9 @@ def render_review(scored, totals, mode="ondemand", uncap=False):
                             + (" — " + _det if _det else "")
                             + f"\n🧠 Hermes: *{imp}/100* · _confirm logistics or "
                             "upsell (extra hour / add-ons)_")
+                        # Bug 4: surface a live open thread (accepted extension /
+                        # undecided add-on) instead of trusting the generic line.
+                        imp_bits += _scope_change_hint(row)
                 else:
                     imp_bits = f"\n🧠 Hermes: *{imp}/100*"
                     # H8: the analysis ran on missing/empty history (analyzer
