@@ -200,7 +200,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['No auto-reply generated — review the notes, then Skip or Regen.']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  original_draft_text: messages.join('\\n\\n'),  // baseline for /edit-capture\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage,   // Nomod: skip the FR-5 improver\n  should_send_file: !!input.should_send_file,\n  file_key: input.file_key || '',\n  file_description: input.file_description || ''\n};\n// Supersede prior pending draft for the same customer. Operator's\n// mental model is 'one active card per customer' — if the customer\n// messaged again after debounce window expired (60s+), we created a\n// new draft, so the OLD draft is stale. Mark it superseded, surface\n// its message_id so downstream Notify Superseded Prior can edit the\n// old Telegram card. SKIP drafts in operator-action-in-progress\n// states (awaiting_edit/awaiting_amount/link_sent/sent/skipped/\n// superseded) to avoid losing typed feedback or duplicating action.\n// Phase C (Redis-migration): supersede is handled entirely by the\n// bridge. Persist Draft (downstream) -> _draft_save auto-supersedes\n// prior pending drafts in Redis AND disables their Telegram card\n// buttons + prepends the superseded marker. The staticData push +\n// scan and the duplicate n8n 'Notify Superseded Prior' edit were\n// removed (the bridge edit is the single source of truth).\nconst superseded_prior = null;\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '💬 DRAFT:' : ('💬 DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('📜 History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '📜 First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['🆕 NEW LEAD — outbound first contact', '📞 ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes];\n} else {\n  // Show name in the 'from' line when we have one — @lid hash is\n// not human-readable. Falls back to customer_phone (the @lid id\n// or @c.us number) when no name resolved.\nconst _displayName = _safeWho(pending.customer_name, pending.customer_phone);\nlines = ['📩 from ' + _displayName];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('👤 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nif (pending && pending.should_send_file && pending.file_key) {\n    (lines || []).push('📎 Suggested file: ' + pending.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }],\n    [{ text: '🤖 Auto', callback_data: 'auto:' + id },\n     { text: '💳 Send Link', callback_data: 'paylink:' + id }],\n      ...((pending && pending.should_send_file && pending.file_key) ? [[{ text: '📎 Send File ('+(pending.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending, superseded_prior: superseded_prior } };"
+        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// feature-header: Customer Facts sits between Parse Response and this\n// node, so $input here is the Customer Facts HTTP response. Resolve the\n// draft data from whichever parse node actually ran.\nlet input;\ntry { input = $('Parse Response').item.json; }\ncatch (e) { input = $('Parse Lead Response').item.json; }\nlet customerHeader = '';\ntry { customerHeader = ($('Customer Facts').item.json || {}).customer_header || ''; }\ncatch (e) { customerHeader = ''; }\n// Nomod: when the payment branch ran, use its message + header\nlet paymentMessage = null, paymentHeader = '';\ntry {\n  const __pm = $('Build Payment Message').item.json;\n  if (__pm && __pm.payment_message) {\n    paymentMessage = String(__pm.payment_message);\n    paymentHeader = __pm.payment_header || '';\n  }\n} catch (e) { paymentMessage = null; }\n\nconst id = $now.toMillis().toString() + '_' + Math.random().toString(36).slice(2, 7);\nconst messages = paymentMessage\n  ? [paymentMessage]\n  : ((Array.isArray(input.messages) && input.messages.length)\n      ? input.messages.map(m => String(m))\n      : ['No auto-reply generated — review the notes, then Skip or Regen.']);\nconst hc = Number(input.history_count) || 0;\n\nconst pending = {\n  id: id,\n  timestamp: $now.toISO(),\n  customer_phone: input.customer_phone,\n  customer_name: input.customer_name || '',\n  customer_message: input.user_message,\n  conversation_history: input.conversation_history || '',\n  history_count: hc,\n  messages: messages,\n  draft_text: messages.join('\\n\\n'),\n  original_draft_text: messages.join('\\n\\n'),  // baseline for /edit-capture\n  messages_sent_count: 0,\n  notes: input.notes,\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: input.break_condition || { hit: false },\n  is_lead: !!input.is_lead,\n  is_payment: !!paymentMessage,   // Nomod: skip the FR-5 improver\n  should_send_file: !!input.should_send_file,\n  file_key: input.file_key || '',\n  file_description: input.file_description || ''\n};\n// Supersede prior pending draft for the same customer. Operator's\n// mental model is 'one active card per customer' — if the customer\n// messaged again after debounce window expired (60s+), we created a\n// new draft, so the OLD draft is stale. Mark it superseded, surface\n// its message_id so downstream Notify Superseded Prior can edit the\n// old Telegram card. SKIP drafts in operator-action-in-progress\n// states (awaiting_edit/awaiting_amount/link_sent/sent/skipped/\n// superseded) to avoid losing typed feedback or duplicating action.\n// Phase C (Redis-migration): supersede is handled entirely by the\n// bridge. Persist Draft (downstream) -> _draft_save auto-supersedes\n// prior pending drafts in Redis AND disables their Telegram card\n// buttons + prepends the superseded marker. The staticData push +\n// scan and the duplicate n8n 'Notify Superseded Prior' edit were\n// removed (the bridge edit is the single source of truth).\nconst superseded_prior = null;\n\nconst preview = messages.length === 1\n  ? messages[0]\n  : messages.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst draftHeader = messages.length === 1 ? '💬 DRAFT:' : ('💬 DRAFT (' + messages.length + ' messages):');\nconst histLine = hc > 0\n  ? ('📜 History: ' + hc + ' prior message' + (hc === 1 ? '' : 's'))\n  : '📜 First contact';\n\nlet lines;\nif (input.is_lead) {\n  lines = ['🆕 NEW LEAD — outbound first contact', '📞 ' + pending.customer_phone, '', 'Lead brief (from you):', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes];\n} else {\n  // Show name in the 'from' line when we have one — @lid hash is\n// not human-readable. Falls back to customer_phone (the @lid id\n// or @c.us number) when no name resolved.\nconst _displayName = _safeWho(pending.customer_name, pending.customer_phone);\nlines = ['📩 from ' + _displayName];\n  if (customerHeader) {\n    lines.push(customerHeader);\n  } else {\n    if (pending.customer_name) lines.push('👤 ' + pending.customer_name);\n    lines.push(histLine);\n  }\n  lines.push('', 'They said:', '\"' + pending.customer_message + '\"', '', '---', draftHeader, preview, '', '📝 Notes: ' + pending.notes);\n}\n\nif (paymentHeader) lines = [paymentHeader].concat(lines);\n\nif (pending && pending.should_send_file && pending.file_key) {\n    (lines || []).push('📎 Suggested file: ' + pending.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id }, { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id }, { text: '❌ Skip', callback_data: 'skip:' + id }],\n    [{ text: '🤖 Auto', callback_data: 'auto:' + id },\n     { text: '💳 Send Link', callback_data: 'paylink:' + id },\n      { text: '🪙 USDT', callback_data: 'usdtquote:' + id }],\n      ...((pending && pending.should_send_file && pending.file_key) ? [[{ text: '📎 Send File ('+(pending.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\nreturn { json: { telegram_payload: { chat_id: 5532831477, text: lines.join('\\n'), reply_markup: reply_markup }, draft_id: id, draft: pending, superseded_prior: superseded_prior } };"
       },
       "typeVersion": 2
     },
@@ -890,6 +890,102 @@
                     },
                     "leftValue": "={{ $('Parse Callback').item.json.action }}",
                     "rightValue": "usdtsend"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "usdtquote",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "usdtquote-2026-06-18-act",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "usdtquote"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "usdtissue",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "usdtissue-2026-06-18-act",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "usdtissue"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "usdtcancel",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "usdtcancel-2026-06-18-act",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "usdtcancel"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "usdtedit",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "usdtedit-2026-06-18-act",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "usdtedit"
                   }
                 ]
               },
@@ -2694,7 +2790,7 @@
         1192
       ],
       "parameters": {
-        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\n// Phase A (Redis-migration): use Queue & Format's in-execution draft.\nlet d = null;\ntry { d = ($('Queue & Format').item.json || {}).draft || null; } catch (e) { d = null; }\nif (!d) return [];   // Phase C: Redis-only (staticData fallback removed)\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '🤖 AUTO — auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop · or ✏️ Edit · ❌ Skip)', '',\n  '📩 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '💬 will send:', preview];\nif (d && d.should_send_file && d.file_key) {\n    (lines || []).push('📎 Suggested file: ' + d.file_key);\n  }\n  const reply_markup = { inline_keyboard: [\n  [{ text: '✅ Send now', callback_data: 'send:' + draftId },\n   { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '🔁 Regen', callback_data: 'regen:' + draftId },\n   { text: '❌ Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '💳 Send Link', callback_data: 'paylink:' + draftId }],\n      ...((d && d.should_send_file && d.file_key) ? [[{ text: '📎 Send File ('+(d.file_key)+')', callback_data: 'file:' + draftId }]] : [])\n]  };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: sid.telegram_message_id || d.telegram_message_id,\n      draft_text: d.draft_text || '',\n      customer_name: d.customer_name || '',\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
+        "jsCode": "// FR-4 4-C: prep the autonomous-send branch for a freshly-posted draft\nconst sid = $('Save Telegram MsgID').item.json;\nconst draftId = sid.draft_id;\n// Phase A (Redis-migration): use Queue & Format's in-execution draft.\nlet d = null;\ntry { d = ($('Queue & Format').item.json || {}).draft || null; } catch (e) { d = null; }\nif (!d) return [];   // Phase C: Redis-only (staticData fallback removed)\nconst delay = 60 + Math.floor(Math.random() * 241);   // 60-300s, human-like\nconst mins = Math.max(1, Math.round(delay / 60));\nconst preview = (Array.isArray(d.messages) && d.messages.length > 1)\n  ? d.messages.map((m, i) => (i + 1) + '. ' + m).join('\\n')\n  : (d.draft_text || '');\nconst lines = [\n  '🤖 AUTO — auto-sends in ~' + mins + ' min unless you act',\n  '(reply /manual here to stop · or ✏️ Edit · ❌ Skip)', '',\n  '📩 ' + (d.customer_name || d.customer_phone), '',\n  'they said: \"' + (d.customer_message || '') + '\"', '',\n  '---', '💬 will send:', preview];\nif (d && d.should_send_file && d.file_key) {\n    (lines || []).push('📎 Suggested file: ' + d.file_key);\n  }\n  const reply_markup = { inline_keyboard: [\n  [{ text: '✅ Send now', callback_data: 'send:' + draftId },\n   { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '🔁 Regen', callback_data: 'regen:' + draftId },\n   { text: '❌ Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '💳 Send Link', callback_data: 'paylink:' + draftId },\n      { text: '🪙 USDT', callback_data: 'usdtquote:' + draftId }],\n      ...((d && d.should_send_file && d.file_key) ? [[{ text: '📎 Send File ('+(d.file_key)+')', callback_data: 'file:' + draftId }]] : [])\n]  };\nreturn [{ json: {\n  draft_id: draftId,\n  customer_id: d.customer_phone || '',\n  customer_phone: d.customer_phone || '',\n  telegram_message_id: sid.telegram_message_id || d.telegram_message_id,\n      draft_text: d.draft_text || '',\n      customer_name: d.customer_name || '',\n  auto_delay_s: delay,\n  auto_card_text: lines.join('\\n'),\n  auto_reply_markup: reply_markup\n} }];\n"
       },
       "typeVersion": 2
     },
@@ -3516,7 +3612,7 @@
         892
       ],
       "parameters": {
-        "jsCode": "// Nomod minimal: build the payment WhatsApp message + operator card header\nconst pr = $('Parse Response').item.json || {};\nlet link = {};\ntry { link = $('Generate Payment Link').item.json || {}; } catch (e) { link = {}; }\nconst msgs = Array.isArray(pr.messages) ? pr.messages.map(m => String(m)) : [];\nconst reply = msgs.join('\\n\\n');\nconst amount = Number(pr.payment_amount) || 0;\nconst summary = String(pr.payment_summary || '');\nconst amountStr = 'AED ' + amount.toLocaleString('en-US');\nconst ok = (link.ok === true && !!link.link_url);\nlet payment_message, payment_header;\nif (ok) {\n  // Brand-voice format (matches operator-paylink button path):\n  //   line 1: the lead-in + link\n  //   line 3: AED total · yacht · date · pax (summary already pre-formatted)\n  payment_message = 'tap to complete your booking: ' + link.link_url\n    + '\\n\\n' + amountStr + ' · ' + summary;\n  payment_header = '💳 PAYMENT LINK — ' + amountStr + '\\n'\n    + '👤 ' + (pr.customer_name || pr.customer_phone || 'customer')\n    + (summary ? ' · ' + summary : '')\n    + '\\n──────────────';\n} else {\n  payment_message = reply;\n  payment_header = '⚠️ PAYMENT LINK NOT CREATED — '\n    + String(link.error || 'unknown error') + '\\n'\n    + '(draft posted without a link — check the amount / bridge)'\n    + '\\n──────────────';\n}\nreturn [{ json: {\n  payment_message: payment_message,\n  payment_header: payment_header,\n  payment_blocked: !ok\n} }];\n"
+        "jsCode": "// Nomod minimal: build the payment WhatsApp message + operator card header\nconst pr = $('Parse Response').item.json || {};\nlet link = {};\ntry { link = $('Generate Payment Link').item.json || {}; } catch (e) { link = {}; }\nconst msgs = Array.isArray(pr.messages) ? pr.messages.map(m => String(m)) : [];\nconst reply = msgs.join('\\n\\n');\nconst amount = Number(pr.payment_amount) || 0;\nconst summary = String(pr.payment_summary || '');\nconst amountStr = 'AED ' + amount.toLocaleString('en-US');\nconst ok = (link.ok === true && !!link.link_url);\nlet payment_message, payment_header;\nif (ok) {\n  // Brand-voice format (matches operator-paylink button path):\n  //   line 1: the lead-in + link\n  //   line 3: AED total · yacht · date · pax (summary already pre-formatted)\n  payment_message = 'tap to complete your booking: ' + link.link_url\n    + '\\n\\n' + amountStr + ' · ' + summary;\n  const twf = Number(link.total_with_fees_aed) || 0;\n  if (twf > 0) payment_message += '\\n_Checkout total AED ' + twf.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) + ' (incl. 5% VAT + 2% card fee)._';\n  payment_header = '💳 PAYMENT LINK — ' + amountStr + '\\n'\n    + '👤 ' + (pr.customer_name || pr.customer_phone || 'customer')\n    + (summary ? ' · ' + summary : '')\n    + '\\n──────────────';\n} else {\n  payment_message = reply;\n  payment_header = '⚠️ PAYMENT LINK NOT CREATED — '\n    + String(link.error || 'unknown error') + '\\n'\n    + '(draft posted without a link — check the amount / bridge)'\n    + '\\n──────────────';\n}\nreturn [{ json: {\n  payment_message: payment_message,\n  payment_header: payment_header,\n  payment_blocked: !ok\n} }];"
       },
       "typeVersion": 2
     },
@@ -5456,7 +5552,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Operator typed the amount in reply to '💳 Enter amount...'.\n// Process Text Reply already validated it's a positive number.\n// Pull customer + summary from the draft (still in pendingQueue).\nconst inp = $input.item.json;\n// Phase A (Redis-migration): fetch the draft from Redis; staticData fallback.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nlet entry = null;\ntry {\n  const r = await _http({ method: 'POST',\n    url: 'http://172.18.0.1:8788/queue',\n    headers: { 'Content-Type': 'application/json',\n      'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { action: 'get', draft_id: inp.draft_id }, json: true, timeout: 8000 });\n  if (r && r.found && r.draft) entry = r.draft;\n} catch (e) { entry = null; }\nif (!entry) entry = {};   // Phase C: Redis-only (staticData fallback removed)\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  const date = entry.dates || '';\n  const pax = entry.party_size || '';\n  summary = [yacht, date, pax ? pax + ' guests' : ''].filter(Boolean).join(' · ') || 'Dubriani booking';\n}\nreturn { json: {\n  draft_id: inp.draft_id,\n  customer_id: entry.customer_phone || '',\n  customer_name: entry.customer_name || '',\n  payment_summary: summary,\n  amount: inp.amount,\n  chat_id: entry.telegram_chat_id || 5532831477,\n  message_id: entry.telegram_message_id || null,\n  admin_chat_id: inp.admin_chat_id || 5532831477\n} };"
+        "jsCode": "// Operator typed the amount in reply to '💳 Enter amount...'.\n// Process Text Reply already validated it's a positive number.\n// Pull customer + summary from the draft (still in pendingQueue).\nconst inp = $input.item.json;\n// Phase A (Redis-migration): fetch the draft from Redis; staticData fallback.\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nlet entry = null;\ntry {\n  const r = await _http({ method: 'POST',\n    url: 'http://172.18.0.1:8788/queue',\n    headers: { 'Content-Type': 'application/json',\n      'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { action: 'get', draft_id: inp.draft_id }, json: true, timeout: 8000 });\n  if (r && r.found && r.draft) entry = r.draft;\n} catch (e) { entry = null; }\nif (!entry) entry = {};   // Phase C: Redis-only (staticData fallback removed)\nconst rail = (entry.rail || 'card');\nif (rail === 'usdt') { try { await _http({ method: 'POST', url: 'http://172.18.0.1:8788/queue', headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' }, body: { action: 'update', draft_id: inp.draft_id, fields: { rail: '' } }, json: true, timeout: 8000 }); } catch (e) {} }\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  const date = entry.dates || '';\n  const pax = entry.party_size || '';\n  summary = [yacht, date, pax ? pax + ' guests' : ''].filter(Boolean).join(' · ') || 'Dubriani booking';\n}\nreturn { json: {\n  draft_id: inp.draft_id,\n  rail: rail,\n  customer_id: entry.customer_phone || '',\n  customer_name: entry.customer_name || '',\n  payment_summary: summary,\n  amount: inp.amount,\n  chat_id: entry.telegram_chat_id || 5532831477,\n  message_id: entry.telegram_message_id || null,\n  admin_chat_id: inp.admin_chat_id || 5532831477\n} };"
       },
       "typeVersion": 2
     },
@@ -7032,6 +7128,203 @@
         }
       },
       "typeVersion": 4.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Operator hit [🪙 USDT] on a draft card. Stamp rail=usdt on the draft so the\n// amount reply routes to /usdt-quote, mark awaiting_amount (reuses the paylink\n// amount-capture), then prompt for the ex-VAT price. Fail-open.\nconst pc = $('Parse Callback').item.json;\nconst entry = pc.draft || {};\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({ method: 'POST', url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}), json: true, timeout: 8000 });\n  } catch (e) { return null; }\n}\nlet conflict = null;\nconst aw = await bq('awaiting', { status: 'awaiting_amount', chat_id: 5532831477 });\nif (aw && aw.found && aw.draft && aw.draft.id !== pc.draft_id) conflict = aw.draft;\nawait bq('update', { draft_id: pc.draft_id, fields: { rail: 'usdt' } });\nconst cid = entry.customer_phone || pc.customer_id || '';\nconst name = entry.customer_name || '';\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  summary = [yacht, entry.dates || '', entry.party_size ? entry.party_size + ' guests' : ''].filter(Boolean).join(' · ') || 'Dubriani booking';\n}\nif (!conflict) await bq('mark', { draft_id: pc.draft_id, status: 'awaiting_amount' });\nreturn { json: { blocked: !!conflict, blocking_phone: conflict ? (conflict.customer_phone || 'unknown') : '',\n  draft_id: pc.draft_id, customer_id: cid, customer_name: name, payment_summary: summary,\n  chat_id: pc.chat_id, message_id: pc.message_id, admin_chat_id: 5532831477 } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "id": "usdtflow-prep-2026-06-18",
+      "name": "Prep USDT",
+      "position": [
+        5536,
+        1800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={\n  \"chat_id\": {{ $json.chat_id }},\n  \"message_id\": {{ $json.message_id }},\n  \"text\": {{ JSON.stringify($json.blocked ? ('⚠️ Another draft is awaiting an amount for ' + ($json.blocking_phone || 'a customer') + '. Send that one first, then retry.') : ('🪙 USDT invoice — enter the PRICE (ex-VAT) in AED for ' + ($json.customer_name || $json.customer_id || 'customer') + ' · ' + ($json.payment_summary || '') + '\\n\\n👉 Reply with the price (digits only, or like \"3k\"). VAT (5%) is added automatically; you will see the full breakdown to verify before anything is sent.')) }}\n}",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "id": "usdtflow-prompt-2026-06-18",
+      "name": "Edit Telegram (USDT Prompt)",
+      "position": [
+        6208,
+        1920
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://172.18.0.1:8788/usdt-quote",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_id) }}, \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"price\": {{ Number($json.amount) || 0 }}, \"customer_name\": {{ JSON.stringify($json.customer_name || \"\") }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "id": "usdtflow-callquote-2026-06-18",
+      "name": "Call USDT Quote",
+      "position": [
+        5760,
+        2080
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "http://172.18.0.1:8788/usdt-issue",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"draft_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "id": "usdtflow-callissue-2026-06-18",
+      "name": "Call USDT Issue",
+      "position": [
+        5460,
+        1820
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"chat_id\": {{ $('Route Update Type').item.json.callback_query.message.chat.id }}, \"message_id\": {{ $('Route Update Type').item.json.callback_query.message.message_id }}, \"text\": \"🪙 USDT quote cancelled.\" }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "id": "usdtflow-cancel-2026-06-18",
+      "name": "USDT Cancel Reply",
+      "position": [
+        5680,
+        1820
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"callback_query_id\": {{ JSON.stringify($('Route Update Type').item.json.callback_query.id) }}, \"text\": \"✏️ Inline edit is coming soon — tap ❌ Cancel and start a new 🪙 quote with the corrected price.\", \"show_alert\": true }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "id": "usdtflow-editstub-2026-06-18",
+      "name": "USDT Edit Stub",
+      "position": [
+        5900,
+        1820
+      ]
+    },
+    {
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "usdtflow-rail-cond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.rail }}",
+              "rightValue": "usdt"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "id": "usdtflow-railif-2026-06-18",
+      "name": "Rail USDT?",
+      "position": [
+        5716,
+        1900
+      ]
     }
   ],
   "name": "Dubriani Phase 1B — WhatsApp + Telegram Approval",
@@ -20983,6 +21276,34 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Prep USDT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call USDT Issue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "USDT Cancel Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "USDT Edit Stub",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -22482,7 +22803,7 @@
       "main": [
         [
           {
-            "node": "Call Nomod (Reply)",
+            "node": "Rail USDT?",
             "type": "main",
             "index": 0
           }
@@ -22816,6 +23137,35 @@
         [
           {
             "node": "Send Pending Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep USDT": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (USDT Prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rail USDT?": {
+      "main": [
+        [
+          {
+            "node": "Call USDT Quote",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Nomod (Reply)",
             "type": "main",
             "index": 0
           }
