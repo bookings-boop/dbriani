@@ -870,6 +870,30 @@
                 ]
               },
               "renameOutput": true
+            },
+            {
+              "outputKey": "usdtsend",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "usdtsend-2026-06-18-act",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "usdtsend"
+                  }
+                ]
+              },
+              "renameOutput": true
             }
           ]
         },
@@ -5607,7 +5631,7 @@
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
         "method": "POST",
         "options": {},
-        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('💳 PAYMENT LINK SENT to ' + ($('Unify Paylink Context').item.json.customer_name || $('Unify Paylink Context').item.json.customer_id) + '\\n\\nAED ' + $('Unify Paylink Context').item.json.amount + ' · ' + ($('Unify Paylink Context').item.json.payment_summary || '(no summary)') + '\\n\\n' + $('Unify Paylink Context').item.json.link_url + '\\n\\n\\u2192 customer flipped to \\u23f3 WAITING_FOR_PAYMENT') }}\n}",
+        "jsonBody": "={\n  \"chat_id\": 5532831477,\n  \"text\": {{ JSON.stringify('💳 PAYMENT LINK SENT to ' + ($('Unify Paylink Context').item.json.customer_name || $('Unify Paylink Context').item.json.customer_id) + '\\n\\nAED ' + $('Unify Paylink Context').item.json.amount + ' · ' + ($('Unify Paylink Context').item.json.payment_summary || '(no summary)') + '\\n\\n' + $('Unify Paylink Context').item.json.link_url + '\\n\\n\\u2192 customer flipped to \\u23f3 WAITING_FOR_PAYMENT') }}\n,\n  \"reply_markup\": {{ JSON.stringify({inline_keyboard:[[{text:'🪙 Send USDT',callback_data:'usdtsend:'+($('Unify Paylink Context').item.json.draft_id||'')+':'+($('Unify Paylink Context').item.json.amount||'')}]]}) }}\n}",
         "sendBody": true,
         "sendHeaders": true,
         "specifyBody": "json",
@@ -6969,6 +6993,42 @@
               "value": "application/json"
             }
           ]
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "c0ffee00-0000-4000-8000-000000000018",
+      "name": "Send USDT (confirm)",
+      "type": "n8n-nodes-base.httpRequest",
+      "onError": "continueRegularOutput",
+      "position": [
+        5460,
+        1640
+      ],
+      "parameters": {
+        "url": "http://172.18.0.1:8788/send-usdt",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"chatId\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }}, \"amount\": {{ Number(($('Route Update Type').item.json.callback_query.data || '').split(':')[2]) || 0 }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
         }
       },
       "typeVersion": 4.2
@@ -20913,6 +20973,13 @@
         [
           {
             "node": "Edit Rule Action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send USDT (confirm)",
             "type": "main",
             "index": 0
           }
