@@ -186,7 +186,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const response = $input.item.json;\nlet raw = \"\";\ntry {\n  raw = response.content[0].text;\n} catch (e) {\n  return { json: {\n    messages: [\"(empty Claude response - check API node)\"],\n    messages_count: 1,\n    notes: \"ERROR: could not extract text from Claude API response\",\n    parse_status: \"extract_failed\",\n    should_send_payment: false,\n    payment_amount: 0,\n    payment_summary: \"\",\n    break_condition: { hit: false },\n    raw_response: JSON.stringify(response),\n    customer_phone: $('Build Prompt').item.json.customerPhone,\n    customer_name: $('Build Prompt').item.json.customerName,\n    user_message: $('Build Prompt').item.json.userMessage,\n    conversation_history: $('Build Prompt').item.json.conversationHistory,\n    history_count: $('Build Prompt').item.json.historyCount,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n  } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\nlet parseStatus = \"ok\";\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) { parsed.messages = []; parseStatus = \"no_reply\"; }\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: [raw], notes_for_zayn: \"(JSON parse failed - Claude returned plain text. Error: \" + e.message + \")\" };\n  parseStatus = \"fallback_plain_text\";\n}\nlet messages = parsed.messages.slice(0, 4).map(m => String(m));\n\n// Pillar C (2026-06-02): the drafter asked for a missing fact instead of\n// guessing (needs_operator_input set, messages empty). Ask the operator via the\n// bridge (/ask-operator posts the question + stores the awaiting-info state)\n// and SKIP the draft card by returning no items. Fail-safe: only fires when\n// there is NO usable reply. Fail-open: any error falls through to a normal draft.\ntry {\n  const __noi = (parsed && typeof parsed.needs_operator_input === 'string')\n    ? parsed.needs_operator_input.trim() : '';\n  if (__noi && messages.length === 0) {\n    const __http = this.helpers.httpRequest.bind(this.helpers);\n    const __bp = $('Build Prompt').item.json;\n    await __http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/ask-operator',\n      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: {\n        question: __noi,\n        customer_id: __bp.customerPhone || '',\n        customer_phone: __bp.customerPhone || '',\n        customer_name: __bp.customerName || '',\n        customer_msg: __bp.userMessage || ''\n      },\n      json: true,\n      timeout: 15000\n    });\n    return [];\n  }\n} catch (e) { /* fail-open: fall through to a normal draft */ }\n// PAYMENT-URL GUARD: the system prompt forbids the LLM from pasting\n// `pay.nomodapp.com` (Build Payment Message appends the real URL when\n// should_send_payment fires). The LLM still occasionally writes a bare\n// placeholder — operator-visible bug. Strip it deterministically here,\n// before Queue & Format / Build Payment Message / autosend sees it.\nconst __badPatterns = [\n  /https?:\\/\\/pay\\.nomodapp\\.com[\\w\\/?=&%-]*/gi,\n  /pay\\.nomodapp\\.com[\\w\\/?=&%-]*/gi,\n  /\\[link\\]/gi,\n  /\\[payment\\s*link\\]/gi,\n  /\\[insert\\s*link\\]/gi\n];\nlet __scrubbed = false;\nmessages = messages.map(m => {\n  let out = m;\n  for (const p of __badPatterns) {\n    p.lastIndex = 0;\n    if (p.test(out)) { __scrubbed = true; p.lastIndex = 0; out = out.replace(p, \"\"); }\n  }\n  // Clean up dangling fragments left behind after URL removal\n  out = out.replace(/:\\s*[\\u2014\\u2013\\-]\\s*/g, \" — \");           // \": — \" -> \" — \"\n  out = out.replace(/:\\s*(and|so|then|once)\\b/gi, \" $1\");          // \": and we'll...\" -> \" and we'll...\"\n  out = out.replace(/(here'?s the (payment )?link[^:.!?]*:\\s*\\.?)$/i, \"want me to send the payment link to lock it in?\");\n  out = out.replace(/:\\s*$/g, \"\");                                  // trailing colon\n  out = out.replace(/\\s{2,}/g, \" \").trim();\n  // If the result still ends with \"payment link\" / \"link\" but no URL, swap to CTA\n  if (__scrubbed && /\\b(payment link|the link)\\s*[.!?]?$/i.test(out)) {\n    out = \"want me to send the payment link to lock it in?\";\n  }\n  if (!out || out.length < 6) out = \"want me to send the payment link to lock it in?\";\n  return out;\n});\nreturn { json: {\n  messages: messages,\n  messages_count: messages.length,\n  payment_url_scrubbed: __scrubbed,\n  notes: parsed.notes_for_zayn || \"(no notes)\",\n  break_condition: (parsed && parsed.break_condition && typeof parsed.break_condition.hit === 'boolean')\n    ? parsed.break_condition : { hit: false },\n  should_send_payment: !!(parsed && parsed.should_send_payment === true),\n  payment_amount: (parsed && Number(parsed.payment_amount)) || 0,\n  payment_summary: (parsed && typeof parsed.payment_summary === \"string\")\n    ? parsed.payment_summary : \"\",\n  parse_status: parseStatus,\n  raw_response: raw,\n  customer_phone: $('Build Prompt').item.json.customerPhone,\n  customer_name: $('Build Prompt').item.json.customerName,\n  user_message: $('Build Prompt').item.json.userMessage,\n  conversation_history: $('Build Prompt').item.json.conversationHistory,\n  history_count: $('Build Prompt').item.json.historyCount,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : ''\n} };"
+        "jsCode": "const response = $input.item.json;\nlet raw = \"\";\ntry {\n  raw = response.content[0].text;\n} catch (e) {\n  return { json: {\n    messages: [\"(empty Claude response - check API node)\"],\n    messages_count: 1,\n    notes: \"ERROR: could not extract text from Claude API response\",\n    parse_status: \"extract_failed\",\n    should_send_payment: false,\n    payment_amount: 0,\n    payment_summary: \"\",\n    break_condition: { hit: false },\n    raw_response: JSON.stringify(response),\n    customer_phone: $('Build Prompt').item.json.customerPhone,\n    customer_name: $('Build Prompt').item.json.customerName,\n    user_message: $('Build Prompt').item.json.userMessage,\n    conversation_history: $('Build Prompt').item.json.conversationHistory,\n    history_count: $('Build Prompt').item.json.historyCount,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n  } };\n}\nlet cleaned = (function(t){/*rjx*/ t=String(t||''); var m=t.match(/```(?:json)?\\s*([\\s\\S]*?)```/i); if(m&&m[1].trim()) return m[1].trim(); var i=t.indexOf('{'), j=t.lastIndexOf('}'); return (i>=0&&j>i)? t.slice(i,j+1).trim() : t.trim(); })(raw);\nlet parsed;\nlet parseStatus = \"ok\";\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) { parsed.messages = []; parseStatus = \"no_reply\"; }\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: ['⚠️ Draft came back malformed — tap 🔁 Regen for a clean draft.'], notes_for_zayn: \"(JSON parse failed - Claude returned plain text. Error: \" + e.message + \")\" };\n  parseStatus = \"fallback_plain_text\";\n}\nlet messages = parsed.messages.slice(0, 4).map(m => String(m));\n\n// Pillar C (2026-06-02): the drafter asked for a missing fact instead of\n// guessing (needs_operator_input set, messages empty). Ask the operator via the\n// bridge (/ask-operator posts the question + stores the awaiting-info state)\n// and SKIP the draft card by returning no items. Fail-safe: only fires when\n// there is NO usable reply. Fail-open: any error falls through to a normal draft.\ntry {\n  const __noi = (parsed && typeof parsed.needs_operator_input === 'string')\n    ? parsed.needs_operator_input.trim() : '';\n  if (__noi && messages.length === 0) {\n    const __http = this.helpers.httpRequest.bind(this.helpers);\n    const __bp = $('Build Prompt').item.json;\n    await __http({\n      method: 'POST',\n      url: 'http://172.18.0.1:8788/ask-operator',\n      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: {\n        question: __noi,\n        customer_id: __bp.customerPhone || '',\n        customer_phone: __bp.customerPhone || '',\n        customer_name: __bp.customerName || '',\n        customer_msg: __bp.userMessage || ''\n      },\n      json: true,\n      timeout: 15000\n    });\n    return [];\n  }\n} catch (e) { /* fail-open: fall through to a normal draft */ }\n// PAYMENT-URL GUARD: the system prompt forbids the LLM from pasting\n// `pay.nomodapp.com` (Build Payment Message appends the real URL when\n// should_send_payment fires). The LLM still occasionally writes a bare\n// placeholder — operator-visible bug. Strip it deterministically here,\n// before Queue & Format / Build Payment Message / autosend sees it.\nconst __badPatterns = [\n  /https?:\\/\\/pay\\.nomodapp\\.com[\\w\\/?=&%-]*/gi,\n  /pay\\.nomodapp\\.com[\\w\\/?=&%-]*/gi,\n  /\\[link\\]/gi,\n  /\\[payment\\s*link\\]/gi,\n  /\\[insert\\s*link\\]/gi\n];\nlet __scrubbed = false;\nmessages = messages.map(m => {\n  let out = m;\n  for (const p of __badPatterns) {\n    p.lastIndex = 0;\n    if (p.test(out)) { __scrubbed = true; p.lastIndex = 0; out = out.replace(p, \"\"); }\n  }\n  // Clean up dangling fragments left behind after URL removal\n  out = out.replace(/:\\s*[\\u2014\\u2013\\-]\\s*/g, \" — \");           // \": — \" -> \" — \"\n  out = out.replace(/:\\s*(and|so|then|once)\\b/gi, \" $1\");          // \": and we'll...\" -> \" and we'll...\"\n  out = out.replace(/(here'?s the (payment )?link[^:.!?]*:\\s*\\.?)$/i, \"want me to send the payment link to lock it in?\");\n  out = out.replace(/:\\s*$/g, \"\");                                  // trailing colon\n  out = out.replace(/\\s{2,}/g, \" \").trim();\n  // If the result still ends with \"payment link\" / \"link\" but no URL, swap to CTA\n  if (__scrubbed && /\\b(payment link|the link)\\s*[.!?]?$/i.test(out)) {\n    out = \"want me to send the payment link to lock it in?\";\n  }\n  if (!out || out.length < 6) out = \"want me to send the payment link to lock it in?\";\n  return out;\n});\nreturn { json: {\n  messages: messages,\n  messages_count: messages.length,\n  payment_url_scrubbed: __scrubbed,\n  notes: parsed.notes_for_zayn || \"(no notes)\",\n  break_condition: (parsed && parsed.break_condition && typeof parsed.break_condition.hit === 'boolean')\n    ? parsed.break_condition : { hit: false },\n  should_send_payment: !!(parsed && parsed.should_send_payment === true),\n  payment_amount: (parsed && Number(parsed.payment_amount)) || 0,\n  payment_summary: (parsed && typeof parsed.payment_summary === \"string\")\n    ? parsed.payment_summary : \"\",\n  parse_status: parseStatus,\n  raw_response: raw,\n  customer_phone: $('Build Prompt').item.json.customerPhone,\n  customer_name: $('Build Prompt').item.json.customerName,\n  user_message: $('Build Prompt').item.json.userMessage,\n  conversation_history: $('Build Prompt').item.json.conversationHistory,\n  history_count: $('Build Prompt').item.json.historyCount,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : ''\n} };"
       },
       "typeVersion": 2
     },
@@ -395,7 +395,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration — staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nlet action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\n// Force Send (2026-06-02): the bridge customer-level send guard posts a\n// \"forcesend:<draft_id>\" inline button. Treat it as a normal 'send' but\n// carry a force flag so Prepare Send's claim-send bypasses ONLY that guard\n// (the WAHA-degraded + terminal-status guards still apply).\nconst force = (action === 'forcesend');\nif (force) action = 'send';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force' || action === 'editfb' || action === 'editrule');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    force: force,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
+        "jsCode": "// Parse callback_data + resolve the draft from Redis (the SOLE\n// store as of the 2026-05-28 migration — staticData.pendingQueue\n// removed). This node sits downstream of 'Redis Draft Lookup', so\n// $json is the lookup result (a /queue?action=get response).\nconst cq = $('Route Update Type').item.json.callback_query;\nconst data = (cq && cq.data) || '';\nconst parts = data.split(':');\nlet action = parts[0] || '';\nconst second = parts[1] || '';\nconst third  = parts[2] || '';\n\n// Force Send (2026-06-02): the bridge customer-level send guard posts a\n// \"forcesend:<draft_id>\" inline button. Treat it as a normal 'send' but\n// carry a force flag so Prepare Send's claim-send bypasses ONLY that guard\n// (the WAHA-degraded + terminal-status guards still apply).\nconst force = (action === 'forcesend');\nif (force) action = 'send';\n\nconst pipeline = (action === 'nudge' || action === 'snz' || action === 'inf' || action === 'disregard' || action === 'disregard_force' || action === 'editfb' || action === 'editrule' || action === 'setyacht');\n\nlet draft = null;\nif (!pipeline) {\n  try {\n    if ($json && $json.found && $json.draft) draft = $json.draft;\n  } catch (e) { draft = null; }\n}\n\nreturn {\n  json: {\n    action: action,\n    force: force,\n    draft_id: pipeline ? null : second,\n    customer_id: pipeline ? second : (draft ? draft.customer_phone : null),\n    snooze_duration: (action === 'snz') ? third : null,\n    callback_query_id: cq && cq.id,\n    chat_id: cq && cq.message && cq.message.chat.id,\n    message_id: cq && cq.message && cq.message.message_id,\n    draft: draft,\n    draft_source: draft ? 'redis' : 'none',\n    draft_found: !!draft\n      || (action || '').indexOf('feedback_') === 0\n      || pipeline\n  }\n};\n"
       },
       "typeVersion": 2
     },
@@ -990,6 +990,102 @@
                 ]
               },
               "renameOutput": true
+            },
+            {
+              "outputKey": "plissue",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "cardprev-plissue-cond",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "plissue"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "pledit",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "cardprev-pledit-cond",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "pledit"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "plcancel",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "cardprev-plcancel-cond",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "plcancel"
+                  }
+                ]
+              },
+              "renameOutput": true
+            },
+            {
+              "outputKey": "setyacht",
+              "conditions": {
+                "options": {
+                  "version": 1,
+                  "leftValue": "",
+                  "caseSensitive": true,
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "setyacht-route-cond",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('Parse Callback').item.json.action }}",
+                    "rightValue": "setyacht"
+                  }
+                ]
+              },
+              "renameOutput": true
             }
           ]
         },
@@ -1041,6 +1137,7 @@
       "id": "0146bfff-35f3-44bb-b5cd-2c1afe4a5f8d",
       "name": "Edit Telegram (Send)",
       "type": "n8n-nodes-base.httpRequest",
+      "onError": "continueRegularOutput",
       "position": [
         5744,
         944
@@ -1331,7 +1428,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Parse regen response → new content + a fully-rendered card.\n// Redis-migration 2026-05-28: no longer relies on staticData for\n// the authoritative draft. Customer context comes from the Redis\n// draft (via Parse Callback); the new content + card are committed\n// ATOMICALLY by the downstream 'Regen Commit (Classic)' node\n// (card edit + Redis write in one bridge call), so what the\n// operator sees == what Send fans. Bug 2026-05-28: classic regen\n// wrote only staticData, so Send pushed the pre-regen text.\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on regen', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\n\n// Authoritative customer context = the Redis draft resolved by\n// Parse Callback. Fall back to staticData only if it's absent.\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\nlet cust = { phone: d.customer_phone, name: d.customer_name, message: d.customer_message };\n// Phase C (Redis-migration): staticData fallback removed (Redis-only).\n\nconst new_draft_text = msgs.join('\\n\\n');\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst new_notes = parsed.notes_for_zayn || '(no notes)';\n\nlet _badge = '';\ntry {\n  const _qh = this.helpers.httpRequest.bind(this.helpers);\n  const _qc = await _qh({ method: 'POST', url: 'http://172.18.0.1:8788/quality-check',\n    headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { customer_id: (cust.phone || ''), customer_name: (cust.name || ''), history: (d.conversation_history || ''), incoming_message: (cust.message || ''), current_draft: msgs },\n    json: true, timeout: 35000 });\n  if (_qc && typeof _qc.badge === 'string') _badge = _qc.badge.trim();\n} catch (e) { _badge = ''; }\nconst card_text = (_badge ? _badge + '\\n\\n' : '') + '\\ud83d\\udce9 [REGEN] from ' + (cust.phone || '?') +\n  '\\nName: ' + (cust.name || '(unknown)') +\n  '\\n\\nThey said:\\n\"' + (cust.message || '') + '\"' +\n  '\\n\\n---\\n\\ud83d\\udcac NEW DRAFT:\\n' + preview +\n  '\\n\\n\\ud83d\\udcdd Notes: ' + new_notes;\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\\u2705 Send', callback_data: 'send:' + draftId }, { text: '\\u270f\\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\\ud83d\\udd01 Regen', callback_data: 'regen:' + draftId }, { text: '\\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\\ud83e\\udd16 Auto', callback_data: 'auto:' + draftId }, { text: '\\ud83d\\udcb3 Send Link', callback_data: 'paylink:' + draftId }]\n]};\n\nreturn { json: {\n  draft_id: draftId,\n  new_messages: msgs,\n  new_draft_text: new_draft_text,\n  new_preview: preview,\n  new_notes: new_notes,\n  customer_phone: cust.phone || 'unknown',\n  customer_name: cust.name || '',\n  customer_message: cust.message || '',\n  card: { chat_id: pc.chat_id, message_id: pc.message_id, text: card_text, reply_markup: reply_markup },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string') ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string') ? parsed.file_description.trim() : '',\n} };\n"
+        "jsCode": "// Parse regen response → new content + a fully-rendered card.\n// Redis-migration 2026-05-28: no longer relies on staticData for\n// the authoritative draft. Customer context comes from the Redis\n// draft (via Parse Callback); the new content + card are committed\n// ATOMICALLY by the downstream 'Regen Commit (Classic)' node\n// (card edit + Redis write in one bridge call), so what the\n// operator sees == what Send fans. Bug 2026-05-28: classic regen\n// wrote only staticData, so Send pushed the pre-regen text.\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on regen', raw: JSON.stringify(response) } };\n}\nlet cleaned = (function(t){/*rjx*/ t=String(t||''); var m=t.match(/```(?:json)?\\s*([\\s\\S]*?)```/i); if(m&&m[1].trim()) return m[1].trim(); var i=t.indexOf('{'), j=t.lastIndexOf('}'); return (i>=0&&j>i)? t.slice(i,j+1).trim() : t.trim(); })(raw);\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: ['⚠️ Draft came back malformed — tap 🔁 Regen for a clean draft.'], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst draftId = $('Build Regen Prompt').item.json.draft_id;\n\n// Authoritative customer context = the Redis draft resolved by\n// Parse Callback. Fall back to staticData only if it's absent.\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\nlet cust = { phone: d.customer_phone, name: d.customer_name, message: d.customer_message };\n// Phase C (Redis-migration): staticData fallback removed (Redis-only).\n\nconst new_draft_text = msgs.join('\\n\\n');\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nconst new_notes = parsed.notes_for_zayn || '(no notes)';\n\nlet _badge = '';\ntry {\n  const _qh = this.helpers.httpRequest.bind(this.helpers);\n  const _qc = await _qh({ method: 'POST', url: 'http://172.18.0.1:8788/quality-check',\n    headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { customer_id: (cust.phone || ''), customer_name: (cust.name || ''), history: (d.conversation_history || ''), incoming_message: (cust.message || ''), current_draft: msgs },\n    json: true, timeout: 35000 });\n  if (_qc && typeof _qc.badge === 'string') _badge = _qc.badge.trim();\n} catch (e) { _badge = ''; }\nconst card_text = (_badge ? _badge + '\\n\\n' : '') + '\\ud83d\\udce9 [REGEN] from ' + (cust.phone || '?') +\n  '\\nName: ' + (cust.name || '(unknown)') +\n  '\\n\\nThey said:\\n\"' + (cust.message || '') + '\"' +\n  '\\n\\n---\\n\\ud83d\\udcac NEW DRAFT:\\n' + preview +\n  '\\n\\n\\ud83d\\udcdd Notes: ' + new_notes;\nconst reply_markup = { inline_keyboard: [\n  [{ text: '\\u2705 Send', callback_data: 'send:' + draftId }, { text: '\\u270f\\ufe0f Edit', callback_data: 'edit:' + draftId }],\n  [{ text: '\\ud83d\\udd01 Regen', callback_data: 'regen:' + draftId }, { text: '\\u274c Skip', callback_data: 'skip:' + draftId }],\n  [{ text: '\\ud83e\\udd16 Auto', callback_data: 'auto:' + draftId }, { text: '\\ud83d\\udcb3 Send Link', callback_data: 'paylink:' + draftId }, { text: '🪙 USDT', callback_data: 'usdtquote:' + draftId }]\n]};\n\nreturn { json: {\n  draft_id: draftId,\n  new_messages: msgs,\n  new_draft_text: new_draft_text,\n  new_preview: preview,\n  new_notes: new_notes,\n  customer_phone: cust.phone || 'unknown',\n  customer_name: cust.name || '',\n  customer_message: cust.message || '',\n  card: { chat_id: pc.chat_id, message_id: pc.message_id, text: card_text, reply_markup: reply_markup },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string') ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string') ? parsed.file_description.trim() : '',\n} };\n"
       },
       "typeVersion": 2
     },
@@ -2190,7 +2287,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: [raw], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\n// Phase B (Redis-migration): customer context comes from Prep Refine's\n// Redis draft. The old staticData entry read + the entry mutation were\n// removed (Refine Commit writes Redis authoritatively, so what the\n// operator sees == what Send fans).\nconst pr = $('Prep Refine').item.json || {};\nconst custPhone = pr.customerPhone || bp.customerPhone || 'unknown';\nconst custName  = pr.customerName  || bp.customerName  || '';\nconst custMsg   = pr.userMessage   || bp.userMessage   || '';\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nlet _badge = '';\ntry {\n  const _qh = this.helpers.httpRequest.bind(this.helpers);\n  const _qc = await _qh({ method: 'POST', url: 'http://172.18.0.1:8788/quality-check',\n    headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { customer_id: custPhone, customer_name: custName, history: (pr.conversationHistory || ''), incoming_message: custMsg, current_draft: msgs },\n    json: true, timeout: 35000 });\n  if (_qc && typeof _qc.badge === 'string') _badge = _qc.badge.trim();\n} catch (e) { _badge = ''; }\nreturn { json: {\n  draft_id: draftId,\n  messages: msgs,\n  draft_text: msgs.join('\\n\\n'),\n  notes: parsed.notes_for_zayn || '',\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: custPhone,\n  customer_name: custName,\n  customer_message: custMsg,\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id,\n  card: {\n    chat_id: bp.admin_chat_id,\n    message_id: bp.telegram_message_id,\n    text: (_badge ? _badge + '\\n\\n' : '') + '📩 [REFINED] from ' + custPhone\n      + '\\nName: ' + (custName || '(unknown)')\n      + '\\n\\nThey said:\\n\"' + custMsg + '\"'\n      + '\\n\\n---\\n💬 NEW DRAFT:\\n' + preview\n      + '\\n\\n📝 Notes: ' + (parsed.notes_for_zayn || '(no notes)'),\n    reply_markup: { inline_keyboard: [\n      [{ text: '✅ Send', callback_data: 'send:' + draftId }, { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n      [{ text: '🔁 Regen', callback_data: 'regen:' + draftId }, { text: '❌ Skip', callback_data: 'skip:' + draftId }],\n      [{ text: '🤖 Auto', callback_data: 'auto:' + draftId }, { text: '💳 Send Link', callback_data: 'paylink:' + draftId }]\n    ] }\n  },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string') ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string') ? parsed.file_description.trim() : '',\n} };"
+        "jsCode": "// FR-1: parse the refine response, update the draft, re-render its card\nconst response = $input.item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: { error: 'Empty Claude response on refine', raw: JSON.stringify(response) } };\n}\nlet cleaned = (function(t){/*rjx*/ t=String(t||''); var m=t.match(/```(?:json)?\\s*([\\s\\S]*?)```/i); if(m&&m[1].trim()) return m[1].trim(); var i=t.indexOf('{'), j=t.lastIndexOf('}'); return (i>=0&&j>i)? t.slice(i,j+1).trim() : t.trim(); })(raw);\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages missing');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: ['⚠️ Draft came back malformed — tap 🔁 Regen for a clean draft.'], notes_for_zayn: '(parse fail: ' + e.message + ')' };\n}\nconst msgs = parsed.messages.slice(0, 4).map(m => String(m));\nconst bp = $('Build Refine Prompt').item.json;\nconst draftId = bp.draft_id;\n// Phase B (Redis-migration): customer context comes from Prep Refine's\n// Redis draft. The old staticData entry read + the entry mutation were\n// removed (Refine Commit writes Redis authoritatively, so what the\n// operator sees == what Send fans).\nconst pr = $('Prep Refine').item.json || {};\nconst custPhone = pr.customerPhone || bp.customerPhone || 'unknown';\nconst custName  = pr.customerName  || bp.customerName  || '';\nconst custMsg   = pr.userMessage   || bp.userMessage   || '';\nconst preview = msgs.length === 1 ? msgs[0] : msgs.map((m, i) => (i + 1) + '. ' + m).join('\\n');\nlet _badge = '';\ntry {\n  const _qh = this.helpers.httpRequest.bind(this.helpers);\n  const _qc = await _qh({ method: 'POST', url: 'http://172.18.0.1:8788/quality-check',\n    headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { customer_id: custPhone, customer_name: custName, history: (pr.conversationHistory || ''), incoming_message: custMsg, current_draft: msgs },\n    json: true, timeout: 35000 });\n  if (_qc && typeof _qc.badge === 'string') _badge = _qc.badge.trim();\n} catch (e) { _badge = ''; }\nreturn { json: {\n  draft_id: draftId,\n  messages: msgs,\n  draft_text: msgs.join('\\n\\n'),\n  notes: parsed.notes_for_zayn || '',\n  new_preview: preview,\n  new_notes: parsed.notes_for_zayn || '(no notes)',\n  customer_phone: custPhone,\n  customer_name: custName,\n  customer_message: custMsg,\n  telegram_message_id: bp.telegram_message_id,\n  admin_chat_id: bp.admin_chat_id,\n  card: {\n    chat_id: bp.admin_chat_id,\n    message_id: bp.telegram_message_id,\n    text: (_badge ? _badge + '\\n\\n' : '') + '📩 [REFINED] from ' + custPhone\n      + '\\nName: ' + (custName || '(unknown)')\n      + '\\n\\nThey said:\\n\"' + custMsg + '\"'\n      + '\\n\\n---\\n💬 NEW DRAFT:\\n' + preview\n      + '\\n\\n📝 Notes: ' + (parsed.notes_for_zayn || '(no notes)'),\n    reply_markup: { inline_keyboard: [\n      [{ text: '✅ Send', callback_data: 'send:' + draftId }, { text: '✏️ Edit', callback_data: 'edit:' + draftId }],\n      [{ text: '🔁 Regen', callback_data: 'regen:' + draftId }, { text: '❌ Skip', callback_data: 'skip:' + draftId }],\n      [{ text: '🤖 Auto', callback_data: 'auto:' + draftId }, { text: '💳 Send Link', callback_data: 'paylink:' + draftId }, { text: '🪙 USDT', callback_data: 'usdtquote:' + draftId }]\n    ] }\n  },\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string') ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string') ? parsed.file_description.trim() : '',\n} };"
       },
       "typeVersion": 2
     },
@@ -2299,7 +2396,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// FR-2: parse the lead opener draft from Claude\nconst response = $input.item.json;\nconst bp = $('Build Lead Prompt').item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: {\n    messages: ['(empty Claude response - check API node)'],\n    notes: 'ERROR: could not extract text from Claude API response',\n    parse_status: 'extract_failed',\n    customer_phone: bp.leadPhone, customer_name: '', user_message: bp.leadText,\n    conversation_history: '', history_count: 0, is_lead: true,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n  } };\n}\nlet cleaned = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\nlet parsed; let status = 'ok';\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages array missing or empty');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: [raw], notes_for_zayn: '(JSON parse failed - plain text. ' + e.message + ')' };\n  status = 'fallback_plain_text';\n}\nconst messages = parsed.messages.slice(0, 4).map(m => String(m));\nreturn { json: {\n  messages: messages,\n  notes: parsed.notes_for_zayn || '(no notes)',\n  parse_status: status,\n  customer_phone: bp.leadPhone,\n  customer_name: '',\n  user_message: bp.leadText,\n  conversation_history: '',\n  history_count: 0,\n  is_lead: true,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : ''\n} };\n"
+        "jsCode": "// FR-2: parse the lead opener draft from Claude\nconst response = $input.item.json;\nconst bp = $('Build Lead Prompt').item.json;\nlet raw = '';\ntry { raw = response.content[0].text; } catch (e) {\n  return { json: {\n    messages: ['(empty Claude response - check API node)'],\n    notes: 'ERROR: could not extract text from Claude API response',\n    parse_status: 'extract_failed',\n    customer_phone: bp.leadPhone, customer_name: '', user_message: bp.leadText,\n    conversation_history: '', history_count: 0, is_lead: true,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : '',\n  } };\n}\nlet cleaned = (function(t){/*rjx*/ t=String(t||''); var m=t.match(/```(?:json)?\\s*([\\s\\S]*?)```/i); if(m&&m[1].trim()) return m[1].trim(); var i=t.indexOf('{'), j=t.lastIndexOf('}'); return (i>=0&&j>i)? t.slice(i,j+1).trim() : t.trim(); })(raw);\nlet parsed; let status = 'ok';\ntry {\n  parsed = JSON.parse(cleaned);\n  if (!Array.isArray(parsed.messages) || !parsed.messages.length) throw new Error('messages array missing or empty');\n} catch (e) {\n  const _rawLooksJson = /^\\s*[{\\[]/.test(raw);\n  parsed = _rawLooksJson\n    ? { messages: ['⚠️ Draft came back malformed (invalid JSON from the model) — tap 🔄 Regen for a clean draft.'], notes_for_zayn: 'parse fail (raw JSON hidden, len ' + raw.length + '): ' + e.message }\n    : { messages: ['⚠️ Draft came back malformed — tap 🔁 Regen for a clean draft.'], notes_for_zayn: '(JSON parse failed - plain text. ' + e.message + ')' };\n  status = 'fallback_plain_text';\n}\nconst messages = parsed.messages.slice(0, 4).map(m => String(m));\nreturn { json: {\n  messages: messages,\n  notes: parsed.notes_for_zayn || '(no notes)',\n  parse_status: status,\n  customer_phone: bp.leadPhone,\n  customer_name: '',\n  user_message: bp.leadText,\n  conversation_history: '',\n  history_count: 0,\n  is_lead: true,\n  should_send_file: !!(parsed && parsed.should_send_file === true),\n  file_key: (parsed && typeof parsed.file_key === 'string')\n    ? parsed.file_key.trim() : '',\n  file_description: (parsed && typeof parsed.file_description === 'string')\n    ? parsed.file_description.trim() : ''\n} };\n"
       },
       "typeVersion": 2
     },
@@ -5091,7 +5188,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n// Bridge now returns customer_name + notes_for_zayn — use them.\nconst custName = (fu.customer_name || '').trim();\nconst reasoning = (fu.notes_for_zayn || '').trim();\nconst displayName = _safeWho(custName, cid);\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '💡 *NUDGE DRAFT* — ' + displayName + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\n// Surface Hermes's reasoning so operator sees WHY this draft is the move.\nconst reasoningLine = reasoning ? ('\\n\\n📝 _' + reasoning + '_') : '';\nconst _qb = (fu.quality_badge||'').trim(); const text   = (_qb ? _qb + '\\n' : '') + header + body + reasoningLine;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: reasoning || ('Operator-triggered nudge from /review — label: ' + label),\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n  should_send_file: !!(fu && fu.should_send_file),\n  file_key: (fu && fu.file_key) || '',\n  file_description: (fu && fu.file_description) || '',\n};\n\n// BUG-FIX 2026-05-23: also push into staticData pendingQueue so Edit /\n// reply-with-feedback / Skip / Send all find the draft via the same\n// queue.find() path the customer-msg drafts use. Without this, pressing\n// Edit on a nudge card and replying with text falls through Route Text\n// Action's awaiting_edit lookup and produces '⚠️ Nothing sent'.\n// Phase C (Redis-migration): nudge persisted to Redis by 'Persist Nudge'.\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }],\n    [{ text: '💳 Send Link', callback_data: 'paylink:' + id }],\n      ...((fu && fu.should_send_file && fu.file_key) ? [[{ text: '📎 Send File ('+(fu.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
+        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// Build a [Draft nudge] card with full Send/Edit/Skip buttons. Mirrors\n// the Pipeline Hourly Sweep's Build Followup Card pattern so the same\n// downstream send chain handles it.\nconst fu = $('Hermes Draft Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\n\nconst cid    = pc.customer_id;\nconst label  = fu.label || 'WARM';\nconst draft  = (fu.draft_text || '').trim();\n// Bridge now returns customer_name + notes_for_zayn — use them.\nconst custName = (fu.customer_name || '').trim();\nconst reasoning = (fu.notes_for_zayn || '').trim();\nconst displayName = _safeWho(custName, cid);\n\nconst id    = Date.now() + '_' + Math.random().toString(36).slice(2, 7);\nconst isoNow = new Date().toISOString();\n\nconst header = '💡 *NUDGE DRAFT* — ' + displayName + '  (' + label.toLowerCase() + ')';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\n// Surface Hermes's reasoning so operator sees WHY this draft is the move.\nconst reasoningLine = reasoning ? ('\\n\\n📝 _' + reasoning + '_') : '';\nconst _qb = (fu.quality_badge||'').trim(); const text   = (_qb ? _qb + '\\n' : '') + header + body + reasoningLine;\n\nconst draftObj = {\n  id: id,\n  timestamp: isoNow,\n  customer_phone: cid,\n  customer_name: '',\n  customer_message: '',\n  conversation_history: '',\n  history_count: 0,\n  messages: [draft],\n  draft_text: draft,\n  messages_sent_count: 0,\n  notes: reasoning || ('Operator-triggered nudge from /review — label: ' + label),\n  telegram_message_id: null,\n  telegram_chat_id: 5532831477,\n  status: 'pending',\n  break_condition: { hit: false },\n  is_lead: false,\n  is_payment: false,\n  is_followup: true,\n  followup_silence_window: 'nudge_button',\n  followup_silence_hours: null,\n  followup_label: label,\n  should_send_file: !!(fu && fu.should_send_file),\n  file_key: (fu && fu.file_key) || '',\n  file_description: (fu && fu.file_description) || '',\n};\n\n// BUG-FIX 2026-05-23: also push into staticData pendingQueue so Edit /\n// reply-with-feedback / Skip / Send all find the draft via the same\n// queue.find() path the customer-msg drafts use. Without this, pressing\n// Edit on a nudge card and replying with text falls through Route Text\n// Action's awaiting_edit lookup and produces '⚠️ Nothing sent'.\n// Phase C (Redis-migration): nudge persisted to Redis by 'Persist Nudge'.\n\nconst reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }],\n    [{ text: '💳 Send Link', callback_data: 'paylink:' + id }, { text: '🪙 USDT', callback_data: 'usdtquote:' + id }],\n      ...((fu && fu.should_send_file && fu.file_key) ? [[{ text: '📎 Send File ('+(fu.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    draft: draftObj,\n    telegram_payload: { chat_id: 5532831477, text: text, reply_markup: reply_markup },\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n  }\n};"
       },
       "typeVersion": 2
     },
@@ -5431,7 +5528,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// Build the new card text + same inline keyboard for a regenerated followup.\nconst fu = $('Hermes Regen Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\n\nconst id    = d.id;\nconst cid   = d.customer_phone || pc.customer_id;\nconst label = fu.label || d.followup_label || 'WARM';\nconst draft = (fu.draft_text || '').trim();\n\nconst name = (fu.customer_name || d.customer_name || '').trim();\nconst who = _safeWho(name, cid);\nconst header = '💡 *NUDGE DRAFT* — ' + who + '  (' + label.toLowerCase() + ')  · regenerated';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\nconst _qb = (fu.quality_badge||'').trim(); const text   = (_qb ? _qb + '\\n' : '') + header + body;\n\nif (fu && fu.should_send_file && fu.file_key) {\n    (lines || []).push('📎 Suggested file: ' + fu.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }],\n    [{ text: '💳 Send Link', callback_data: 'paylink:' + id }],\n      ...((fu && fu.should_send_file && fu.file_key) ? [[{ text: '📎 Send File ('+(fu.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n    new_messages: [draft],\n    telegram_message_id: d.telegram_message_id,\n    telegram_chat_id: d.telegram_chat_id || 5532831477,\n    edit_payload: {\n      chat_id: d.telegram_chat_id || 5532831477,\n      message_id: d.telegram_message_id,\n      text: text,\n      parse_mode: 'Markdown',\n      reply_markup: reply_markup\n    }\n  }\n};"
+        "jsCode": "// identity display guard (2026-06-02): never show a raw <num>@lid.\nfunction _safeWho(name, cid){\n  cid = String(cid || ''); name = String(name || '').trim();\n  const isLid = cid.endsWith('@lid');\n  const digits = cid.replace(/@.*$/, '').replace(/\\D/g, '');\n  if (name) return (!isLid && digits) ? (name + ' (+' + digits + ')') : name;\n  if (!isLid && digits) return '+' + digits;\n  const l4 = digits.slice(-4);\n  return l4 ? ('WhatsApp lead \\u2022\\u2022' + l4) : 'WhatsApp lead';\n}\n// Build the new card text + same inline keyboard for a regenerated followup.\nconst fu = $('Hermes Regen Followup').item.json || {};\nconst pc = $('Parse Callback').item.json || {};\nconst d  = pc.draft || {};\n\nconst id    = d.id;\nconst cid   = d.customer_phone || pc.customer_id;\nconst label = fu.label || d.followup_label || 'WARM';\nconst draft = (fu.draft_text || '').trim();\n\nconst name = (fu.customer_name || d.customer_name || '').trim();\nconst who = _safeWho(name, cid);\nconst header = '💡 *NUDGE DRAFT* — ' + who + '  (' + label.toLowerCase() + ')  · regenerated';\nconst body   = '\\n\\n' + (draft || '⚠️ Hermes returned no draft — skip recommended.');\nconst _qb = (fu.quality_badge||'').trim(); const text   = (_qb ? _qb + '\\n' : '') + header + body;\n\nif (fu && fu.should_send_file && fu.file_key) {\n    (lines || []).push('📎 Suggested file: ' + fu.file_key);\n  }\n  const reply_markup = {\n  inline_keyboard: [\n    [{ text: '✅ Send', callback_data: 'send:' + id },\n     { text: '✏️ Edit', callback_data: 'edit:' + id }],\n    [{ text: '🔁 Regen', callback_data: 'regen:' + id },\n     { text: '❌ Skip',  callback_data: 'skip:' + id }],\n    [{ text: '💳 Send Link', callback_data: 'paylink:' + id }, { text: '🪙 USDT', callback_data: 'usdtquote:' + id }],\n      ...((fu && fu.should_send_file && fu.file_key) ? [[{ text: '📎 Send File ('+(fu.file_key)+')', callback_data: 'file:' + id }]] : [])\n  ]\n};\n\nreturn {\n  json: {\n    draft_id: id,\n    customer_id: cid,\n    label: label,\n    draft_text: draft,\n    new_messages: [draft],\n    telegram_message_id: d.telegram_message_id,\n    telegram_chat_id: d.telegram_chat_id || 5532831477,\n    edit_payload: {\n      chat_id: d.telegram_chat_id || 5532831477,\n      message_id: d.telegram_message_id,\n      text: text,\n      parse_mode: 'Markdown',\n      reply_markup: reply_markup\n    }\n  }\n};"
       },
       "typeVersion": 2
     },
@@ -5900,7 +5997,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// One node merges the two paylink paths (button click vs operator\n// text reply) into a single $json shape so downstream nodes don't\n// need cross-execution lookups like `$('Prep Paylink').item ? ...`.\n// In n8n, accessing .item on a node that didn't run in this branch\n// THROWS 'Node X hasn't been executed' — kills the chain at body\n// evaluation, so the WAHA send never fires and the customer never\n// receives the link.\n//\n// $json on THIS node = the Nomod call response (link_url, link_id,\n// amount, ok). Then try each upstream context source; whichever\n// actually ran provides the rest.\nconst nomod = $input.item.json || {};\nlet ctx = null;\ntry { ctx = $('Prep Paylink').item.json; } catch (e) { ctx = null; }\nif (!ctx) {\n  try { ctx = $('Build Paylink From Reply').item.json; } catch (e) { ctx = null; }\n}\nctx = ctx || {};\n// Pull the operator-facing draft text from staticData so we can\n// merge it WITH the payment link in the customer message (was:\n// payment link sent alone, without the LLM draft context).\n// Also pull the customer_name for operator card display.\nlet draftText = '';\nlet custName = '';\n// Phase C (Redis-migration): pull draft text + customer name from the\n// Redis draft (bridge get) instead of staticData.\ntry {\n  const _http = this.helpers.httpRequest.bind(this.helpers);\n  const r = await _http({ method: 'POST',\n    url: 'http://172.18.0.1:8788/queue',\n    headers: { 'Content-Type': 'application/json',\n      'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { action: 'get', draft_id: ctx.draft_id }, json: true, timeout: 8000 });\n  if (r && r.found && r.draft) {\n    draftText = r.draft.draft_text || '';\n    custName = r.draft.customer_name || '';\n  }\n} catch (e) {}\nreturn { json: {\n  ok: nomod.ok === true,\n  link_url: nomod.link_url || '',\n  link_id: nomod.link_id || '',\n  amount: nomod.amount || ctx.amount || 0,\n  booking_summary: nomod.booking_summary || '',\n  error: nomod.error || '',\n  draft_id: ctx.draft_id || '',\n  customer_id: ctx.customer_id || '',\n  customer_name: ctx.customer_name || '',\n  payment_summary: ctx.payment_summary || '',\n  chat_id: ctx.chat_id || 5532831477,\n  message_id: ctx.message_id || null,\n  admin_chat_id: ctx.admin_chat_id || 5532831477,\n  draft_text: draftText,\n  customer_name: custName\n} };"
+        "jsCode": "// One node merges the two paylink paths (button click vs operator\n// text reply) into a single $json shape so downstream nodes don't\n// need cross-execution lookups like `$('Prep Paylink').item ? ...`.\n// In n8n, accessing .item on a node that didn't run in this branch\n// THROWS 'Node X hasn't been executed' — kills the chain at body\n// evaluation, so the WAHA send never fires and the customer never\n// receives the link.\n//\n// $json on THIS node = the Nomod call response (link_url, link_id,\n// amount, ok). Then try each upstream context source; whichever\n// actually ran provides the rest.\nconst nomod = $input.item.json || {};\nlet ctx = null;\ntry { ctx = $('Prep Paylink').item.json; } catch (e) { ctx = null; }\nif (!ctx) {\n  try { ctx = $('Build Paylink From Reply').item.json; } catch (e) { ctx = null; }\n}\nctx = ctx || {};\nconst did = ctx.draft_id || nomod.draft_id || '';\n// Pull the operator-facing draft text from staticData so we can\n// merge it WITH the payment link in the customer message (was:\n// payment link sent alone, without the LLM draft context).\n// Also pull the customer_name for operator card display.\nlet draftText = '';\nlet custName = '';\n// Phase C (Redis-migration): pull draft text + customer name from the\n// Redis draft (bridge get) instead of staticData.\ntry {\n  const _http = this.helpers.httpRequest.bind(this.helpers);\n  const r = await _http({ method: 'POST',\n    url: 'http://172.18.0.1:8788/queue',\n    headers: { 'Content-Type': 'application/json',\n      'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n    body: { action: 'get', draft_id: did }, json: true, timeout: 8000 });\n  if (r && r.found && r.draft) {\n    draftText = r.draft.draft_text || '';\n    custName = r.draft.customer_name || '';\n  }\n} catch (e) {}\nreturn { json: {\n  ok: nomod.ok === true,\n  link_url: nomod.link_url || '',\n  link_id: nomod.link_id || '',\n  amount: nomod.amount || ctx.amount || 0,\n  booking_summary: nomod.booking_summary || '',\n  error: nomod.error || '',\n  draft_id: did,\n  customer_id: ctx.customer_id || nomod.customer_id || '',\n  customer_name: ctx.customer_name || '',\n  payment_summary: ctx.payment_summary || '',\n  chat_id: ctx.chat_id || 5532831477,\n  message_id: ctx.message_id || null,\n  admin_chat_id: ctx.admin_chat_id || 5532831477,\n  draft_text: draftText,\n  customer_name: custName || nomod.customer_name || ctx.customer_name || ''\n} };"
       },
       "typeVersion": 2
     },
@@ -7154,19 +7251,26 @@
       "typeVersion": 4.2
     },
     {
-      "parameters": {
-        "jsCode": "// Operator hit [🪙 USDT] on a draft card. Stamp rail=usdt on the draft so the\n// amount reply routes to /usdt-quote, mark awaiting_amount (reuses the paylink\n// amount-capture), then prompt for the ex-VAT price. Fail-open.\nconst pc = $('Parse Callback').item.json;\nconst entry = pc.draft || {};\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({ method: 'POST', url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}), json: true, timeout: 8000 });\n  } catch (e) { return null; }\n}\nlet conflict = null;\nconst aw = await bq('awaiting', { status: 'awaiting_amount', chat_id: 5532831477 });\nif (aw && aw.found && aw.draft && aw.draft.id !== pc.draft_id) conflict = aw.draft;\nawait bq('update', { draft_id: pc.draft_id, fields: { rail: 'usdt' } });\nconst cid = entry.customer_phone || pc.customer_id || '';\nconst name = entry.customer_name || '';\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  summary = [yacht, entry.dates || '', entry.party_size ? entry.party_size + ' guests' : ''].filter(Boolean).join(' · ') || 'Dubriani booking';\n}\nif (!conflict) await bq('mark', { draft_id: pc.draft_id, status: 'awaiting_amount' });\nreturn { json: { blocked: !!conflict, blocking_phone: conflict ? (conflict.customer_phone || 'unknown') : '',\n  draft_id: pc.draft_id, customer_id: cid, customer_name: name, payment_summary: summary,\n  chat_id: pc.chat_id, message_id: pc.message_id, admin_chat_id: 5532831477 } };\n"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
       "id": "usdtflow-prep-2026-06-18",
       "name": "Prep USDT",
+      "type": "n8n-nodes-base.code",
       "position": [
         5536,
         1800
-      ]
+      ],
+      "parameters": {
+        "jsCode": "// Operator hit [🪙 USDT] on a draft card. Stamp rail=usdt on the draft so the\n// amount reply routes to /usdt-quote, mark awaiting_amount (reuses the paylink\n// amount-capture), then prompt for the ex-VAT price. Fail-open.\nconst pc = $('Parse Callback').item.json;\nconst entry = pc.draft || {};\nconst _http = this.helpers.httpRequest.bind(this.helpers);\nasync function bq(action, extra) {\n  try {\n    return await _http({ method: 'POST', url: 'http://172.18.0.1:8788/queue',\n      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': $env.BRIDGE_TOKEN || '' },\n      body: Object.assign({ action: action }, extra || {}), json: true, timeout: 8000 });\n  } catch (e) { return null; }\n}\nlet conflict = null;\nconst aw = await bq('awaiting', { status: 'awaiting_amount', chat_id: 5532831477 });\nif (aw && aw.found && aw.draft && aw.draft.id !== pc.draft_id) conflict = aw.draft;\nawait bq('update', { draft_id: pc.draft_id, fields: { rail: 'usdt' } });\nconst cid = entry.customer_phone || pc.customer_id || '';\nconst name = entry.customer_name || '';\nlet summary = entry.payment_summary || '';\nif (!summary) {\n  const yacht = (entry.yachts || '').split(',')[0].trim();\n  summary = [yacht, entry.dates || '', entry.party_size ? entry.party_size + ' guests' : ''].filter(Boolean).join(' · ') || 'Dubriani booking';\n}\nif (!conflict) await bq('mark', { draft_id: pc.draft_id, status: 'awaiting_amount' });\nreturn { json: { blocked: !!conflict, blocking_phone: conflict ? (conflict.customer_phone || 'unknown') : '',\n  draft_id: pc.draft_id, customer_id: cid, customer_name: name, payment_summary: summary,\n  chat_id: pc.chat_id, message_id: pc.message_id, admin_chat_id: 5532831477 } };\n"
+      },
+      "typeVersion": 2
     },
     {
+      "id": "usdtflow-prompt-2026-06-18",
+      "name": "Edit Telegram (USDT Prompt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        6208,
+        1920
+      ],
       "parameters": {
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
         "method": "POST",
@@ -7184,16 +7288,16 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-prompt-2026-06-18",
-      "name": "Edit Telegram (USDT Prompt)",
-      "position": [
-        6208,
-        1920
-      ]
+      "typeVersion": 4.2
     },
     {
+      "id": "usdtflow-callquote-2026-06-18",
+      "name": "Call USDT Quote",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5760,
+        2080
+      ],
       "parameters": {
         "url": "http://172.18.0.1:8788/usdt-quote",
         "method": "POST",
@@ -7213,22 +7317,22 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-callquote-2026-06-18",
-      "name": "Call USDT Quote",
-      "position": [
-        5760,
-        2080
-      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "typeVersion": 4.2
     },
     {
+      "id": "usdtflow-callissue-2026-06-18",
+      "name": "Call USDT Issue",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5460,
+        1820
+      ],
       "parameters": {
         "url": "http://172.18.0.1:8788/usdt-issue",
         "method": "POST",
@@ -7248,22 +7352,22 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-callissue-2026-06-18",
-      "name": "Call USDT Issue",
-      "position": [
-        5460,
-        1820
-      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "typeVersion": 4.2
     },
     {
+      "id": "usdtflow-cancel-2026-06-18",
+      "name": "USDT Cancel Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5680,
+        1820
+      ],
       "parameters": {
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
         "method": "POST",
@@ -7281,16 +7385,16 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-cancel-2026-06-18",
-      "name": "USDT Cancel Reply",
-      "position": [
-        5680,
-        1820
-      ]
+      "typeVersion": 4.2
     },
     {
+      "id": "usdtflow-railif-2026-06-18",
+      "name": "Rail USDT?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        5716,
+        1900
+      ],
       "parameters": {
         "options": {},
         "conditions": {
@@ -7314,29 +7418,29 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "id": "usdtflow-railif-2026-06-18",
-      "name": "Rail USDT?",
-      "position": [
-        5716,
-        1900
-      ]
+      "typeVersion": 2
     },
     {
-      "parameters": {
-        "jsCode": "const pc = $('Parse Callback').item.json;\nconst _http = this.helpers.httpRequest.bind(this.helpers);\ntry { await _http({ method:'POST', url:'http://172.18.0.1:8788/queue', headers:{ 'Content-Type':'application/json', 'X-Bridge-Token':$env.BRIDGE_TOKEN||'' }, body:{ action:'mark', draft_id:pc.draft_id, status:'awaiting_usdt_edit' }, json:true, timeout:8000 }); } catch(e){}\nreturn { json: { draft_id: pc.draft_id } };"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
       "id": "usdtflow-prepedit-2026-06-18",
       "name": "Prep USDT Edit",
+      "type": "n8n-nodes-base.code",
       "position": [
         5900,
         1820
-      ]
+      ],
+      "parameters": {
+        "jsCode": "const pc = $('Parse Callback').item.json;\nconst _http = this.helpers.httpRequest.bind(this.helpers);\ntry { await _http({ method:'POST', url:'http://172.18.0.1:8788/queue', headers:{ 'Content-Type':'application/json', 'X-Bridge-Token':$env.BRIDGE_TOKEN||'' }, body:{ action:'mark', draft_id:pc.draft_id, status:'awaiting_usdt_edit' }, json:true, timeout:8000 }); } catch(e){}\nreturn { json: { draft_id: pc.draft_id } };"
+      },
+      "typeVersion": 2
     },
     {
+      "id": "usdtflow-editprompt-2026-06-18",
+      "name": "Edit Telegram (USDT Edit Prompt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        6120,
+        1820
+      ],
       "parameters": {
         "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
         "method": "POST",
@@ -7354,16 +7458,16 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-editprompt-2026-06-18",
-      "name": "Edit Telegram (USDT Edit Prompt)",
-      "position": [
-        6120,
-        1820
-      ]
+      "typeVersion": 4.2
     },
     {
+      "id": "usdtflow-calledit-2026-06-18",
+      "name": "Call USDT Edit",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5896,
+        2080
+      ],
       "parameters": {
         "url": "http://172.18.0.1:8788/usdt-edit",
         "method": "POST",
@@ -7383,20 +7487,272 @@
           ]
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "id": "usdtflow-calledit-2026-06-18",
-      "name": "Call USDT Edit",
-      "position": [
-        5896,
-        2080
-      ],
       "credentials": {
         "httpHeaderAuth": {
           "id": "IgIcvPoibuAayVDx",
           "name": "Hermes Bridge"
         }
-      }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "cardprev-if-2026-06-18",
+      "name": "Card Preview?",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        5500,
+        2000
+      ],
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cardprev-flag-cond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $env.CARD_PREVIEW_ENABLED }}",
+              "rightValue": "1"
+            }
+          ]
+        }
+      },
+      "typeVersion": 2
+    },
+    {
+      "id": "cardprev-callquote-2026-06-18",
+      "name": "Call Paylink Quote",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5320,
+        2080
+      ],
+      "parameters": {
+        "url": "http://172.18.0.1:8788/paylink-quote",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($json.customer_id) }}, \"draft_id\": {{ JSON.stringify($json.draft_id) }}, \"amount\": {{ Number($json.amount) || 0 }}, \"customer_name\": {{ JSON.stringify($json.customer_name || \"\") }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "cardprev-callissue-2026-06-18",
+      "name": "Call Paylink Issue",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5260,
+        1820
+      ],
+      "parameters": {
+        "url": "http://172.18.0.1:8788/paylink-issue",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"draft_id\": {{ JSON.stringify($('Parse Callback').item.json.draft_id) }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "cardprev-editstub-2026-06-18",
+      "name": "Paylink Edit Stub",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5260,
+        2000
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"callback_query_id\": {{ JSON.stringify($('Parse Callback').item.json.callback_query_id) }}, \"text\": \"Inline edit not wired yet - tap Cancel and re-quote, or change the amount.\", \"show_alert\": true }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "cardprev-cancel-2026-06-18",
+      "name": "Paylink Cancel Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5060,
+        1820
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"chat_id\": {{ $('Route Update Type').item.json.callback_query.message.chat.id }}, \"message_id\": {{ $('Route Update Type').item.json.callback_query.message.message_id }}, \"text\": \"Card paylink cancelled.\" }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "setyacht-callresolve-2026-06-18",
+      "name": "Call Resolve Yacht",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5500,
+        2260
+      ],
+      "parameters": {
+        "url": "http://172.18.0.1:8788/resolve-yacht",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"customer_id\": {{ JSON.stringify($('Parse Callback').item.json.customer_id) }}, \"idx\": {{ Number(($('Route Update Type').item.json.callback_query.data || '').split(':')[2]) }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "IgIcvPoibuAayVDx",
+          "name": "Hermes Bridge"
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "pledit-prep-2026-06-18",
+      "name": "Prep Paylink Edit",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        5320,
+        2160
+      ],
+      "parameters": {
+        "jsCode": "const pc = $('Parse Callback').item.json;\nconst _http = this.helpers.httpRequest.bind(this.helpers);\ntry { await _http({ method:'POST', url:'http://172.18.0.1:8788/queue', headers:{ 'Content-Type':'application/json', 'X-Bridge-Token':$env.BRIDGE_TOKEN||'' }, body:{ action:'mark', draft_id:pc.draft_id, status:'awaiting_usdt_edit' }, json:true, timeout:8000 }); } catch(e){}\nreturn { json: { draft_id: pc.draft_id } };"
+      },
+      "typeVersion": 2
+    },
+    {
+      "id": "pledit-prompt-2026-06-18",
+      "name": "Edit Telegram (Paylink Edit Prompt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5540,
+        2160
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"chat_id\": {{ $('Route Update Type').item.json.callback_query.message.chat.id }}, \"message_id\": {{ $('Route Update Type').item.json.callback_query.message.message_id }}, \"text\": \"✏️ Type your changes to the invoice line items — e.g. 'set yacht to Bliss', 'add catering 500', 'fishing charter 4h'. Reply here and I will re-show the preview to verify.\" }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "typeVersion": 4.2
+    },
+    {
+      "id": "usdtflow-issuereply-2026-06-18",
+      "name": "USDT Issue Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        5680,
+        1700
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "method": "POST",
+        "options": {},
+        "jsonBody": "={ \"chat_id\": {{ $('Route Update Type').item.json.callback_query.message.chat.id }}, \"message_id\": {{ $('Route Update Type').item.json.callback_query.message.message_id }}, \"text\": {{ JSON.stringify($json.telegram_text || \"🪙 USDT proforma + payment details sent ✅\") }} }",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "typeVersion": 4.2
     }
   ],
   "name": "Dubriani Phase 1B — WhatsApp + Telegram Approval",
@@ -21376,6 +21732,34 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Call Paylink Issue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prep Paylink Edit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Paylink Cancel Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Resolve Yacht",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -23244,7 +23628,7 @@
         ],
         [
           {
-            "node": "Call Nomod (Reply)",
+            "node": "Card Preview?",
             "type": "main",
             "index": 0
           }
@@ -23256,6 +23640,57 @@
         [
           {
             "node": "Edit Telegram (USDT Edit Prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Card Preview?": {
+      "main": [
+        [
+          {
+            "node": "Call Paylink Quote",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Nomod (Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Paylink Issue": {
+      "main": [
+        [
+          {
+            "node": "Unify Paylink Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Paylink Edit": {
+      "main": [
+        [
+          {
+            "node": "Edit Telegram (Paylink Edit Prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call USDT Issue": {
+      "main": [
+        [
+          {
+            "node": "USDT Issue Reply",
             "type": "main",
             "index": 0
           }

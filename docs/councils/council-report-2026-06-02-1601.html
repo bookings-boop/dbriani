@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Council — Drafting in n8n vs the Bridge</title>
+<style>
+  :root{
+    --ink:#1d2430; --muted:#5b6678; --line:#e4e8ef; --bg:#f7f8fb; --card:#ffffff;
+    --contrarian:#c0392b; --firstprin:#7d3cc7; --expansion:#1f8a4c; --outsider:#1b7fb8; --executor:#d98a00;
+    --accent:#2a6df4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55;font-size:16px}
+  .wrap{max-width:880px;margin:0 auto;padding:40px 24px 80px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:28px}
+  .kicker{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  h1{font-size:26px;line-height:1.2;margin:8px 0 6px}
+  .sub{color:var(--muted);font-size:14px}
+  .qbox{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:22px 0;
+    box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  .qbox h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+  .qbox p{margin:8px 0;font-size:15px}
+  .qbox .opt{font-size:14px;color:var(--muted)}
+  .verdict{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--accent);
+    border-radius:12px;padding:8px 26px 22px;margin:26px 0;box-shadow:0 2px 10px rgba(20,30,50,.06)}
+  .verdict h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-top:20px;margin-bottom:6px}
+  .verdict h2:first-of-type{margin-top:14px}
+  .verdict p{font-size:15px;margin:8px 0}
+  .verdict ol,.verdict ul{font-size:15px;padding-left:20px;margin:8px 0}
+  .verdict li{margin:6px 0}
+  .badge{display:inline-block;background:#eef3ff;color:var(--accent);border:1px solid #d3e0ff;
+    border-radius:999px;padding:3px 11px;font-size:12px;font-weight:600;margin-bottom:4px}
+  .tldr{background:#0f1b33;color:#eaf0ff;border-radius:12px;padding:18px 22px;margin:18px 0 4px}
+  .tldr b{color:#fff}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:10px 0 4px}
+  @media(max-width:640px){.grid{grid-template-columns:1fr}}
+  .cell{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .cell h3{margin:0 0 8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .cell ul{margin:0;padding-left:18px;font-size:14px}
+  .cell li{margin:5px 0}
+  .spectrum{display:flex;align-items:stretch;gap:0;margin:14px 0;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+  .seg{flex:1;padding:12px 12px;font-size:12.5px;color:#fff;text-align:center}
+  .seg b{display:block;font-size:13px;margin-bottom:3px}
+  .seg.stay{background:#c0392b}
+  .seg.hybrid{background:#5b8def}
+  .seg.allin{background:#1f8a4c}
+  .pos{font-size:11px;opacity:.92;margin-top:3px}
+  details{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:10px 0;padding:0 16px}
+  details[open]{padding-bottom:14px}
+  summary{cursor:pointer;padding:14px 0;font-weight:600;font-size:15px;list-style:none;display:flex;align-items:center;gap:10px}
+  summary::-webkit-details-marker{display:none}
+  summary .dot{width:10px;height:10px;border-radius:50%;flex:none}
+  summary .role{color:var(--muted);font-weight:500;font-size:13px;margin-left:auto}
+  details p{font-size:14.5px;color:#2a3344;margin:4px 0 2px}
+  .d-contrarian .dot{background:var(--contrarian)} .d-firstprin .dot{background:var(--firstprin)}
+  .d-expansion .dot{background:var(--expansion)} .d-outsider .dot{background:var(--outsider)}
+  .d-executor .dot{background:var(--executor)}
+  .review p{font-size:14px;margin:6px 0}
+  .review b{color:var(--ink)}
+  .section-label{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:34px 0 6px}
+  footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+  .warn{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px 16px;font-size:13.5px;color:#7c4a03;margin:10px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="kicker">LLM Council · Architecture Decision</div>
+  <h1>Drafting in n8n vs the Bridge</h1>
+  <div class="sub">Hermes / Dubriani — live WhatsApp yacht-charter booking system · 5 advisors → anonymized peer review → chairman synthesis · 2026-06-02</div>
+</header>
+
+<div class="qbox">
+  <h2>The question put to the council</h2>
+  <p>Should the <b>main message-drafting</b> (first draft + REFINE + REGEN) be moved out of the n8n workflow and into the Python bridge — stay in n8n — or go hybrid?</p>
+  <p class="opt"><b>A — Consolidate</b> drafting into the bridge &nbsp;·&nbsp; <b>B — Keep</b> it in n8n (status quo) &nbsp;·&nbsp; <b>C — Hybrid</b>: n8n orchestrates but calls one thin bridge <code>/draft</code> endpoint so the prompt + catalog + NO_INVENT live in exactly one place.</p>
+  <p class="opt">Context: catalog currently duplicated across a ~70KB n8n prompt node + the bridge's <code>system-prompt.md</code> (hand-synced). Recurring problem: drafter invents off-catalog prices/specs. Bridge has working draft code + pytest + git; n8n has no test harness. 2-vCPU box, load-sensitive. Gold-conversation retrieval designed-but-unbuilt (bridge-side). One-operator team, live revenue path, human approves every draft.</p>
+</div>
+
+<div class="badge">CHAIRMAN'S VERDICT</div>
+<div class="tldr">
+  <b>Validator first, then the reversible flagged endpoint, then retrieval.</b> The majority answer (consolidate to a thin <code>/draft</code> endpoint) is the right architecture — but the council was solving the <i>stated</i> problem (fabricated prices) only by assumption. Build a programmatic catalog validator (cheap, curative, also fixes the rubber-stamp approval gate), <i>then</i> migrate via the Executor's flag-gated, load-railed, first-draft-only plan — not the Expansionist's all-in move. Reject the claim that relocation "kills hallucination at the root."
+</div>
+
+<div class="verdict">
+
+<h2>Where the Council Agrees</h2>
+<p>Four of five land on a thin-endpoint / consolidation answer, and the diagnosis is near-unanimous: a catalog living in two hand-synced places is structurally rotten, and NO_INVENT buried in a 70KB blob is low-salience. The real convergence is narrow: <b>put prompt + catalog + NO_INVENT in one artifact the bridge owns, expose it as a <code>/draft</code> endpoint, and do not move 32 nodes of orchestration onto the fragile box.</b></p>
+<div class="warn"><b>⚠ Treat this consensus with suspicion.</b> Every reviewer independently flagged "two copies → drift → hallucination → consolidate" as a <i>shared story, not evidence</i>. A model fabricates "375 AED fine dining" perfectly well from a single flawless catalog — fabrication is a generation behavior, not only a sync artifact. Consolidation is correct housekeeping; the council has no data that it touches the recurring symptom at all.</div>
+
+<h2>Where the Council Clashes</h2>
+<p>A genuine three-way split on how to weigh compounding upside against blast radius on a fragile one-operator system:</p>
+<ul>
+  <li><b>Expansionist (all-in A):</b> move everything; the prize is gold-retrieval grounding drafts in real booked conversations + the gate loop wrapping every draft "for free." Dismisses the box: "drafting is I/O-bound, you're awaiting."</li>
+  <li><b>Contrarian (STAY unless…):</b> days of surgery on a live revenue path to fix drift a 10-line CI diff also kills; and a naive hybrid puts a multi-call synchronous gate loop on a 2-vCPU box that already melted + already timed out once. Only proceed with a price validator + async/poll + concurrency cap + n8n fallback built first.</li>
+  <li><b>Middle (First Principles + Executor + Outsider):</b> one artifact, thin endpoint, keep orchestration in n8n — with the Executor adding the rails the Expansionist waved off.</li>
+</ul>
+<p>The Expansionist's "I/O-bound" claim is the weakest link — the gate loop is 2-3 sequential calls that serialize against payments/scoring/identity-merge on two cores. The Contrarian's load analysis is correct; his "STAY" is too conservative <i>only because</i> the Executor shows the migration can be made reversible and load-safe.</p>
+
+<h2>Blind Spots the Council Caught</h2>
+<p>The most valuable findings emerged only in peer review:</p>
+<ol>
+  <li><b>No invent-rate baseline — nothing is logged.</b> No labeled set of fabricated-price incidents, no measured rate. Any fix ships blind; "better" is unfalsifiable.</li>
+  <li><b>Nobody diffed the two catalogs.</b> The whole consensus rests on "drift causes the hallucinations," yet no one ran the cheapest test — diff the n8n Build Prompt node against <code>system-prompt.md</code> — to confirm drift is even happening.</li>
+  <li><b>REFINE/REGEN co-migration risk.</b> REFINE edits an operator-<i>approved</i> draft; move it carelessly and you can silently re-invent a price a human already blessed.</li>
+  <li><b>The human approval gate is itself failing.</b> A human approves every draft yet invented prices ship often enough to be "the recurring problem." No source-of-truth refactor fixes a reviewer who doesn't catch "375 fine dining." Surface a validator verdict <i>to the human</i>.</li>
+  <li><b>A programmatic validator beats relocation for the actual problem.</b> A regex/lookup checking every price/spec/yacht-name against the 104-entry catalog and hard-rejecting unknowns stops fabrication <i>regardless of where the prompt runs</i>. It exists in neither place today. (The Contrarian's lone-dissenter point — three reviewers said he broke ranks correctly.)</li>
+</ol>
+
+<h2>The Recommendation</h2>
+<p><b>Do not start with the migration. Start with measurement and the validator — then do the Executor's flagged thin-endpoint consolidation, not the Expansionist's all-in move.</b> The tie-breaking variable is <b>what a catalog diff and an invent-rate log actually show</b>; until then every architecture choice bets on an unconfirmed diagnosis.</p>
+<ol>
+  <li><b>The validator is the highest-leverage fix and nearly free.</b> A post-draft check (every price/spec/yacht-name must exist in the 104-entry catalog, else hard-reject + force regen). ~A day in the bridge's existing pytest harness, and its verdict can be surfaced to the human approver — fixing the rubber-stamp gate at the same time. The actual cure for the actual disease.</li>
+  <li><b>Then consolidate via the Executor's plan.</b> One artifact (<code>system-prompt.md</code>), kill the 70KB duplicate, expose <code>_anthropic_draft</code> + <code>_gate_loop</code> behind a flagged <code>/draft</code> endpoint, <b>first-draft only</b>, <code>DRAFT_VIA_BRIDGE</code> env flag, watch ten live drafts, rollback = flip flag false. Load rails are mandatory: in-process semaphore (max 1-2 concurrent gate loops), hard ~25s timeout returning a typed "retry" that <b>never sends empty</b>, fallback to the n8n draft path.</li>
+  <li><b>REFINE/REGEN migrate later</b>, same flag pattern, only after first-draft proves out — with an explicit check that REFINE can't re-invent a price in an already-approved draft.</li>
+  <li><b>Reject the Expansionist's framing</b> that relocation "kills hallucination at the root" and that the box is a non-issue. Retrieval is a real prize and the bridge is its right host — but it's step N, behind the same validator and load rails.</li>
+</ol>
+
+<h2>The One Thing to Do First</h2>
+<p>Diff the two catalogs right now — the n8n "Build Prompt" node against the bridge's <code>system-prompt.md</code> — and grep your logs / approved-draft history for the specific fabricated values (e.g. "375") to get a first invent-rate count. One command's worth of output decides everything downstream: if they've drifted, consolidation is urgent; if they're identical, the model is fabricating from a clean source and the <b>validator — not the migration — is the whole ballgame.</b></p>
+
+</div>
+
+<div class="section-label">Advisor alignment</div>
+<div class="spectrum">
+  <div class="seg stay"><b>STAY / hold</b>Contrarian<div class="pos">"don't migrate to fix drift you can CI-check"</div></div>
+  <div class="seg hybrid"><b>HYBRID · thin endpoint</b>First Principles · Outsider · Executor<div class="pos">one artifact, n8n keeps orchestration</div></div>
+  <div class="seg allin"><b>ALL-IN A</b>Expansionist<div class="pos">move everything → retrieval + free gating</div></div>
+</div>
+
+<div class="grid">
+  <div class="cell">
+    <h3>Earned agreement</h3>
+    <ul>
+      <li>Catalog-in-two-places is structurally rotten</li>
+      <li>NO_INVENT buried in 70KB = low salience</li>
+      <li>Don't move orchestration onto the 2-vCPU box</li>
+      <li>One prompt artifact, bridge-owned, exposed as <code>/draft</code></li>
+    </ul>
+  </div>
+  <div class="cell">
+    <h3>Suspect / unverified</h3>
+    <ul>
+      <li>"Drift → hallucination → consolidate" (no data)</li>
+      <li>"Relocation kills hallucination at the root"</li>
+      <li>"Drafting is I/O-bound, box is fine" (gate loop = 2-3 calls)</li>
+      <li>That consolidation alone touches the recurring symptom</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section-label">The five advisors (full responses)</div>
+
+<details class="d-contrarian">
+  <summary><span class="dot"></span>The Contrarian<span class="role">downside / what fails</span></summary>
+  <p>Option C (Hybrid) is the only defensible answer — but first kill A. The hallucination is your bleeding wound, not architecture elegance: the model invents the same "375 AED fine dining" whether the prompt ships from a jsCode node or a <code>/draft</code> endpoint. The real fix is a programmatic post-draft validator that regexes every price/spec/yacht-name against the 104-entry catalog and hard-rejects unknowns — and you have it in neither place today. Don't let a migration masquerade as a quality fix. The trap in C: a synchronous Anthropic call behind <code>/draft</code> on a 2-vCPU box that already melted and ate one Anthropic timeout; a draft + ≥8 gate loop is 3-5 sequential calls serializing against payments/scoring/identity-merge. Mitigation must be explicit: async job + poll, hard concurrency cap, timeout-fallback returning the n8n draft. Payback: one operator, live revenue path, and the win is "one catalog instead of two you verified in-sync today anyway" — days of surgery for drift a 10-line CI diff also kills. Do C only if you build the validator + async/fallback first. Otherwise STAY.</p>
+</details>
+
+<details class="d-firstprin">
+  <summary><span class="dot"></span>The First Principles Thinker<span class="role">reframe the problem</span></summary>
+  <p>Drafting is not the problem. Drift is. The system proved the cause today: catalog + NO_INVENT live in two places, hand-verified in sync — and "verified in sync today" admits nothing structurally keeps them in sync. You're one busy week from a silent fork, and the failure mode is exactly the recurring symptom. Hallucination here isn't random; it's the model reading a 70KB blob where NO_INVENT is buried at low salience. The real question isn't "where should drafting run," it's "where does the single source of truth live, and what reads it." The answer collapses: ONE prompt artifact, and everything that drafts or scores reads it. That makes B indefensible. Between A and hybrid: you don't need to move orchestration, retry logic, Telegram cards, or 32 nodes onto a load-sensitive box. The bridge already owns <code>system-prompt.md</code> and <code>_anthropic_draft</code> — expose exactly that as a thin <code>/draft</code> endpoint. n8n keeps orchestrating; the 70KB node dies; the catalog exists once; the unbuilt retrieval feature now has a host.</p>
+</details>
+
+<details class="d-expansion">
+  <summary><span class="dot"></span>The Expansionist<span class="role">upside / what compounds</span></summary>
+  <p>Move it into the bridge (A) and you stop running a 70KB string through a jsCode node and start running a real software asset. The big unlock is gold-conversation retrieval — designed, bridge-side, structurally impossible to feed the n8n drafter today. The moment drafting lives in the bridge, retrieval plugs into <code>_anthropic_draft</code>; grounding every first-draft in real past <i>booked</i> conversations kills off-catalog hallucination at the root via live exemplars of correct pricing. Conversion follows grounding. Second unlock: <code>_gate_loop</code> + <code>_anthropic_score</code> wrap the MAIN draft for free — auto-regen-until-quality on every message. Third: one prompt, git-versioned, pytest-covered; A/B prompts, per-yacht upsell, multilingual, price-feed auto-sync all ship as tested Python diffs instead of manual API PUTs against an unversioned node. Hybrid leaves drafting split across two runtimes forever; retrieval/gating stays a reach-around. Go A. The box is 2-vCPU but drafting is I/O-bound on the Anthropic call — you're awaiting, not CPU-burning.</p>
+</details>
+
+<details class="d-outsider">
+  <summary><span class="dot"></span>The Outsider<span class="role">curse-of-knowledge check</span></summary>
+  <p>The catalog living in two places, hand-synced, is the thing that jumps out. A 70,000-character prompt with "don't invent things" buried in it, plus a parallel copy of 104 prices in a Python file — two copies of the same truth maintained by one person by hand. That's a guarantee they drift, and "the AI invents a price" is exactly what drift looks like; I'd bet some "hallucinations" are just the two copies disagreeing. Why does the catalog exist twice at all? One source of truth isn't an architecture debate, it's hygiene. Every asset lives Python-side except the drafting itself — keeping drafting in the visual tool looks like inertia, not a decision. One thing nobody says out loud: a human approves every draft, yet the AI still ships invented prices often enough to be "the recurring problem" — your reviewer is rubber-stamping fake numbers. And the dumb question: why is the entire 104-item catalog in the prompt instead of looked up for the specific boat being discussed?</p>
+</details>
+
+<details class="d-executor">
+  <summary><span class="dot"></span>The Executor<span class="role">Monday-morning path · ★ rated strongest by all 5 reviewers</span></summary>
+  <p>Move drafting into the bridge (A). Monday: do NOT touch n8n. Add a <code>/draft</code> endpoint wrapping the EXISTING <code>_anthropic_draft</code> + <code>_gate_loop</code> you already run for the fast-Draft button — you're exposing production code, not writing new code. Write the pytest first (empty-draft, off-catalog-price assertion, timeout path). Ship behind a flag: <code>DRAFT_VIA_BRIDGE</code> env var read by the ONE n8n node that calls Anthropic. true → POST to <code>/draft</code>; false → existing 70KB path untouched. First-draft ONLY; REFINE/REGEN stay in n8n day one. Flip the flag, watch ten live drafts, flip back if anything smells wrong. Rollback = set flag false; zero n8n changes to the fallback path. Real cost isn't the endpoint (an afternoon) — it's the 2-vCPU box: the gate loop fires 2-3 Anthropic calls; under concurrent leads that's the load that killed you before. Mitigate: in-process semaphore (max 1-2 concurrent), hard 25s timeout returning a typed "retry," never an empty send. NO_INVENT win is free: kill the duplicate, catalog only in <code>system-prompt.md</code>, NO_INVENT at the top. REFINE/REGEN migrate next week, same pattern.</p>
+</details>
+
+<div class="section-label">Peer-review highlights</div>
+<details open class="review">
+  <summary><span class="dot" style="background:var(--accent)"></span>What the 5 anonymous reviewers found</summary>
+  <p><b>Unanimous strongest:</b> all five named the Executor — the only response that turns the decision into a reversible, load-aware, falsifiable plan (flag-gated, first-draft only, rollback = flip a bool, explicit rails).</p>
+  <p><b>Unanimous biggest blind spot:</b> the Expansionist — sells migration as a hallucination cure and waves off the 2-vCPU load ("I/O-bound, you're awaiting") when the gate loop is 2-3 serialized calls on a box that already melted/timed out. Most ambitious, least operationally honest.</p>
+  <p><b>What all five advisors missed (caught in review):</b> no invent-rate baseline / nothing logged; nobody diffed the two catalogs to confirm drift is even the cause; REFINE edits an operator-approved draft (co-migration risk); the human approval gate is itself rubber-stamping fake prices; a programmatic validator beats relocation for the stated problem.</p>
+  <p><b>Agreement not to trust:</b> "two copies → drift → hallucination → therefore consolidate." A satisfying shared narrative, but the model can fabricate from a single perfectly-synced catalog. Only the Contrarian broke ranks correctly — the validator, not relocation, is the actual fix.</p>
+</details>
+
+<footer>
+  Counciled: <b>Drafting in n8n vs the bridge</b> (Hermes/Dubriani Phase 1B workflow, n8n id <code>azPIy9OcDwiPV5uY</code>). &nbsp;·&nbsp; 5 advisors → 5 anonymized peer reviewers → 1 chairman. &nbsp;·&nbsp; Generated 2026-06-02 16:01 +04.
+  <br>Note: the council ran five instances of the same base model with different thinking-style prompts — not five different models. Unanimity (e.g. the "drift" diagnosis) was treated with suspicion, not as high confidence. Full transcript: <code>council-transcript-2026-06-02-1601.md</code>.
+</footer>
+
+</div>
+</body>
+</html>

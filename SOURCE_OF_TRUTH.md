@@ -1,5 +1,14 @@
 # Source of Truth — Data Ownership Law
 
+> **Code-repo provenance (2026-06-18):** the live box `~/hermes-bridge` on the EC2 is the
+> **source of truth for bridge CODE** (all live commits land there first, via on-box git +
+> direct edits + n8n DB changes). The off-box git remote (GitHub `bookings-boop/hermes-bridge`,
+> private) is the **backup**. The Mac working copies — `projects/dubriani-hermes-bridge` (a clone)
+> and this umbrella repo's `hermes-bridge/` snapshot — are **conformed FROM the box, never pushed
+> TO it**. The live n8n workflow (`azPIy9OcDwiPV5uY`, 225 nodes) is the source of truth for the
+> workflow; `workflows/phase-1b-telegram.json` here is a re-export/backup of it. This supersedes
+> any earlier wording that implied a repo was the source of truth for code.
+
 This document establishes, as explicit law, **one owner per data type** for the Hermes
 system. For each data category it states the single **writer of record** (the store —
 and the mechanism — that is allowed to create/update that data), which stores may
